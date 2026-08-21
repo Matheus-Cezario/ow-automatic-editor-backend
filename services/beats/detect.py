@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from owcore.audio import peaks_para, read_wav, waveform
 from owcore.config import get_settings
 from owcore.models import BeatGrid
 
@@ -47,16 +47,6 @@ def _decode_to_wav(src: Path, dest: Path) -> Path:
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg nao decodificou a musica: {proc.stderr[-500:]}")
     return dest
-
-
-def _read_wav(path: Path) -> tuple[np.ndarray, int]:
-    with wave.open(str(path), "rb") as w:
-        sr, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
-        raw = w.readframes(w.getnframes())
-    data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    if ch > 1:
-        data = data.reshape(-1, ch).mean(axis=1)
-    return data, sr
 
 
 # ------------------------------ fallback numpy -------------------------------
@@ -114,33 +104,6 @@ class TrackAnalysis:
     peaks: list[float]
 
 
-#: Quantos picos por segundo de musica a forma de onda guarda. 40 e o
-#: suficiente para o desenho parecer a musica num celular; guardar a onda em
-#: resolucao de amostra seria mandar o audio inteiro em JSON.
-PEAKS_PER_S = 40
-MAX_PEAKS = 6000
-
-
-def _waveform(data: np.ndarray, n: int) -> list[float]:
-    """Envelope em `n` pontos, normalizado pelo pico da musica.
-
-    Normalizar pelo maximo, e nao por um valor absoluto, e o que faz uma musica
-    gravada baixo desenhar igual a uma gravada alta -- o desenho serve para
-    achar o refrao, nao para medir volume.
-    """
-    if data.size == 0 or n <= 0:
-        return []
-    n = min(n, data.size)
-    corte = (data.size // n) * n
-    if corte == 0:
-        return []
-    blocos = np.abs(data[:corte]).reshape(n, -1).max(axis=1)
-    topo = float(blocos.max())
-    if topo <= 0:
-        return [0.0] * n
-    return [round(float(v), 3) for v in (blocos / topo)]
-
-
 def analyze_track(src: Path, work_dir: Path) -> TrackAnalysis:
     """Analise completa da musica: batidas, duracao e forma de onda.
 
@@ -149,21 +112,20 @@ def analyze_track(src: Path, work_dir: Path) -> TrackAnalysis:
     serve as tres coisas.
     """
     wav = _decode_to_wav(Path(src), Path(work_dir) / "track.wav")
-    data, sr = _read_wav(wav)
+    data, sr = read_wav(wav)
     duration = data.size / sr if sr else 0.0
     if duration <= 0:
         raise ValueError("musica vazia ou ilegivel")
-    n = int(min(MAX_PEAKS, max(64, duration * PEAKS_PER_S)))
     return TrackAnalysis(
         grid=_beats(data, sr, duration),
         duration_s=round(duration, 3),
-        peaks=_waveform(data, n),
+        peaks=waveform(data, peaks_para(duration)),
     )
 
 
 def analyze_music(src: Path, work_dir: Path) -> BeatGrid:
     wav = _decode_to_wav(Path(src), Path(work_dir) / "music.wav")
-    data, sr = _read_wav(wav)
+    data, sr = read_wav(wav)
     duration = data.size / sr if sr else 0.0
     if duration <= 0:
         raise ValueError("musica vazia ou ilegivel")

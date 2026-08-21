@@ -103,6 +103,32 @@ class RoiSpec(BaseModel):
     fullscreen: bool = False
 
 
+#: Nome da saída que vira o proxy do editor. Não é ROI de detector nenhum: é a
+#: tela inteira reduzida, pendurada na mesma decodificação porque o decode do
+#: vídeo pesado já está pago — pedir uma segunda passagem só para isto seria
+#: gastar de novo o que o sistema mais economiza.
+PROXY_ROI = "proxy"
+
+
+def proxy_roi() -> RoiSpec:
+    """A tela inteira, pequena e em FPS baixo: o bastante para editar.
+
+    O corte final continua saindo da gravação original, em qualidade cheia —
+    isto aqui só existe para o monitor poder buscar um instante sem arrastar
+    meio giga por HTTP a cada arrasto.
+    """
+    return RoiSpec(
+        name=PROXY_ROI,
+        x=0.0,
+        y=0.0,
+        w=1.0,
+        h=1.0,
+        fps=24.0,
+        width_px=640,
+        fullscreen=True,
+    )
+
+
 class Artifact(BaseModel):
     """Referência a um blob no storage."""
 
@@ -273,6 +299,14 @@ class MontageDraft(BaseModel):
     music_start_s: float = 0.0
     cuts: list[TimelineCut] = Field(default_factory=list)
 
+    #: Correções do usuário à grade de batidas. Não afetam o vídeo: o corte
+    #: guarda instantes absolutos, e a grade é só o imã da tela. Vêm no rascunho
+    #: para não se perder num F5 -- consertar a grade duas vezes irrita mais do
+    #: que consertá-la uma.
+    beat_offset_s: float = 0.0
+    beat_multiplier: float = 1.0
+    beat_bar: int = 1
+
 
 class Timeline(BaseModel):
     """Um video montado a mao: os blocos e a musica por baixo deles.
@@ -380,7 +414,16 @@ class Job(Base):
     video_name: Mapped[str] = mapped_column(String(255), default="")
 
     duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    #: quadros por segundo da gravação — o editor precisa dele para o passo de
+    #: um quadro fazer sentido
+    fps: Mapped[float] = mapped_column(Float, default=0.0)
     params: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: cópia reduzida da gravação, para o monitor do editor. Sai da mesma
+    #: decodificação dos recortes, então custa quase nada
+    proxy_key: Mapped[str] = mapped_column(String(255), default="")
+    #: forma de onda do áudio da partida, já reduzida — é ela que mostra o tiro
+    #: e a explosão na régua
+    waveform: Mapped[list] = mapped_column(JSON, default=list)
     #: montagem em andamento, salva sozinha enquanto o usuario edita
     draft: Mapped[dict] = mapped_column(JSON, default=dict)
 

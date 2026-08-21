@@ -297,6 +297,64 @@ def test_coluna_nova_chega_a_um_banco_que_ja_existia(isolated):
         assert pedido.timelines == []
 
 
+def test_coluna_nova_nao_deixa_as_linhas_antigas_com_NULL(isolated):
+    """Backfill tambem nos tipos simples, e nao so no JSON.
+
+    Uma coluna nova entra anulavel -- pôr NOT NULL numa tabela com linhas
+    exigiria reescreve-la. Se as linhas antigas ficam com NULL, quem consome
+    quebra longe daqui: foi `round(job.fps, 3)` derrubando a listagem inteira de
+    partidas depois de `fps` entrar no modelo.
+    """
+    from sqlalchemy import text
+
+    from owcore.db import engine, init_db, session
+    from owcore.models import Job
+
+    with session() as s:
+        s.add(Job(id="j2", video_key="k", video_name="v.mp4"))
+
+    eng = engine()
+    with eng.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs DROP COLUMN fps"))
+        conn.execute(text("ALTER TABLE jobs DROP COLUMN proxy_key"))
+
+    init_db()
+
+    with session() as s:
+        job = s.get(Job, "j2")
+        assert job.fps == 0.0, "a linha antiga ficou com NULL num Float"
+        assert job.proxy_key == "", "a linha antiga ficou com NULL num String"
+
+
+def test_repara_o_NULL_que_um_boot_anterior_deixou(isolated):
+    """A coluna ja existe, mas com NULL onde o modelo promete um valor.
+
+    Acontece quando ela foi criada por uma versao do reconciliador que ainda nao
+    preenchia aquele tipo. Encontrar a coluna pronta e ir embora deixaria a base
+    com NULL para sempre.
+    """
+    from sqlalchemy import text
+
+    from owcore.db import engine, init_db, session
+    from owcore.models import Job
+
+    with session() as s:
+        s.add(Job(id="j3", video_key="k", video_name="v.mp4"))
+
+    eng = engine()
+    with eng.begin() as conn:
+        # o estado exato que um boot antigo deixaria: a coluna existe, anulavel
+        # (pôr NOT NULL numa tabela com linhas exigiria reescreve-la), e sem
+        # ninguem ter preenchido as linhas de antes
+        conn.execute(text("ALTER TABLE jobs DROP COLUMN fps"))
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN fps FLOAT"))
+
+    init_db()
+
+    with session() as s:
+        assert s.get(Job, "j3").fps == 0.0
+
+
 def test_reconciliar_e_idempotente(isolated):
     """Todo worker chama `init_db` no boot; rodar de novo nao pode mexer em nada."""
     from owcore.db import _reconcile_columns, engine, init_db

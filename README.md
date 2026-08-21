@@ -58,7 +58,7 @@ python tools/make_sample.py --out data/sample/match.mp4 \
 pytest tests/ -q
 ```
 
-São 134 testes em cinco camadas:
+São 140 testes em cinco camadas:
 
 | Arquivo | O que cobre |
 |---|---|
@@ -143,6 +143,7 @@ packages/owcore/   núcleo compartilhado, instalado em cada serviço
   timeline.py      montagem manual: blocos → pedaços a cortar (função pura)
   vision.py        primitivas de visão computacional
   ffmpeg.py        recorte, corte, concatenação, trilha
+  audio.py         leitura de WAV e forma de onda (música e partida)
   detector.py      base dos microsserviços detectores
   worker.py        laço de consumo, ack, encerramento limpo
 services/          um diretório por microsserviço

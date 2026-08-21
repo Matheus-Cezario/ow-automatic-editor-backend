@@ -101,9 +101,25 @@ def _reconcile_columns(conn) -> list[str]:
     for nome, tabela in Base.metadata.tables.items():
         if nome not in existentes:
             continue  # acabou de ser criada por create_all, ja veio completa
-        atuais = {c["name"] for c in inspector.get_columns(nome)}
+        no_banco = {c["name"]: c for c in inspector.get_columns(nome)}
         for col in tabela.columns:
-            if col.name in atuais:
+            if col.name in no_banco:
+                # Coluna acrescentada num boot anterior, quando o backfill ainda
+                # nao cobria este tipo: as linhas de entao ficaram com NULL onde
+                # o modelo promete um valor. Repara-las e barato (o UPDATE nao
+                # acha nada nas vezes seguintes) e evita o NULL vazar para quem
+                # le -- foi assim que `round(job.fps, 3)` derrubou a listagem
+                # inteira de partidas.
+                if no_banco[col.name]["nullable"] and not col.nullable:
+                    vazio = _valor_vazio(col)
+                    if vazio is not None:
+                        conn.execute(
+                            text(
+                                f"UPDATE {citar(nome)} SET {citar(col.name)} = :v "
+                                f"WHERE {citar(col.name)} IS NULL"
+                            ),
+                            {"v": vazio},
+                        )
                 continue
             tipo = col.type.compile(dialect=conn.dialect)
             conn.execute(
@@ -123,18 +139,20 @@ def _reconcile_columns(conn) -> list[str]:
     return adicionadas
 
 
-def _valor_vazio(col) -> str | None:
-    """O `[]` ou `{}` de uma coluna JSON nova, para as linhas antigas.
+def _valor_vazio(col):
+    """O que por nas linhas antigas de uma coluna recem-criada.
 
-    So JSON: e onde as colunas novas do sistema aparecem, e onde a diferenca
-    entre NULL e vazio confundiria quem le. Nos outros tipos, NULL ja diz o que
-    tem de dizer.
+    Sai do default declarado no modelo -- `0.0` num Float, `""` num String,
+    `[]` num JSON --, entao uma linha antiga passa a ler igual a uma nova. Sem
+    isto ela le `NULL`, e quem consome quebra em lugares distantes: foi assim
+    que `round(job.fps, 3)` derrubou a listagem inteira de partidas depois de
+    `fps` entrar no modelo.
 
-    O valor sai de *executar* o default do modelo, e nao de reconhece-lo: o
-    SQLAlchemy embrulha `default=list` num invocavel proprio, entao comparar com
-    `list` nunca bate -- e o backfill silenciosamente nao acontecia.
+    O valor sai de *executar* o default, e nao de reconhece-lo: o SQLAlchemy
+    embrulha `default=list` num invocavel proprio, entao comparar com `list`
+    nunca bate.
     """
-    if not isinstance(col.type, JSON) or col.default is None:
+    if col.default is None:
         return None
     try:
         valor = (
@@ -142,8 +160,13 @@ def _valor_vazio(col) -> str | None:
         )
     except Exception:  # default que depende de contexto: nao da para adivinhar
         return None
-    if isinstance(valor, (list, dict)):
-        return json.dumps(valor)
+
+    if isinstance(col.type, JSON):
+        return json.dumps(valor) if isinstance(valor, (list, dict)) else None
+    # datas e afins ficam de fora: `utcnow` de uma linha antiga seria uma data
+    # inventada, e NULL diz melhor "nao se sabe"
+    if isinstance(valor, bool) or isinstance(valor, (int, float, str)):
+        return valor
     return None
 
 

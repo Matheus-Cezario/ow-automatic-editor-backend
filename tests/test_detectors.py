@@ -152,9 +152,13 @@ def test_bpm_da_musica_de_teste(tmp_path):
 @pytest.mark.skipif(not MUSIC.exists(), reason="sem musica de exemplo")
 def test_estimador_proprio_acha_o_bpm_sem_librosa(tmp_path):
     """Caminho de fallback: precisa continuar montando no ritmo sem librosa."""
+    from owcore.audio import read_wav
+
     detect = service_module("beats")
     wav = detect._decode_to_wav(MUSIC, tmp_path / "m.wav")
-    data, sr = detect._read_wav(wav)
+    # a leitura do WAV mora em `owcore.audio` desde que a partida tambem passou
+    # a ter forma de onda: sao duas faixas desenhadas, e uma conta so
+    data, sr = read_wav(wav)
     grid = detect._estimate_beats(data, sr, data.size / sr)
     assert 110 <= grid.bpm <= 130
 

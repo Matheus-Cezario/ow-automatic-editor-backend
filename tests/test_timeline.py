@@ -464,6 +464,24 @@ def test_a_montagem_em_andamento_volta_junto_com_o_job(isolated, short_sample):
     assert volta["cuts"][0]["kind"] == "kill"
 
 
+def test_o_rascunho_lembra_as_correcoes_da_grade_de_batidas(
+    isolated, short_sample
+):
+    """Elas nao mudam o video -- o corte guarda instantes absolutos --, mas
+    mudam onde o ima gruda. Consertar a grade duas vezes irrita."""
+    job_id = run_analysis(short_sample)
+    api().put(
+        f"/api/jobs/{job_id}/draft",
+        json={"cuts": [], "beat_offset_s": 0.12, "beat_multiplier": 2.0,
+              "beat_bar": 4},
+    )
+
+    draft = api().get(f"/api/jobs/{job_id}").json()["draft"]
+    assert draft["beat_offset_s"] == pytest.approx(0.12)
+    assert draft["beat_multiplier"] == pytest.approx(2.0)
+    assert draft["beat_bar"] == 4
+
+
 def test_rascunho_sem_corte_nenhum_e_valido(isolated, short_sample):
     """Um rascunho existe desde antes de o primeiro bloco entrar -- salvar so a
     musica escolhida tem de funcionar."""
@@ -525,3 +543,89 @@ def test_gerar_nao_apaga_o_rascunho(isolated, short_sample):
     run_render()
 
     assert api().get(f"/api/jobs/{job_id}").json()["draft"]["title"] == "v1"
+
+
+# ── o proxy e a onda da partida (Fase 2) ────────────────────────────────────
+
+
+def test_o_proxy_sai_da_mesma_decodificacao_e_e_muito_menor(
+    isolated, short_sample
+):
+    """A cópia reduzida existe para o monitor do editor.
+
+    Buscar dentro da gravação original dezenas de vezes por segundo derrubava o
+    elemento de vídeo do navegador. O proxy sai como mais uma saída da
+    decodificação que já acontece, então o custo é perto de zero -- e é isso
+    que este teste guarda junto com o tamanho.
+    """
+    from owcore import ffmpeg
+    from owcore.models import Job
+    from owcore.storage import get_storage, local_copy
+
+    job_id = run_analysis(short_sample)
+
+    with session() as s:
+        job = s.get(Job, job_id)
+        assert job.proxy_key, "o preprocessador nao gerou o proxy"
+        key = job.proxy_key
+    storage = get_storage()
+    assert storage.exists(key)
+
+    proxy = local_copy(key, Path(isolated.work_dir) / "conferencia")
+    info = ffmpeg.probe(proxy)
+    original = ffmpeg.probe(short_sample)
+
+    # mesma partida: a duracao tem de bater
+    assert info.duration_s == pytest.approx(original.duration_s, abs=0.5)
+    # e a tela inteira, nao um recorte
+    assert info.width / info.height == pytest.approx(
+        original.width / original.height, abs=0.02
+    )
+    assert info.width <= 640
+    assert proxy.stat().st_size < short_sample.stat().st_size
+
+
+def test_o_proxy_e_servido_com_range(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+
+    detail = api().get(f"/api/jobs/{job_id}").json()
+    assert detail["proxy_url"] == f"/api/jobs/{job_id}/proxy"
+
+    resp = api().get(f"/api/jobs/{job_id}/proxy", headers={"range": "bytes=0-511"})
+    assert resp.status_code == 206
+    assert len(resp.content) == 512
+    assert resp.headers["content-type"] == "video/mp4"
+
+
+def test_partida_analisada_antes_do_proxy_diz_isso_em_vez_de_quebrar(isolated):
+    """O app cai na gravacao original quando `proxy_url` vem nulo."""
+    from owcore.models import Job
+
+    with session() as s:
+        s.add(Job(id="antigo0000000001", video_key="k", video_name="v.mp4"))
+
+    assert api().get("/api/jobs/antigo0000000001").json()["proxy_url"] is None
+    assert api().get("/api/jobs/antigo0000000001/proxy").status_code == 404
+
+
+def test_a_onda_da_partida_volta_com_o_job(isolated, short_sample):
+    """É ela que mostra o tiro e a explosão na régua do editor."""
+    job_id = run_analysis(short_sample)
+
+    detail = api().get(f"/api/jobs/{job_id}").json()
+    onda = detail["waveform"]
+
+    assert len(onda) > 100, "sem onda nao da para casar o corte com o som"
+    assert all(0.0 <= v <= 1.0 for v in onda)
+    assert max(onda) == pytest.approx(1.0), "a onda e normalizada pelo pico"
+
+
+def test_a_onda_nao_vai_na_listagem(isolated, short_sample):
+    """São alguns milhares de números por partida, e a lista não os usa."""
+    run_analysis(short_sample)
+    jobs = api().get("/api/jobs").json()["jobs"]
+
+    assert jobs, "nenhuma partida na listagem"
+    assert "waveform" not in jobs[0]
+    # o proxy, esse sim, vai: a lista e por onde o app decide o que abrir
+    assert "proxy_url" in jobs[0]

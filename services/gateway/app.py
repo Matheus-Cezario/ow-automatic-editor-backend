@@ -147,6 +147,9 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         "error": job.error,
         "video_name": job.video_name,
         "duration_s": round(job.duration_s, 2),
+        # `or 0` porque uma partida analisada antes desta coluna existir a le
+        # como NULL ate o backfill passar por ela
+        "fps": round(job.fps or 0.0, 3),
         "params": job.params,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
@@ -161,6 +164,9 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         "n_clips": len(job.clips),
         # a gravacao em si: o preview da montagem busca dentro dela
         "video_url": f"/api/jobs/{job.id}/video",
+        # a copia reduzida, quando existir. Jobs analisados antes dela virem ao
+        # mundo respondem `null`, e o app cai na gravacao original
+        "proxy_url": f"/api/jobs/{job.id}/proxy" if job.proxy_key else None,
         # o pacote da partida inteira: nao exige abrir video nenhum
         "zip_url": f"/api/jobs/{job.id}/cortes.zip" if job.clips else None,
         "has_cuts": tem_cortes,
@@ -201,6 +207,9 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         # a montagem em andamento volta com o job: e assim que a tela de
         # montagem se reconstroi depois de um F5
         data["draft"] = job.draft or {}
+        # a onda do audio da partida, para a regua do editor. So no detalhe: sao
+        # alguns milhares de numeros, e a listagem nao tem o que fazer com eles
+        data["waveform"] = job.waveform or []
     return data
 
 
@@ -682,6 +691,28 @@ def delete_draft(job_id: str) -> Response:
             raise HTTPException(404, "job nao encontrado")
         job.draft = {}
     return Response(status_code=204)
+
+
+@app.get("/api/jobs/{job_id}/proxy")
+def job_proxy(job_id: str, request: Request) -> Response:
+    """A copia reduzida da gravacao, com `Range`.
+
+    E o que o monitor do editor abre. A gravacao original tem centenas de
+    megabytes, e buscar dentro dela dezenas de vezes por segundo enquanto se
+    arrasta chegou a derrubar o elemento de video do navegador. Esta copia sai
+    da mesma decodificacao dos recortes -- custa quase nada -- e o corte final
+    continua vindo do arquivo original.
+    """
+    with session() as s:
+        job = s.get(Job, job_id)
+        if job is None:
+            raise HTTPException(404, "job nao encontrado")
+        key = job.proxy_key
+    if not key:
+        raise HTTPException(
+            404, "esta partida foi analisada antes do proxy existir"
+        )
+    return _serve_blob(key, request, "video/mp4")
 
 
 @app.get("/api/jobs/{job_id}/frame")
