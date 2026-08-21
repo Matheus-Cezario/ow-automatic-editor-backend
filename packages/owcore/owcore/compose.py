@@ -1,0 +1,237 @@
+"""Da linha do tempo em camadas para um grafo de filtros do ffmpeg.
+
+Este arquivo **não roda ffmpeg**: ele escreve o `-filter_complex` e diz que
+entradas passar. É pura montagem de texto, e por isso dá para testar o grafo
+inteiro sem codificar um quadro sequer — o que importa quando um erro no grafo
+derruba o render todo, e não apenas um corte.
+
+## Por que um grafo, e não corte-e-emenda
+
+A V1 cortava cada trecho num arquivo e concatenava. Funciona, é resistente (um
+corte ruim custa só ele) e **não comporta camada**: sobrepor exige que dois
+pedaços existam ao mesmo tempo, e concatenação é justamente o contrário disso.
+
+Por isso o caminho antigo continua vivo para montagem de uma camada só, e este
+aqui entra quando há camada, transformação ou som ajustado. A escolha é de
+`Timeline.de_uma_camada_so`.
+
+## A forma do grafo
+
+Uma tela de fundo cobre o vídeo inteiro, e cada clipe é sobreposto nela na hora
+certa:
+
+    [fundo][v0] overlay(enable=...) [t0]
+    [t0]   [v1] overlay(enable=...) [t1]  ...
+
+O fundo resolve de graça o que na V1 era caso especial: buraco entre clipes é
+onde nada foi sobreposto, e o que se vê ali é a própria tela de fundo.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .models import ClipSource, Timeline, TimelineClip
+
+
+@dataclass(slots=True)
+class Entrada:
+    """Um `-i` do ffmpeg, com o que vem antes dele."""
+
+    caminho: str
+    #: `-ss` antes do input: o ffmpeg pula até o keyframe mais próximo em vez de
+    #: decodificar desde o começo, o que faz cada clipe custar quase nada
+    seek: float | None = None
+    duracao: float | None = None
+    #: entradas sintéticas (cor, silêncio) vêm de `-f lavfi`
+    lavfi: bool = False
+
+    def argumentos(self) -> list[str]:
+        args: list[str] = []
+        if self.lavfi:
+            args += ["-f", "lavfi"]
+        if self.seek is not None:
+            args += ["-ss", f"{self.seek:.3f}"]
+        if self.duracao is not None:
+            args += ["-t", f"{self.duracao:.3f}"]
+        args += ["-i", self.caminho]
+        return args
+
+
+@dataclass(slots=True)
+class Composicao:
+    entradas: list[Entrada] = field(default_factory=list)
+    filtros: list[str] = field(default_factory=list)
+    mapa_video: str = ""
+    mapa_audio: str | None = None
+    duracao_s: float = 0.0
+
+    @property
+    def filter_complex(self) -> str:
+        return ";".join(self.filtros)
+
+    def argumentos_de_entrada(self) -> list[str]:
+        return [a for e in self.entradas for a in e.argumentos()]
+
+
+def _posicao(clip: TimelineClip) -> tuple[str, str]:
+    """Onde o clipe é sobreposto, em expressões que o ffmpeg avalia.
+
+    `x` e `y` do transform são deslocamentos do centro normalizados pela metade
+    do quadro, então a mesma montagem vale em qualquer resolução: `W` e `H` são
+    a tela, `w` e `h` o clipe já escalado.
+    """
+    x = f"(W-w)/2+({clip.transform.x:.4f})*(W/2)"
+    y = f"(H-h)/2+({clip.transform.y:.4f})*(H/2)"
+    return x, y
+
+
+def _cadeia_de_video(clip: TimelineClip, entrada: int, saida: str) -> str:
+    """O que acontece com um clipe antes de ele encostar na tela."""
+    passos = [f"[{entrada}:v]trim=duration={clip.duration_s:.3f}"]
+    # o clipe passa a correr no tempo do vídeo final, e não no dele
+    passos.append(f"setpts=PTS-STARTPTS+{clip.at_s:.3f}/TB")
+    if clip.transform.scale != 1.0:
+        passos.append(
+            f"scale=iw*{clip.transform.scale:.4f}:ih*{clip.transform.scale:.4f}"
+        )
+    if clip.transform.opacity < 1.0:
+        # o alfa só existe em rgba; sem o `format` o colorchannelmixer não tem
+        # canal onde mexer
+        passos.append("format=rgba")
+        passos.append(f"colorchannelmixer=aa={clip.transform.opacity:.4f}")
+    return ",".join(passos) + f"[{saida}]"
+
+
+def _cadeia_de_audio(clip: TimelineClip, entrada: int, saida: str) -> str | None:
+    """O som do clipe, atrasado até a hora em que ele entra."""
+    if clip.audio.mute or clip.audio.volume <= 0:
+        return None
+    ms = int(round(clip.at_s * 1000))
+    passos = [
+        f"[{entrada}:a]atrim=duration={clip.duration_s:.3f}",
+        "asetpts=PTS-STARTPTS",
+    ]
+    if clip.audio.fade_in_s > 0:
+        passos.append(f"afade=t=in:st=0:d={clip.audio.fade_in_s:.3f}")
+    if clip.audio.fade_out_s > 0:
+        inicio = max(0.0, clip.duration_s - clip.audio.fade_out_s)
+        passos.append(
+            f"afade=t=out:st={inicio:.3f}:d={clip.audio.fade_out_s:.3f}"
+        )
+    if clip.audio.volume != 1.0:
+        passos.append(f"volume={clip.audio.volume:.4f}")
+    if ms > 0:
+        passos.append(f"adelay={ms}|{ms}")
+    return ",".join(passos) + f"[{saida}]"
+
+
+def compor(
+    timeline: Timeline,
+    *,
+    source: Path,
+    width: int,
+    height: int,
+    fps: float,
+    music: Path | None = None,
+    music_start_s: float = 0.0,
+    source_duration_s: float = 0.0,
+) -> Composicao:
+    """O grafo que monta esta linha do tempo.
+
+    As camadas entram de baixo para cima, e dentro de cada uma os clipes entram
+    na ordem do tempo. Camada escondida não entra; camada muda entra sem som.
+
+    Um clipe que passa do fim da gravação é **aparado**, como na V1 — o que
+    sobrar do lugar dele fica sendo a tela de fundo, e os clipes seguintes não
+    saem do lugar onde foram postos.
+    """
+    fps = fps if fps > 0 else 30.0
+    duracao = timeline.duration_s
+    c = Composicao(duracao_s=duracao)
+
+    # a tela de fundo: é ela que aparece em todo instante que ninguém cobriu
+    c.entradas.append(
+        Entrada(
+            caminho=f"color=c=black:s={int(width)}x{int(height)}:r={fps:.3f}",
+            duracao=duracao,
+            lavfi=True,
+        )
+    )
+    c.filtros.append(f"[0:v]setsar=1[fundo]")
+
+    anterior = "fundo"
+    audios: list[str] = []
+    n = 0
+
+    for camada in timeline.layers:
+        if camada.hidden:
+            continue
+        for clip in camada.clips:
+            if clip.source is not ClipSource.RECORDING:
+                # cor, mídia e texto chegam nas fases seguintes; ignorar em
+                # silêncio seria pior do que não aceitar
+                raise ValueError(
+                    f"fonte '{clip.source}' ainda nao e montavel: so gravacao"
+                )
+
+            duracao_util = clip.duration_s
+            if source_duration_s > 0:
+                duracao_util = min(
+                    duracao_util, max(0.0, source_duration_s - clip.start_s)
+                )
+            if duracao_util <= 0:
+                continue  # cai fora da gravacao; o lugar dele fica de fundo
+
+            n += 1
+            c.entradas.append(
+                Entrada(caminho=str(source), seek=clip.start_s, duracao=duracao_util)
+            )
+            aparado = clip.model_copy(update={"duration_s": duracao_util})
+
+            c.filtros.append(_cadeia_de_video(aparado, n, f"v{n}"))
+            x, y = _posicao(aparado)
+            saida = f"t{n}"
+            c.filtros.append(
+                f"[{anterior}][v{n}]overlay=x={x}:y={y}:"
+                f"enable='between(t,{aparado.at_s:.3f},{aparado.until_s:.3f})':"
+                f"eof_action=pass[{saida}]"
+            )
+            anterior = saida
+
+            if not camada.muted:
+                cadeia = _cadeia_de_audio(aparado, n, f"a{n}")
+                if cadeia is not None:
+                    c.filtros.append(cadeia)
+                    audios.append(f"a{n}")
+
+    if n == 0:
+        raise ValueError("nenhum clipe cai dentro da gravacao")
+
+    c.filtros.append(f"[{anterior}]trim=duration={duracao:.3f},setpts=PTS-STARTPTS[vout]")
+    c.mapa_video = "[vout]"
+
+    # Com trilha, ela **é** o áudio -- o som do jogo por baixo dela é mistura, e
+    # mistura é da fase dos efeitos. Sem trilha, vale o som dos próprios clipes.
+    if music is not None:
+        c.entradas.append(Entrada(caminho=str(music), seek=music_start_s))
+        indice = len(c.entradas) - 1
+        c.filtros.append(
+            f"[{indice}:a]atrim=duration={duracao:.3f},asetpts=PTS-STARTPTS[aout]"
+        )
+        c.mapa_audio = "[aout]"
+    elif len(audios) == 1:
+        # misturar uma faixa só é trabalho à toa, e o `amix` ainda mexeria no
+        # volume dela sem necessidade
+        c.filtros.append(f"[{audios[0]}]anull[aout]")
+        c.mapa_audio = "[aout]"
+    elif audios:
+        entrada = "".join(f"[{a}]" for a in audios)
+        c.filtros.append(
+            f"{entrada}amix=inputs={len(audios)}:dropout_transition=0:"
+            f"normalize=0[aout]"
+        )
+        c.mapa_audio = "[aout]"
+
+    return c

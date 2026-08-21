@@ -274,6 +274,30 @@ def black_clip(
     return dest
 
 
+def compose(comp, dest: Path) -> Path:
+    """Roda o grafo montado por `owcore.compose`.
+
+    É o caminho da montagem em camadas. O de corte-e-emenda continua existindo
+    para a montagem de uma camada só, e é mais resistente: lá um corte que falha
+    custa só ele, aqui um erro no grafo derruba o render inteiro.
+    """
+    s = get_settings()
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [s.ffmpeg, "-y", "-v", "error"]
+    cmd += comp.argumentos_de_entrada()
+    cmd += ["-filter_complex", comp.filter_complex, "-map", comp.mapa_video]
+    if comp.mapa_audio:
+        cmd += ["-map", comp.mapa_audio, "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    else:
+        cmd += ["-an"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dest)]
+    _run(cmd)
+    return dest
+
+
 def thumbnail(src: Path, dest: Path, at: float = 0.0, width: int = 480) -> Path:
     s = get_settings()
     dest = Path(dest)

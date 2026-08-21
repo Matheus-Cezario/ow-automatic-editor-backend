@@ -278,7 +278,11 @@ def _render_dict(r: Render, todos_clipes: list[Clip]) -> dict[str, Any]:
             {
                 "title": tl.get("title") or "",
                 "track_id": tl.get("track_id"),
-                "n_cuts": len(tl.get("cuts") or []),
+                # um pedido antigo guarda `cuts`; um novo, camadas
+                "n_cuts": len(tl.get("cuts") or []) or sum(
+                    len(c.get("clips") or []) for c in (tl.get("layers") or [])
+                ),
+                "n_layers": len(tl.get("layers") or []) or 1,
             }
             for tl in (r.timelines or [])
         ],

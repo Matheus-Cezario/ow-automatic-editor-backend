@@ -283,6 +283,194 @@ class TimelineCut(BaseModel):
         return self.at_s + self.duration_s
 
 
+class ClipSource(StrEnum):
+    """De onde sai a imagem de um clipe.
+
+    Nasce discriminado para a biblioteca de midia entrar sem mexer no modelo:
+    hoje o editor so produz `RECORDING` e `COLOR`, e `MEDIA` e `TEXT` chegam nas
+    fases seguintes.
+    """
+
+    #: um trecho da gravacao da partida
+    RECORDING = "recording"
+    #: cor solida. O preto dos buracos deixa de ser um caso especial do render e
+    #: passa a ser um clipe como qualquer outro
+    COLOR = "color"
+    #: arquivo importado pelo usuario (Fase 4)
+    MEDIA = "media"
+    #: texto (Fase 6)
+    TEXT = "text"
+
+
+class Transform(BaseModel):
+    """Onde e de que tamanho o clipe aparece no quadro.
+
+    `x` e `y` sao deslocamentos do centro, normalizados pela metade do quadro:
+    -1 encosta na borda esquerda/superior, +1 na direita/inferior, 0 e o centro.
+    Assim a mesma montagem vale em qualquer resolucao -- o que importa numa
+    montagem e a proporcao, nao o pixel.
+    """
+
+    scale: float = 1.0
+    x: float = 0.0
+    y: float = 0.0
+    opacity: float = 1.0
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "Transform":
+        if self.scale <= 0:
+            raise ValueError("scale tem de ser maior que zero")
+        if not 0.0 <= self.opacity <= 1.0:
+            raise ValueError("opacity fica entre 0 e 1")
+        return self
+
+    @property
+    def neutra(self) -> bool:
+        """True quando o clipe entra do jeito que veio, sem nada por cima."""
+        return (
+            self.scale == 1.0
+            and self.x == 0.0
+            and self.y == 0.0
+            and self.opacity == 1.0
+        )
+
+
+class ClipAudio(BaseModel):
+    """O som do proprio clipe -- que nao e a trilha do video."""
+
+    volume: float = 1.0
+    mute: bool = False
+    fade_in_s: float = 0.0
+    fade_out_s: float = 0.0
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "ClipAudio":
+        if self.volume < 0:
+            raise ValueError("volume nao pode ser negativo")
+        if self.fade_in_s < 0 or self.fade_out_s < 0:
+            raise ValueError("fade nao pode ser negativo")
+        return self
+
+    @property
+    def neutro(self) -> bool:
+        return (
+            self.volume == 1.0
+            and not self.mute
+            and self.fade_in_s == 0.0
+            and self.fade_out_s == 0.0
+        )
+
+
+class TimelineClip(BaseModel):
+    """Um pedaco do video final: o que aparece, onde e por quanto tempo.
+
+    E o `TimelineCut` da V1 com lugar para o resto: de que fonte sai, como e
+    posicionado no quadro e o que acontece com o som dele. Um corte da V1 e
+    exatamente um `Clip` de `RECORDING` com transform e audio neutros, e e assim
+    que a migracao o le.
+    """
+
+    source: ClipSource = ClipSource.RECORDING
+    #: onde ele entra no video; 0 e o primeiro quadro
+    at_s: float
+    duration_s: float
+    #: onde comeca na fonte (gravacao ou midia). Ignorado por cor e texto
+    start_s: float = 0.0
+    #: instante do momento que originou o clipe -- rotulo, nao afeta o corte
+    source_t: float = 0.0
+    #: kill/sleep/stun, para nomear e colorir
+    kind: str = ""
+    #: cor solida quando `source` e COLOR
+    color: str = "black"
+    #: id do item da biblioteca quando `source` e MEDIA (Fase 4)
+    media_id: str | None = None
+    transform: Transform = Field(default_factory=Transform)
+    audio: ClipAudio = Field(default_factory=ClipAudio)
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "TimelineClip":
+        if self.start_s < 0:
+            raise ValueError("start_s nao pode ser negativo")
+        if self.at_s < 0:
+            raise ValueError("at_s nao pode ser negativo")
+        if self.duration_s < MIN_CUT_S:
+            raise ValueError(f"um clipe tem de durar ao menos {MIN_CUT_S}s")
+        return self
+
+    @property
+    def end_s(self) -> float:
+        """Onde termina *na fonte*."""
+        return self.start_s + self.duration_s
+
+    @property
+    def until_s(self) -> float:
+        """Onde termina *no video*."""
+        return self.at_s + self.duration_s
+
+    @property
+    def simples(self) -> bool:
+        """Um clipe que o caminho de corte-e-emenda da V1 da conta de fazer."""
+        return (
+            self.source is ClipSource.RECORDING
+            and self.transform.neutra
+            and self.audio.neutro
+        )
+
+    def como_corte(self) -> TimelineCut:
+        """A visao V1 deste clipe, para o caminho de corte-e-emenda."""
+        return TimelineCut(
+            source_t=self.source_t,
+            start_s=self.start_s,
+            duration_s=self.duration_s,
+            at_s=self.at_s,
+            kind=self.kind,
+        )
+
+    @classmethod
+    def de_corte(cls, cut: TimelineCut) -> "TimelineClip":
+        return cls(
+            source=ClipSource.RECORDING,
+            at_s=cut.at_s,
+            duration_s=cut.duration_s,
+            start_s=cut.start_s,
+            source_t=cut.source_t,
+            kind=cut.kind,
+        )
+
+
+class Layer(BaseModel):
+    """Uma camada da linha do tempo.
+
+    Chama-se camada, e nao faixa, porque `Track` neste sistema ja e a musica que
+    o usuario enviou -- dois `Track` no mesmo modelo seriam uma armadilha.
+
+    A ordem na lista e a ordem de empilhamento: a primeira e o fundo, a ultima
+    fica por cima.
+    """
+
+    name: str = ""
+    muted: bool = False
+    hidden: bool = False
+    #: travada nao muda nada no render -- e o app que recusa editar
+    locked: bool = False
+    clips: list[TimelineClip] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sem_sobreposicao(self) -> "Layer":
+        ordenados = sorted(self.clips, key=lambda c: c.at_s)
+        for anterior, seguinte in zip(ordenados, ordenados[1:]):
+            if seguinte.at_s < anterior.until_s - 1e-6:
+                raise ValueError(
+                    f"dois clipes se sobrepoem em {seguinte.at_s:.2f}s da camada"
+                )
+        self.clips = ordenados
+        return self
+
+    @property
+    def duration_s(self) -> float:
+        return max((c.until_s for c in self.clips), default=0.0)
+
+
 class MontageDraft(BaseModel):
     """A montagem **em andamento**, do jeito que ficou na tela.
 
@@ -297,7 +485,9 @@ class MontageDraft(BaseModel):
     title: str = ""
     track_id: str | None = None
     music_start_s: float = 0.0
+    #: formato da V1, ainda aceito enquanto o app nao manda camadas
     cuts: list[TimelineCut] = Field(default_factory=list)
+    layers: list[Layer] = Field(default_factory=list)
 
     #: Correções do usuário à grade de batidas. Não afetam o vídeo: o corte
     #: guarda instantes absolutos, e a grade é só o imã da tela. Vêm no rascunho
@@ -309,39 +499,73 @@ class MontageDraft(BaseModel):
 
 
 class Timeline(BaseModel):
-    """Um video montado a mao: os blocos e a musica por baixo deles.
+    """Um video montado a mao: as camadas e a musica por baixo delas.
 
-    Diferente de `Selection`, aqui nao ha proposta nenhuma -- o usuario montou.
-    A musica vem por `track_id` porque ela ja subiu antes: foi ouvindo ela, com
-    as batidas na tela, que ele decidiu onde cada bloco cai.
+    **Le o formato da V1.** Um pedido antigo (ou um rascunho salvo antes desta
+    versao) chega com `cuts` em vez de `layers`, e e convertido aqui na leitura
+    -- uma camada so, de clipes de gravacao. Nao ha migracao a rodar no banco:
+    o formato velho continua sendo entrada valida, e sai do outro lado no novo.
     """
 
     title: str = ""
-    #: musica de fundo; None deixa o audio original dos cortes
+    #: musica de fundo; None deixa o audio original dos clipes
     track_id: str | None = None
     #: de que ponto da musica o video comeca a tocar
     music_start_s: float = 0.0
-    cuts: list[TimelineCut] = Field(default_factory=list)
+    layers: list[Layer] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aceita_o_formato_da_v1(cls, dados: Any) -> Any:
+        if not isinstance(dados, dict):
+            return dados
+        if dados.get("layers") or "cuts" not in dados:
+            return dados
+        cortes = dados.pop("cuts") or []
+        dados["layers"] = [{"clips": [
+            TimelineClip.de_corte(
+                c if isinstance(c, TimelineCut) else TimelineCut(**c)
+            ).model_dump()
+            for c in cortes
+        ]}]
+        return dados
 
     @model_validator(mode="after")
-    def _sem_sobreposicao(self) -> "Timeline":
+    def _tem_o_que_montar(self) -> "Timeline":
         if self.music_start_s < 0:
             raise ValueError("music_start_s nao pode ser negativo")
-        if not self.cuts:
+        if not any(l.clips for l in self.layers):
             raise ValueError("uma linha do tempo vazia nao vira video")
-        ordenados = sorted(self.cuts, key=lambda c: c.at_s)
-        for anterior, seguinte in zip(ordenados, ordenados[1:]):
-            if seguinte.at_s < anterior.until_s - 1e-6:
-                raise ValueError(
-                    f"dois cortes se sobrepoem em {seguinte.at_s:.2f}s do video"
-                )
-        self.cuts = ordenados
         return self
 
     @property
     def duration_s(self) -> float:
-        """Quanto o video vai durar -- inclusive os buracos entre os blocos."""
-        return max((c.until_s for c in self.cuts), default=0.0)
+        """Quanto o video vai durar -- inclusive os buracos entre os clipes."""
+        return max((l.duration_s for l in self.layers), default=0.0)
+
+    @property
+    def clips(self) -> list[TimelineClip]:
+        """Todos os clipes, de todas as camadas, de baixo para cima."""
+        return [c for l in self.layers for c in l.clips]
+
+    @property
+    def de_uma_camada_so(self) -> bool:
+        """Da para montar pelo caminho de corte-e-emenda da V1?
+
+        Uma camada, nenhum clipe com transformacao, som ajustado ou fonte que
+        nao seja a gravacao. E o caso da maioria das montagens, e nele o
+        caminho antigo e mais resistente: um corte que falha custa so ele,
+        enquanto um erro no grafo de filtros derruba o render inteiro.
+        """
+        visiveis = [l for l in self.layers if not l.hidden]
+        if len(visiveis) != 1:
+            return False
+        return all(c.simples for c in visiveis[0].clips)
+
+    @property
+    def cuts(self) -> list[TimelineCut]:
+        """A visao V1 desta linha do tempo. So faz sentido com uma camada."""
+        return [c.como_corte() for c in self.clips]
 
 
 # ───────────────────────── mensagens do barramento ──────────────────────────

@@ -629,3 +629,183 @@ def test_a_onda_nao_vai_na_listagem(isolated, short_sample):
     assert "waveform" not in jobs[0]
     # o proxy, esse sim, vai: a lista e por onde o app decide o que abrir
     assert "proxy_url" in jobs[0]
+
+
+# ── montagem em camadas (Fase 3) ────────────────────────────────────────────
+
+
+def test_o_formato_da_v1_continua_entrando_e_sai_em_camadas(isolated):
+    """Nenhuma migracao roda no banco: o formato velho e entrada valida.
+
+    Um rascunho salvo antes desta versao, ou um pedido guardado num render
+    antigo, chega com `cuts` e e convertido na leitura -- uma camada so, de
+    clipes de gravacao.
+    """
+    from owcore.models import ClipSource, Timeline
+
+    velha = Timeline(
+        cuts=[
+            {"start_s": 10, "duration_s": 2, "at_s": 0, "kind": "kill"},
+            {"start_s": 30, "duration_s": 1, "at_s": 3},
+        ]
+    )
+
+    assert len(velha.layers) == 1
+    assert [c.at_s for c in velha.clips] == [0.0, 3.0]
+    assert velha.clips[0].source is ClipSource.RECORDING
+    assert velha.clips[0].kind == "kill"
+    assert velha.duration_s == pytest.approx(4.0)
+    # e continua sabendo se apresentar como V1, para o caminho antigo
+    assert [c.duration_s for c in velha.cuts] == [2.0, 1.0]
+    assert velha.de_uma_camada_so
+
+
+def test_camada_ou_transformacao_tira_a_montagem_do_caminho_antigo(isolated):
+    """A escolha do caminho e o que protege o render.
+
+    Corte-e-emenda e mais resistente -- um corte ruim custa so ele --, entao ele
+    fica com o caso comum. O grafo entra so quando e preciso.
+    """
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    simples = Timeline(layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=1)])])
+    assert simples.de_uma_camada_so
+
+    duas = Timeline(
+        layers=[
+            Layer(clips=[TimelineClip(at_s=0, duration_s=1)]),
+            Layer(clips=[TimelineClip(at_s=0, duration_s=1)]),
+        ]
+    )
+    assert not duas.de_uma_camada_so
+
+    com_zoom = Timeline(
+        layers=[
+            Layer(clips=[
+                TimelineClip(at_s=0, duration_s=1, transform={"scale": 1.5})
+            ])
+        ]
+    )
+    assert not com_zoom.de_uma_camada_so
+
+    # camada escondida nao conta: sobra uma so, e ela e simples
+    com_escondida = Timeline(
+        layers=[
+            Layer(clips=[TimelineClip(at_s=0, duration_s=1)]),
+            Layer(hidden=True, clips=[TimelineClip(at_s=0, duration_s=1)]),
+        ]
+    )
+    assert com_escondida.de_uma_camada_so
+
+
+def test_duas_camadas_viram_um_video_com_a_de_cima_por_cima(
+    isolated, short_sample
+):
+    """O caminho novo, do pedido ao mp4."""
+    job_id = run_analysis(short_sample)
+
+    camadas = [
+        {"clips": [
+            {"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0, "kind": "kill"},
+            {"at_s": 3.0, "duration_s": 1.5, "start_s": 6.0},
+        ]},
+        {"name": "canto", "clips": [
+            {"at_s": 0.5, "duration_s": 1.5, "start_s": 9.0,
+             "transform": {"scale": 0.35, "x": 0.6, "y": -0.6, "opacity": 0.9}},
+        ]},
+    ]
+    render_id = montar(job_id, [{"title": "Em camadas", "layers": camadas}])
+    run_render()
+
+    pedido = api().get(f"/api/renders/{render_id}").json()
+    assert pedido["status"] == "done", pedido["error"]
+    clip = pedido["clips"][0]
+
+    assert clip["meta"]["composed"] is True
+    assert clip["meta"]["layers"] == 2
+    assert clip["meta"]["segments"] == 3
+    assert clip["video_url"], "o video nao saiu"
+    # o pedido sabe se contar
+    assert pedido["timelines"][0]["n_layers"] == 2
+    assert pedido["timelines"][0]["n_cuts"] == 3
+
+    from owcore import ffmpeg
+    from owcore.storage import local_copy
+
+    with session() as s:
+        key = next(c.key for c in s.get(Job, job_id).clips)
+    saida = local_copy(key, Path(isolated.work_dir) / "camadas")
+    info = ffmpeg.probe(saida)
+    original = ffmpeg.probe(short_sample)
+
+    # 0 -> 4.5s: o ultimo clipe termina em 4.5
+    assert info.duration_s == pytest.approx(4.5, abs=0.35)
+    # a tela e a da gravacao: a sobreposicao nao muda o quadro
+    assert (info.width, info.height) == (original.width, original.height)
+
+
+def test_montagem_de_uma_camada_so_continua_pelo_caminho_antigo(
+    isolated, short_sample
+):
+    """E o caminho que sobrevive a um corte ruim, entao ele fica com o comum."""
+    job_id = run_analysis(short_sample)
+    render_id = montar(
+        job_id,
+        [{"layers": [{"clips": [
+            {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
+            {"at_s": 3.0, "duration_s": 1.5, "start_s": 6.0},
+        ]}]}],
+    )
+    run_render()
+
+    clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
+    assert "composed" not in clip["meta"]
+    # e o zip dos cortes, que so o caminho antigo produz, continua vindo
+    assert clip["segments_zip_url"]
+    assert clip["meta"]["blackfill_s"] == pytest.approx(1.5, abs=0.05)
+
+
+def test_clipe_fora_da_gravacao_vira_fundo_sem_mover_os_outros(isolated):
+    """A mesma promessa da V1, agora no grafo."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=59),   # so 1s existe
+        TimelineClip(at_s=4, duration_s=1, start_s=1),
+    ])])
+    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+               source_duration_s=60)
+
+    # o primeiro entra aparado em 1s, e o segundo continua entrando aos 4s
+    assert "trim=duration=1.000" in c.filter_complex
+    assert "between(t,4.000,5.000)" in c.filter_complex
+    assert c.duracao_s == pytest.approx(5.0)
+
+
+def test_fonte_que_ainda_nao_da_para_montar_e_recusada(isolated):
+    """Ignorar em silencio seria pior do que nao aceitar."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=1, source="color", color="black"),
+    ])])
+    with pytest.raises(ValueError, match="ainda nao e montavel"):
+        compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+
+
+def test_camada_muda_entra_sem_som(isolated):
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[
+        Layer(clips=[TimelineClip(at_s=0, duration_s=1, start_s=1)]),
+        Layer(muted=True, clips=[TimelineClip(at_s=0, duration_s=1, start_s=5)]),
+    ])
+    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+
+    # dois videos, um audio so
+    assert c.filter_complex.count("overlay=") == 2
+    assert "amix" not in c.filter_complex
+    assert c.mapa_audio == "[aout]"

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from owcore import ffmpeg, timeline as tl
+from owcore.compose import compor
 from owcore.models import BeatGrid, ClipOptions, HighlightKind, Timeline
 from owcore.rules import Highlight, fit_to_window, montage_segments
 
@@ -250,6 +251,14 @@ def _render_timeline(
     """
     spec = item.timeline
     media = ffmpeg.probe(source)
+
+    # Camada, transformacao ou som ajustado nao cabem em corte-e-emenda: eles
+    # exigem dois pedacos existindo ao mesmo tempo. Ai a montagem vira um grafo
+    # de filtros -- mais poderoso e menos tolerante, porque um erro nele derruba
+    # o render inteiro em vez de custar um corte.
+    if not spec.de_uma_camada_so:
+        return _render_composicao(source, item, media, out_dir, index)
+
     pecas = tl.plan(spec.cuts, source_duration_s=media.duration_s)
     if not any(p.is_cut for p in pecas):
         raise ffmpeg.FFmpegError(
@@ -362,6 +371,74 @@ def _render_timeline(
             "original_audio": item.music is None,
             "music_start_s": round(spec.music_start_s, 2) if item.music else None,
             **({"render_error": erro_montagem} if erro_montagem else {}),
+        },
+    )
+
+
+def _render_composicao(
+    source: Path,
+    item: TimelineItem,
+    media: ffmpeg.MediaInfo,
+    out_dir: Path,
+    index: int,
+) -> RenderedClip:
+    """Monta em camadas, num grafo de filtros.
+
+    Uma tela de fundo cobre o video inteiro e cada clipe e sobreposto nela na
+    hora certa. O buraco entre clipes deixa de ser caso especial: ele e
+    simplesmente onde ninguem cobriu o fundo.
+
+    Diferente do caminho de corte-e-emenda, aqui **nao ha zip de cortes**: os
+    pedacos nunca chegam a existir como arquivo, e recorta-los so para o zip
+    seria pagar a montagem duas vezes.
+    """
+    spec = item.timeline
+    comp = compor(
+        spec,
+        source=source,
+        width=media.width,
+        height=media.height,
+        fps=media.fps,
+        music=item.music,
+        music_start_s=spec.music_start_s,
+        source_duration_s=media.duration_s,
+    )
+
+    dest: Path | None = out_dir / f"{index:02d}_custom.mp4"
+    erro: str | None = None
+    try:
+        ffmpeg.compose(comp, dest)
+    except ffmpeg.FFmpegError as exc:
+        log.exception("composicao de '%s' falhou", item.title)
+        erro = str(exc)[:500]
+        dest = None
+
+    clips = spec.clips
+    camadas = [l for l in spec.layers if not l.hidden]
+    thumb = _thumb(dest, out_dir, index) if dest is not None else None
+    return RenderedClip(
+        highlight=Highlight(
+            kind=HighlightKind.CUSTOM,
+            start=min((c.start_s for c in clips), default=0.0),
+            end=max((c.end_s for c in clips), default=0.0),
+            title=item.title or "Montagem",
+            beats_at=[c.source_t for c in clips],
+            meta={},
+        ),
+        video=dest,
+        thumb=thumb,
+        duration_s=spec.duration_s,
+        meta={
+            "segments": len(clips),
+            "layers": len(camadas),
+            "composed": True,
+            "hand_made": True,
+            "music_name": item.music_name,
+            "original_audio": item.music is None,
+            "music_start_s": (
+                round(spec.music_start_s, 2) if item.music else None
+            ),
+            **({"render_error": erro} if erro else {}),
         },
     )
 
