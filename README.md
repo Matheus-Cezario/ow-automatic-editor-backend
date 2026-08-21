@@ -5,7 +5,19 @@ momentos importantes e — quando o usuário escolhe — montam os vídeos. Roda
 sozinho: o frontend é opcional, e a API é navegável em
 <http://localhost:8000/docs>.
 
-> Todos os comandos abaixo assumem que você está **dentro de `backend/`**.
+> Todos os comandos abaixo assumem que você está **na raiz deste repositório**.
+
+**A documentação do sistema mora aqui:**
+
+| Documento | O que tem |
+|---|---|
+| [`docs/PRODUTO.md`](docs/PRODUTO.md) | o produto inteiro: as duas fases, os dois caminhos para virar vídeo, e o que está verificado e o que não está |
+| [`docs/PLAN.md`](docs/PLAN.md) | arquitetura, detecção, regras dos melhores momentos, montagem manual e o contrato REST |
+| [`docs/V2.md`](docs/V2.md) | o que falta para a tela de montagem virar um editor completo, em fases — **planejamento, nada implementado** |
+
+O app Flutter é um repositório à parte, e o `docker-compose.yml` (que orquestra
+os dois) vive com ele. Em disco os dois ficam lado a lado — `ow_editor/backend`
+e `ow_editor/frontend` —, e é assim que o compose os encontra.
 
 ---
 
