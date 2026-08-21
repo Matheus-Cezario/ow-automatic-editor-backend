@@ -274,6 +274,27 @@ def black_clip(
     return dest
 
 
+def proxy(src: Path, dest: Path, *, width: int = 640, fps: float = 24.0) -> Path:
+    """Cópia pequena de um vídeo, para o monitor do editor.
+
+    A gravação da partida ganha a sua de graça, dentro da decodificação que já
+    extrai os recortes. Um vídeo **importado** não passa por aquela passagem, e
+    por isso precisa da sua aqui — ainda vale a pena: buscar dentro do arquivo
+    cheio a cada arrasto é o que derruba o player.
+    """
+    s = get_settings()
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _run([
+        s.ffmpeg, "-y", "-v", "error", "-i", str(src),
+        # a vírgula precisa de escape: no filtergraph ela separa filtros
+        "-vf", f"scale=min({width}\\,iw):-2:flags=bilinear,fps={fps}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(dest),
+    ])
+    return dest
+
+
 def compose(comp, dest: Path) -> Path:
     """Roda o grafo montado por `owcore.compose`.
 

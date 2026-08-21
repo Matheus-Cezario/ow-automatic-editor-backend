@@ -12,6 +12,7 @@ Duas camadas, como no resto do projeto:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ from owcore.models import (
     STREAM_THUMBS,
     STREAM_RENDER,
     STREAM_RENDER_READY,
-    STREAM_TRACK,
+    STREAM_MEDIA,
     Job,
     Timeline,
     TimelineCut,
@@ -134,8 +135,8 @@ def subir_musica(job_id: str, music: Path = MUSIC) -> str:
     track_id = resp.json()["id"]
     assert resp.json()["status"] == "pending"
 
-    analisador = service_module("beats", "main").TrackAnalyzer()
-    for payload in drain(STREAM_TRACK, "tracks"):
+    analisador = service_module("beats", "main").MediaAnalyzer()
+    for payload in drain(STREAM_MEDIA, "media"):
         analisador.handle(payload)
     return track_id
 
@@ -173,7 +174,12 @@ def test_musica_sobe_antes_de_existir_video_e_volta_pronta_para_desenhar(
     assert len(track["beats"]) > 4, "sem batidas nao da para grudar corte nenhum"
     assert len(track["peaks"]) > 100, "sem forma de onda nao da para achar o refrao"
     assert all(0.0 <= v <= 1.0 for v in track["peaks"])
-    assert track["audio_url"].endswith(f"/api/tracks/{track_id}/audio")
+    # a URL canonica agora e a da biblioteca; a musica e um item dela
+    assert track["audio_url"].endswith(f"/api/media/{track_id}/file")
+    assert track["kind"] == "audio"
+    # e a rota antiga continua respondendo, porque o app ainda a usa
+    assert api().get(f"/api/tracks/{track_id}/audio",
+                     headers={"range": "bytes=0-31"}).status_code == 206
 
     # e ela aparece no job, para o app nao ter de guardar id nenhum
     detail = api().get(f"/api/jobs/{job_id}").json()
@@ -421,8 +427,8 @@ def test_musica_ilegivel_falha_sozinha_sem_derrubar_o_job(isolated, short_sample
     )
     track_id = resp.json()["id"]
 
-    analisador = service_module("beats", "main").TrackAnalyzer()
-    for payload in drain(STREAM_TRACK, "tracks"):
+    analisador = service_module("beats", "main").MediaAnalyzer()
+    for payload in drain(STREAM_MEDIA, "media"):
         try:
             analisador.handle(payload)
         except Exception as exc:  # o worker real transforma isto em on_error
@@ -809,3 +815,154 @@ def test_camada_muda_entra_sem_som(isolated):
     assert c.filter_complex.count("overlay=") == 2
     assert "amix" not in c.filter_complex
     assert c.mapa_audio == "[aout]"
+
+
+# ── a biblioteca de midia (Fase 4) ──────────────────────────────────────────
+
+
+def subir_media(job_id: str, nome: str, dados: bytes) -> str:
+    """Traz um arquivo e roda o worker que o analisa."""
+    resp = api().post(
+        f"/api/jobs/{job_id}/media", files={"file": (nome, dados, "application/octet-stream")}
+    )
+    assert resp.status_code == 201, resp.text
+    media_id = resp.json()["id"]
+
+    worker = service_module("beats", "main").MediaAnalyzer()
+    for payload in drain(STREAM_MEDIA, "media"):
+        worker.handle(payload)
+    return media_id
+
+
+def png_de_teste(destino: Path, cor: str = "red") -> Path:
+    """Uma imagem qualquer, feita pelo proprio ffmpeg."""
+    from owcore.config import get_settings
+
+    subprocess.run(
+        [get_settings().ffmpeg, "-y", "-v", "error", "-f", "lavfi",
+         "-i", f"color=c={cor}:s=320x180", "-frames:v", "1", str(destino)],
+        check=True,
+    )
+    return destino
+
+
+def test_a_musica_virou_um_item_da_biblioteca(isolated, short_sample):
+    """Generalizar `Track` custou uma coluna e evitou um segundo sistema de
+    upload vivendo ao lado do primeiro."""
+    job_id = run_analysis(short_sample)
+    track_id = subir_musica(job_id)
+
+    detail = api().get(f"/api/jobs/{job_id}").json()
+    assert [m["id"] for m in detail["media"]] == [track_id]
+    assert detail["media"][0]["kind"] == "audio"
+    # e continua aparecendo como musica, que e o que o seletor de trilha usa
+    assert [t["id"] for t in detail["tracks"]] == [track_id]
+
+
+def test_um_video_importado_ganha_dimensoes_miniatura_e_proxy(
+    isolated, short_sample
+):
+    job_id = run_analysis(short_sample)
+    media_id = subir_media(job_id, "clipe.mp4", short_sample.read_bytes())
+
+    item = api().get(f"/api/media/{media_id}").json()
+    assert item["status"] == "ready", item["error"]
+    assert item["kind"] == "video"
+    assert item["width"] > 0 and item["height"] > 0
+    assert item["fps"] > 0
+    assert item["duration_s"] > 5
+    assert item["thumb_url"], "sem miniatura nao da para escolher na lista"
+    assert item["proxy_url"], "sem proxy o monitor arrastaria o arquivo cheio"
+
+    # e os dois sao servidos
+    assert api().get(item["thumb_url"]).status_code == 200
+    assert api().get(item["proxy_url"]).status_code == 200
+
+
+def test_uma_imagem_ganha_dimensoes_e_miniatura_mas_nao_duracao(
+    isolated, short_sample, tmp_path
+):
+    """Quanto uma imagem fica na tela e escolha da montagem, nao propriedade do
+    arquivo."""
+    job_id = run_analysis(short_sample)
+    png = png_de_teste(tmp_path / "logo.png")
+    media_id = subir_media(job_id, "logo.png", png.read_bytes())
+
+    item = api().get(f"/api/media/{media_id}").json()
+    assert item["status"] == "ready", item["error"]
+    assert item["kind"] == "image"
+    assert (item["width"], item["height"]) == (320, 180)
+    assert item["duration_s"] == 0
+    assert item["thumb_url"]
+    assert item["proxy_url"] is None, "imagem nao precisa de proxy"
+
+
+def test_arquivo_de_tipo_desconhecido_e_recusado(isolated, short_sample):
+    """Aceitar e falhar depois seria pior do que dizer nao agora."""
+    job_id = run_analysis(short_sample)
+    resp = api().post(
+        f"/api/jobs/{job_id}/media",
+        files={"file": ("planilha.xlsx", b"nao sou midia", "application/octet-stream")},
+    )
+    assert resp.status_code == 422
+    assert "nao sei o que fazer" in resp.json()["detail"]
+
+
+def test_uma_imagem_entra_na_montagem_como_qualquer_clipe(
+    isolated, short_sample, tmp_path
+):
+    """O caminho inteiro: importar, montar por cima e conferir o mp4."""
+    job_id = run_analysis(short_sample)
+    png = png_de_teste(tmp_path / "selo.png", cor="blue")
+    media_id = subir_media(job_id, "selo.png", png.read_bytes())
+
+    camadas = [
+        {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
+        {"name": "selo", "clips": [
+            {"at_s": 0.5, "duration_s": 1.0, "source": "media",
+             "media_id": media_id,
+             "transform": {"scale": 0.5, "x": 0.5, "y": -0.5}},
+        ]},
+    ]
+    render_id = montar(job_id, [{"title": "Com selo", "layers": camadas}])
+    run_render()
+
+    pedido = api().get(f"/api/renders/{render_id}").json()
+    assert pedido["status"] == "done", pedido["error"]
+    clip = pedido["clips"][0]
+    assert clip["meta"]["media"] == 1
+    assert clip["video_url"], "o video nao saiu"
+
+    from owcore import ffmpeg
+    from owcore.storage import local_copy
+
+    with session() as s:
+        key = next(c.key for c in s.get(Job, job_id).clips)
+    saida = local_copy(key, Path(isolated.work_dir) / "com_selo")
+    assert ffmpeg.probe(saida).duration_s == pytest.approx(2.0, abs=0.35)
+
+
+def test_midia_de_outro_job_e_recusada_no_pedido(isolated, short_sample):
+    """A montagem sairia sem ela, e sem aviso."""
+    job_id = run_analysis(short_sample)
+    resp = api().post(
+        f"/api/jobs/{job_id}/renders",
+        data={"timelines": json.dumps([
+            {"layers": [{"clips": [
+                {"at_s": 0, "duration_s": 1, "source": "media",
+                 "media_id": "naoexiste"},
+            ]}]}
+        ])},
+    )
+    assert resp.status_code == 422
+    assert "midia desconhecida" in resp.json()["detail"]
+
+
+def test_tirar_da_biblioteca(isolated, short_sample, tmp_path):
+    job_id = run_analysis(short_sample)
+    png = png_de_teste(tmp_path / "x.png")
+    media_id = subir_media(job_id, "x.png", png.read_bytes())
+
+    assert api().delete(f"/api/media/{media_id}").status_code == 204
+    assert api().get(f"/api/media/{media_id}").status_code == 404
+    assert api().get(f"/api/jobs/{job_id}").json()["media"] == []

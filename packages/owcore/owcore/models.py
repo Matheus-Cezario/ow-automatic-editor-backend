@@ -44,15 +44,29 @@ class RenderStatus(StrEnum):
 
 
 class TrackStatus(StrEnum):
-    """Ciclo de vida de *uma musica* enviada para o job.
+    """Ciclo de vida de *um item de midia* enviado para o job.
 
-    A musica sobe antes de qualquer video existir: e preciso ouvi-la no app e
-    ver as batidas para poder posicionar os cortes em cima dela.
+    Uma musica sobe antes de qualquer video existir: e preciso ouvi-la no app e
+    ver as batidas para poder posicionar os cortes em cima dela. Com a
+    biblioteca de midia, o mesmo vale para um clipe ou uma imagem importada --
+    o app precisa da miniatura e das dimensoes antes de deixar montar com eles.
     """
 
     PENDING = "pending"
     READY = "ready"
     FAILED = "failed"
+
+
+class MediaKind(StrEnum):
+    """O que o arquivo importado e.
+
+    Decide o que a analise faz com ele: audio ganha batidas e forma de onda,
+    video ganha miniatura e proxy, imagem ganha miniatura.
+    """
+
+    AUDIO = "audio"
+    VIDEO = "video"
+    IMAGE = "image"
 
 
 class EventKind(StrEnum):
@@ -577,8 +591,9 @@ STREAM_EDIT = "ow.edit"
 STREAM_RENDER = "ow.render"
 #: pedido com as batidas já analisadas, pronto para o editor cortar
 STREAM_RENDER_READY = "ow.render.ready"
-#: música recém-enviada, esperando quem extraia as batidas e a forma de onda
-STREAM_TRACK = "ow.track"
+#: arquivo recém-enviado, esperando quem o analise (batidas e onda para áudio;
+#: miniatura, dimensões e proxy para vídeo e imagem)
+STREAM_MEDIA = "ow.media"
 #: análise terminada: alguém que extraia uma miniatura de cada momento
 STREAM_THUMBS = "ow.thumbs"
 
@@ -610,8 +625,8 @@ class RenderRequested(BaseModel):
     render_id: str
 
 
-class TrackUploaded(BaseModel):
-    track_id: str
+class MediaUploaded(BaseModel):
+    media_id: str
 
 
 class ThumbsRequested(BaseModel):
@@ -671,7 +686,7 @@ class Job(Base):
     reports: Mapped[list["DetectorReport"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
-    tracks: Mapped[list["Track"]] = relationship(
+    media: Mapped[list["Media"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
 
@@ -728,13 +743,21 @@ class Render(Base):
     )
 
 
-class Track(Base):
-    """Uma musica enviada para o job, ja ouvida pelo sistema.
+class Media(Base):
+    """Um arquivo que o usuario trouxe: musica, clipe ou imagem.
 
-    Ela sobe **antes** de qualquer video: o usuario precisa toca-la no app, ver
-    as batidas e a forma de onda, e so entao decidir onde cada corte cai. Por
-    isso ela e do job, e nao de um pedido -- a mesma musica serve a quantas
-    montagens ele quiser, sem subir de novo.
+    Comecou como "a musica do job" e virou a biblioteca de midia da partida --
+    porque era a mesma coisa. Uma musica sobe, um worker a analisa e o gateway
+    a entrega com `Range`: e exatamente o caminho que um clipe importado
+    percorre. Generalizar custou uma coluna (`kind`) e evitou um segundo sistema
+    de upload vivendo ao lado do primeiro.
+
+    Ela e do **job**, e nao de um pedido: o mesmo arquivo serve a quantas
+    montagens o usuario quiser, sem subir de novo.
+
+    > A tabela ainda se chama `tracks`, por historia. Renomea-la exigiria migrar
+    > dados por um ganho de estetica; o modelo, que e o que se le no codigo, diz
+    > o que ela guarda.
     """
 
     __tablename__ = "tracks"
@@ -743,18 +766,37 @@ class Track(Base):
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(String(16), default=TrackStatus.PENDING)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: audio, video ou imagem. O default cobre as linhas de quando so havia
+    #: musica: elas eram todas audio
+    kind: Mapped[str] = mapped_column(String(16), default=MediaKind.AUDIO)
     name: Mapped[str] = mapped_column(String(255), default="")
     key: Mapped[str] = mapped_column(String(255))
     duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # ── so audio ────────────────────────────────────────────────────────────
     bpm: Mapped[float] = mapped_column(Float, default=0.0)
     #: instantes das batidas, em segundos
     beats: Mapped[list] = mapped_column(JSON, default=list)
     #: forma de onda ja reduzida a alguns milhares de picos (0..1), para o app
     #: desenhar sem baixar o audio inteiro
     peaks: Mapped[list] = mapped_column(JSON, default=list)
+
+    # ── video e imagem ──────────────────────────────────────────────────────
+    width: Mapped[int] = mapped_column(Integer, default=0)
+    height: Mapped[int] = mapped_column(Integer, default=0)
+    fps: Mapped[float] = mapped_column(Float, default=0.0)
+    thumb_key: Mapped[str] = mapped_column(String(255), default="")
+    #: copia reduzida, pelo mesmo motivo do proxy da gravacao: o monitor nao
+    #: pode arrastar o arquivo cheio a cada busca
+    proxy_key: Mapped[str] = mapped_column(String(255), default="")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
-    job: Mapped[Job] = relationship(back_populates="tracks")
+    job: Mapped[Job] = relationship(back_populates="media")
+
+    @property
+    def is_audio(self) -> bool:
+        return self.kind == MediaKind.AUDIO
 
 
 class Event(Base):

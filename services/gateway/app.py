@@ -26,9 +26,9 @@ from owcore.config import get_settings
 from owcore.db import init_db, session
 from owcore.models import (
     STREAM_JOBS,
+    STREAM_MEDIA,
     STREAM_RENDER,
     STREAM_THUMBS,
-    STREAM_TRACK,
     Clip,
     ClipOptions,
     HighlightKind,
@@ -36,6 +36,9 @@ from owcore.models import (
     JobCreated,
     JobParams,
     JobStatus,
+    Media,
+    MediaKind,
+    MediaUploaded,
     MontageDraft,
     Proposal,
     Render,
@@ -44,9 +47,7 @@ from owcore.models import (
     Selection,
     ThumbsRequested,
     Timeline,
-    Track,
     TrackStatus,
-    TrackUploaded,
     frame_key,
     new_id,
 )
@@ -63,6 +64,7 @@ MONTAGE_KINDS = {
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 CHUNK = 1024 * 256
 
 #: A gravacao original tambem e servida ao app: e ela que o preview da tela de
@@ -80,6 +82,15 @@ VIDEO_MIME = {
 
 #: O player do app pede a musica por HTTP; sem o tipo certo alguns navegadores
 #: se recusam a tocar (e sem tocar nao ha como posicionar corte nenhum).
+IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
 AUDIO_MIME = {
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
@@ -201,9 +212,10 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
             for r in job.reports
         ]
         data["clips"] = [_clip_dict(c) for c in sorted(job.clips, key=lambda c: -c.score)]
-        data["tracks"] = [
-            _track_dict(t) for t in sorted(job.tracks, key=lambda t: t.created_at)
-        ]
+        biblioteca = sorted(job.media, key=lambda m: m.created_at)
+        data["media"] = [_media_dict(m) for m in biblioteca]
+        # `tracks` continua sendo so as musicas: e o que o seletor de trilha usa
+        data["tracks"] = [_media_dict(m) for m in biblioteca if m.is_audio]
         # a montagem em andamento volta com o job: e assim que a tela de
         # montagem se reconstroi depois de um F5
         data["draft"] = job.draft or {}
@@ -229,29 +241,6 @@ def _proposal_dict(p: Proposal) -> dict[str, Any]:
         "moments": [round(float(t), 2) for t in (p.moments or [])],
         "accepts_music": p.kind in MONTAGE_KINDS,
         "meta": p.meta,
-    }
-
-
-def _track_dict(t: Track) -> dict[str, Any]:
-    """Uma musica ja ouvida pelo sistema.
-
-    Vai completa para o app -- batidas e forma de onda inclusive -- porque e
-    com isso que a tela de montagem desenha a musica e gruda os cortes na
-    batida. Sao alguns milhares de numeros, na ordem de dezenas de KB: menos do
-    que uma miniatura, e evita o app baixar o audio so para desenhar.
-    """
-    return {
-        "id": t.id,
-        "job_id": t.job_id,
-        "status": t.status,
-        "error": t.error,
-        "name": t.name,
-        "duration_s": round(t.duration_s, 3),
-        "bpm": round(t.bpm, 2),
-        "beats": t.beats or [],
-        "peaks": t.peaks or [],
-        "audio_url": f"/api/tracks/{t.id}/audio",
-        "created_at": t.created_at.isoformat(),
     }
 
 
@@ -452,7 +441,9 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                 409, f"a analise deste job ainda nao terminou (status: {job.status})"
             )
         validos = {p.id: p for p in job.proposals}
-        musicas = {t.id: t.status for t in job.tracks}
+        # a montagem aponta para uma musica; a biblioteca guarda mais que isso
+        musicas = {m.id: m.status for m in job.media if m.is_audio}
+        biblioteca = {m.id for m in job.media}
 
     escolhas: list[Selection] = []
     vistos: set[str] = set()
@@ -510,6 +501,14 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                     f"a musica {spec.track_id} ainda nao foi analisada "
                     f"(status: {musicas[spec.track_id]})",
                 )
+        # um clipe que aponta para midia de outro job nao entra: a montagem
+        # sairia sem ele, e sem aviso
+        for clip in spec.clips:
+            if clip.media_id and clip.media_id not in biblioteca:
+                raise HTTPException(
+                    422,
+                    f"midia desconhecida neste job: {clip.media_id!r}",
+                )
         montagens.append(spec)
 
     with session() as s:
@@ -560,71 +559,208 @@ def delete_render(render_id: str) -> Response:
 # montagens o usuario quiser fazer daquela partida, sem subir de novo.
 
 
-@app.post("/api/jobs/{job_id}/tracks", status_code=201)
-def add_track(
-    job_id: str,
-    audio: UploadFile = File(..., description="musica para montar em cima"),
-) -> dict[str, Any]:
-    """Envia uma musica e manda o sistema ouvi-la.
+def _media_dict(m: Media) -> dict[str, Any]:
+    """Um item da biblioteca de midia da partida.
 
-    Responde na hora, com a musica ainda `pending`: a analise roda no worker de
-    ritmo e o app acompanha por `GET /api/tracks/{id}`.
+    Audio vai completo -- batidas e forma de onda inclusive --, porque e com
+    isso que a tela de montagem desenha a musica e gruda os cortes na batida.
+    Video e imagem vao com dimensoes e os enderecos da miniatura e do proxy.
+    """
+    dados = {
+        "id": m.id,
+        "job_id": m.job_id,
+        "kind": m.kind,
+        "status": m.status,
+        "error": m.error,
+        "name": m.name,
+        "duration_s": round(m.duration_s, 3),
+        "file_url": f"/api/media/{m.id}/file",
+        "thumb_url": f"/api/media/{m.id}/thumb" if m.thumb_key else None,
+        "proxy_url": f"/api/media/{m.id}/proxy" if m.proxy_key else None,
+        "created_at": m.created_at.isoformat(),
+    }
+    if m.is_audio:
+        dados |= {
+            "bpm": round(m.bpm, 2),
+            "beats": m.beats or [],
+            "peaks": m.peaks or [],
+            # o app ainda pede a musica por aqui
+            "audio_url": f"/api/media/{m.id}/file",
+        }
+    else:
+        dados |= {"width": m.width, "height": m.height, "fps": round(m.fps, 3)}
+    return dados
+
+
+def _guardar_media(job_id: str, arquivo: UploadFile, kind: MediaKind) -> str:
+    """Grava o arquivo e manda analisa-lo. Devolve o id."""
+    media_id = new_id()
+    padrao = {
+        MediaKind.AUDIO: (AUDIO_EXTS, ".mp3"),
+        MediaKind.VIDEO: (VIDEO_EXTS, ".mp4"),
+        MediaKind.IMAGE: (IMAGE_EXTS, ".png"),
+    }[kind]
+    ext = _safe_suffix(arquivo.filename, *padrao)
+    key = get_storage().put_stream(f"{job_id}/media/{media_id}{ext}", arquivo.file)
+
+    with session() as s:
+        s.add(
+            Media(
+                id=media_id,
+                job_id=job_id,
+                kind=kind,
+                status=TrackStatus.PENDING,
+                name=arquivo.filename or "arquivo",
+                key=key,
+            )
+        )
+    get_bus().publish(STREAM_MEDIA, MediaUploaded(media_id=media_id).model_dump())
+    return media_id
+
+
+def _tipo_de(filename: str | None) -> MediaKind | None:
+    """De que tipo e o arquivo, pela extensao.
+
+    Pela extensao e nao pelo `content-type` porque o navegador mente com
+    frequencia -- manda `application/octet-stream` para tudo quando o arquivo
+    veio de um lugar que ele nao conhece.
+    """
+    ext = Path(filename or "").suffix.lower()
+    if ext in AUDIO_EXTS:
+        return MediaKind.AUDIO
+    if ext in VIDEO_EXTS:
+        return MediaKind.VIDEO
+    if ext in IMAGE_EXTS:
+        return MediaKind.IMAGE
+    return None
+
+
+@app.post("/api/jobs/{job_id}/media", status_code=201)
+def add_media(
+    job_id: str,
+    file: UploadFile = File(..., description="video, imagem ou audio"),
+) -> dict[str, Any]:
+    """Traz um arquivo para a biblioteca da partida.
+
+    Responde na hora, com o item ainda `pending`: a analise (dimensoes,
+    miniatura, proxy; batidas quando for audio) roda no worker, e o app
+    acompanha por `GET /api/media/{id}`.
     """
     with session() as s:
         if s.get(Job, job_id) is None:
             raise HTTPException(404, "job nao encontrado")
 
-    track_id = new_id()
-    ext = _safe_suffix(audio.filename, AUDIO_EXTS, ".mp3")
-    key = get_storage().put_stream(f"{job_id}/tracks/{track_id}{ext}", audio.file)
-
-    with session() as s:
-        s.add(
-            Track(
-                id=track_id,
-                job_id=job_id,
-                status=TrackStatus.PENDING,
-                name=audio.filename or "musica",
-                key=key,
-            )
+    kind = _tipo_de(file.filename)
+    if kind is None:
+        raise HTTPException(
+            422,
+            f"nao sei o que fazer com {file.filename!r}: aceito video, imagem "
+            "e audio",
         )
+    media_id = _guardar_media(job_id, file, kind)
+    return {"id": media_id, "job_id": job_id, "kind": kind,
+            "status": TrackStatus.PENDING}
 
-    get_bus().publish(STREAM_TRACK, TrackUploaded(track_id=track_id).model_dump())
-    return {"id": track_id, "job_id": job_id, "status": TrackStatus.PENDING}
+
+@app.get("/api/media/{media_id}")
+def get_media(media_id: str) -> dict[str, Any]:
+    with session() as s:
+        item = s.get(Media, media_id)
+        if item is None:
+            raise HTTPException(404, "midia nao encontrada")
+        return _media_dict(item)
+
+
+@app.delete("/api/media/{media_id}", status_code=204)
+def delete_media(media_id: str) -> Response:
+    """Tira o item da biblioteca. Os videos ja gerados com ele ficam: o mp4
+    final ja tem o que precisava dentro."""
+    with session() as s:
+        item = s.get(Media, media_id)
+        if item is None:
+            raise HTTPException(404, "midia nao encontrada")
+        s.delete(item)
+    return Response(status_code=204)
+
+
+@app.get("/api/media/{media_id}/file")
+def media_file(media_id: str, request: Request) -> Response:
+    """O arquivo em si, com `Range`."""
+    with session() as s:
+        item = s.get(Media, media_id)
+        if item is None:
+            raise HTTPException(404, "midia nao encontrada")
+        key, kind = item.key, item.kind
+    ext = Path(key).suffix.lower()
+    mime = (
+        AUDIO_MIME.get(ext, "audio/mpeg")
+        if kind == MediaKind.AUDIO
+        else IMAGE_MIME.get(ext, "image/png")
+        if kind == MediaKind.IMAGE
+        else VIDEO_MIME.get(ext, "video/mp4")
+    )
+    return _serve_blob(key, request, mime)
+
+
+@app.get("/api/media/{media_id}/thumb")
+def media_thumb(media_id: str, request: Request) -> Response:
+    with session() as s:
+        item = s.get(Media, media_id)
+        if item is None:
+            raise HTTPException(404, "midia nao encontrada")
+        key = item.thumb_key
+    if not key:
+        raise HTTPException(404, "sem miniatura")
+    resposta = _serve_blob(key, request, "image/jpeg")
+    resposta.headers["cache-control"] = "public, max-age=86400"
+    return resposta
+
+
+@app.get("/api/media/{media_id}/proxy")
+def media_proxy(media_id: str, request: Request) -> Response:
+    """A copia reduzida do video importado -- o que o monitor abre."""
+    with session() as s:
+        item = s.get(Media, media_id)
+        if item is None:
+            raise HTTPException(404, "midia nao encontrada")
+        key = item.proxy_key
+    if not key:
+        raise HTTPException(404, "este item nao tem proxy")
+    return _serve_blob(key, request, "video/mp4")
+
+
+# ── as rotas de musica, agora cascas sobre a biblioteca ─────────────────────
+#
+# Elas continuam existindo porque o app as usa e porque "a musica do job" e um
+# nome util. Por baixo e tudo `Media` de tipo audio.
+
+
+@app.post("/api/jobs/{job_id}/tracks", status_code=201)
+def add_track(
+    job_id: str,
+    audio: UploadFile = File(..., description="musica para montar em cima"),
+) -> dict[str, Any]:
+    """Envia uma musica e manda o sistema ouvi-la."""
+    with session() as s:
+        if s.get(Job, job_id) is None:
+            raise HTTPException(404, "job nao encontrado")
+    media_id = _guardar_media(job_id, audio, MediaKind.AUDIO)
+    return {"id": media_id, "job_id": job_id, "status": TrackStatus.PENDING}
 
 
 @app.get("/api/tracks/{track_id}")
 def get_track(track_id: str) -> dict[str, Any]:
-    with session() as s:
-        track = s.get(Track, track_id)
-        if track is None:
-            raise HTTPException(404, "musica nao encontrada")
-        return _track_dict(track)
+    return get_media(track_id)
 
 
 @app.get("/api/tracks/{track_id}/audio")
 def track_audio(track_id: str, request: Request) -> Response:
-    """O arquivo em si, com Range -- e o que o player do app toca enquanto o
-    usuario arrasta os cortes."""
-    with session() as s:
-        track = s.get(Track, track_id)
-        if track is None:
-            raise HTTPException(404, "musica nao encontrada")
-        key = track.key
-    mime = AUDIO_MIME.get(Path(key).suffix.lower(), "audio/mpeg")
-    return _serve_blob(key, request, mime)
+    return media_file(track_id, request)
 
 
 @app.delete("/api/tracks/{track_id}", status_code=204)
 def delete_track(track_id: str) -> Response:
-    """Tira a musica do job. Os videos ja gerados com ela ficam: o mp4 final ja
-    tem a trilha dentro."""
-    with session() as s:
-        track = s.get(Track, track_id)
-        if track is None:
-            raise HTTPException(404, "musica nao encontrada")
-        s.delete(track)
-    return Response(status_code=204)
+    return delete_media(track_id)
 
 
 @app.get("/api/jobs")

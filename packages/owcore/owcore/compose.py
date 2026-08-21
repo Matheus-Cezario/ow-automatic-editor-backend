@@ -32,7 +32,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .models import ClipSource, Timeline, TimelineClip
+from .models import ClipSource, MediaKind, Timeline, TimelineClip
+
+
+@dataclass(slots=True)
+class MidiaNoDisco:
+    """Um item da biblioteca já baixado, com o que o grafo precisa saber dele.
+
+    O tipo importa porque imagem não é vídeo: ela não corre no tempo, então
+    entra em laço e ganha a duração que o clipe pedir.
+    """
+
+    caminho: Path
+    kind: str = MediaKind.VIDEO
+
+    @property
+    def e_imagem(self) -> bool:
+        return self.kind == MediaKind.IMAGE
 
 
 @dataclass(slots=True)
@@ -46,11 +62,15 @@ class Entrada:
     duracao: float | None = None
     #: entradas sintéticas (cor, silêncio) vêm de `-f lavfi`
     lavfi: bool = False
+    #: uma imagem é um quadro só; em laço ela vira vídeo pelo tempo que se pedir
+    loop: bool = False
 
     def argumentos(self) -> list[str]:
         args: list[str] = []
         if self.lavfi:
             args += ["-f", "lavfi"]
+        if self.loop:
+            args += ["-loop", "1"]
         if self.seek is not None:
             args += ["-ss", f"{self.seek:.3f}"]
         if self.duracao is not None:
@@ -127,6 +147,63 @@ def _cadeia_de_audio(clip: TimelineClip, entrada: int, saida: str) -> str | None
     return ",".join(passos) + f"[{saida}]"
 
 
+def _entrada_do_clipe(
+    clip: TimelineClip,
+    *,
+    source: Path,
+    source_duration_s: float,
+    midias: dict[str, MidiaNoDisco],
+) -> tuple[Entrada | None, float, bool]:
+    """A entrada do ffmpeg para este clipe, a duração útil e se ele tem som.
+
+    Devolve `None` quando o clipe cai fora da fonte — o lugar dele fica sendo a
+    tela de fundo, e os clipes seguintes não saem de onde foram postos.
+    """
+    if clip.source is ClipSource.RECORDING:
+        duracao = clip.duration_s
+        if source_duration_s > 0:
+            duracao = min(duracao, max(0.0, source_duration_s - clip.start_s))
+        if duracao <= 0:
+            return None, 0.0, False
+        return (
+            Entrada(caminho=str(source), seek=clip.start_s, duracao=duracao),
+            duracao,
+            True,
+        )
+
+    if clip.source is ClipSource.MEDIA:
+        item = midias.get(clip.media_id or "")
+        if item is None:
+            raise ValueError(
+                f"a midia {clip.media_id!r} nao esta na biblioteca deste job"
+            )
+        if item.e_imagem:
+            # uma imagem não corre no tempo: ela entra em laço e dura o que o
+            # clipe pedir, sem `-ss` (não há onde buscar num quadro só)
+            return (
+                Entrada(
+                    caminho=str(item.caminho),
+                    duracao=clip.duration_s,
+                    loop=True,
+                ),
+                clip.duration_s,
+                False,
+            )
+        return (
+            Entrada(
+                caminho=str(item.caminho),
+                seek=clip.start_s,
+                duracao=clip.duration_s,
+            ),
+            clip.duration_s,
+            True,
+        )
+
+    # cor e texto chegam nas fases que as desenham; ignorar em silêncio seria
+    # pior do que não aceitar
+    raise ValueError(f"fonte '{clip.source}' ainda nao e montavel")
+
+
 def compor(
     timeline: Timeline,
     *,
@@ -137,11 +214,17 @@ def compor(
     music: Path | None = None,
     music_start_s: float = 0.0,
     source_duration_s: float = 0.0,
+    midias: dict[str, MidiaNoDisco] | None = None,
 ) -> Composicao:
     """O grafo que monta esta linha do tempo.
 
     As camadas entram de baixo para cima, e dentro de cada uma os clipes entram
     na ordem do tempo. Camada escondida não entra; camada muda entra sem som.
+
+    `midias` mapeia o id de cada item da biblioteca para o arquivo dele em
+    disco. Um clipe de mídia é mais uma entrada no grafo, e daí em diante passa
+    pelas mesmas transformações de um trecho da gravação — é o ponto de ter um
+    formato só de clipe.
 
     Um clipe que passa do fim da gravação é **aparado**, como na V1 — o que
     sobrar do lugar dele fica sendo a tela de fundo, e os clipes seguintes não
@@ -169,25 +252,17 @@ def compor(
         if camada.hidden:
             continue
         for clip in camada.clips:
-            if clip.source is not ClipSource.RECORDING:
-                # cor, mídia e texto chegam nas fases seguintes; ignorar em
-                # silêncio seria pior do que não aceitar
-                raise ValueError(
-                    f"fonte '{clip.source}' ainda nao e montavel: so gravacao"
-                )
-
-            duracao_util = clip.duration_s
-            if source_duration_s > 0:
-                duracao_util = min(
-                    duracao_util, max(0.0, source_duration_s - clip.start_s)
-                )
-            if duracao_util <= 0:
-                continue  # cai fora da gravacao; o lugar dele fica de fundo
+            entrada, duracao_util, tem_som = _entrada_do_clipe(
+                clip,
+                source=source,
+                source_duration_s=source_duration_s,
+                midias=midias or {},
+            )
+            if entrada is None:
+                continue  # cai fora da fonte; o lugar dele fica de fundo
 
             n += 1
-            c.entradas.append(
-                Entrada(caminho=str(source), seek=clip.start_s, duracao=duracao_util)
-            )
+            c.entradas.append(entrada)
             aparado = clip.model_copy(update={"duration_s": duracao_util})
 
             c.filtros.append(_cadeia_de_video(aparado, n, f"v{n}"))
@@ -200,7 +275,7 @@ def compor(
             )
             anterior = saida
 
-            if not camada.muted:
+            if not camada.muted and tem_som:
                 cadeia = _cadeia_de_audio(aparado, n, f"a{n}")
                 if cadeia is not None:
                     c.filtros.append(cadeia)

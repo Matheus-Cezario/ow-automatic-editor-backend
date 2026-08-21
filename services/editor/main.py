@@ -33,10 +33,11 @@ from owcore.models import (
     Proposal,
     Render,
     RenderStatus,
+    Media,
     Selection,
     Timeline,
-    Track,
 )
+from owcore.compose import MidiaNoDisco
 from owcore.rules import Highlight
 from owcore.storage import get_storage, local_copy
 from owcore.worker import Worker, run_worker
@@ -214,7 +215,7 @@ class Editor(Worker):
                 music = None
                 music_name = None
                 if spec.track_id:
-                    track = s.get(Track, spec.track_id)
+                    track = s.get(Media, spec.track_id)
                     if track is None or track.job_id != job_id:
                         # a musica sumiu, o video nao: sai com o audio da partida
                         self.log.warning(
@@ -224,12 +225,29 @@ class Editor(Worker):
                     else:
                         music = local_copy(track.key, work)
                         music_name = track.name
+                # a biblioteca de midia que esta montagem usa, ja em disco
+                midias: dict[str, object] = {}
+                for clip in spec.clips:
+                    if not clip.media_id or clip.media_id in midias:
+                        continue
+                    item = s.get(Media, clip.media_id)
+                    if item is None or item.job_id != job_id:
+                        self.log.warning(
+                            "midia %s nao e deste job; a montagem vai sem ela",
+                            clip.media_id,
+                        )
+                        continue
+                    midias[clip.media_id] = MidiaNoDisco(
+                        caminho=local_copy(item.key, work), kind=item.kind
+                    )
+
                 items.append(
                     render.TimelineItem(
                         timeline=spec,
                         title=spec.title or f"Montagem {i}",
                         music=music,
                         music_name=music_name,
+                        midias=midias,
                     )
                 )
         return items
