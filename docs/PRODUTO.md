@@ -144,6 +144,32 @@ termina; o vídeo é montado para caber nesse trecho:
 O início é encaixado na primeira batida a partir do ponto pedido, para o
 primeiro corte cair no tempo em vez de entrar no meio de um compasso.
 
+### Várias montagens da mesma partida
+
+Uma partida rende mais de um vídeo. O corte de 30 s para o Shorts e a montagem
+longa são trabalhos diferentes sobre o mesmo material, e cada um tem o seu nome
+— dá para trocar entre eles pelo alto da tela, duplicar um para experimentar sem
+arriscar o que já está bom, e apagar o que não deu certo.
+
+Cada montagem guarda um **histórico**. Não é o desfazer, que vale só enquanto a
+aba está aberta: são marcos. Um é guardado a cada vídeo gerado — o que saiu foi
+aquilo —, e dá para marcar um a qualquer momento ("estava bom assim"). Voltar
+para um deles não apaga o que estava na frente: isso também vira um marco antes.
+
+### Predefinições: a segunda partida sai pronta
+
+Uma predefinição não guarda cortes — guarda o **jeito** de cortar. "Dois
+segundos por eliminação, encaixado na batida, com zoom e contador" vale para
+qualquer partida; uma lista de cortes só vale para aquela.
+
+Monte um vídeo do jeito que gosta, salve como predefinição, e a próxima partida
+sai montada num clique. O que sai é uma montagem comum: cada bloco continua se
+movendo, se aparando e se apagando como qualquer outro — a predefinição é um
+ponto de partida, não um molde do qual não se sai.
+
+O tamanho pode ser em segundos ou em **batidas**. Em batidas é melhor: sobrevive
+a uma música de outro andamento.
+
 ### Escolhendo o formato de saída
 
 Uma montagem não tem formato: ela tem cortes, camadas e efeitos. O formato é a
@@ -284,7 +310,7 @@ player de áudio dentro do app — se a música não tocar no seu navegador, a
 montagem continua possível pela onda e pelas batidas desenhadas, e a tela diz
 isso em vez de travar.
 
-**Suíte de testes**: 199 no backend, 209 no frontend. Cobrem as duas fases, os
+**Suíte de testes**: 223 no backend, 241 no frontend. Cobrem as duas fases, os
 contratos entre os microsserviços, o corte no ritmo, músicas diferentes no
 mesmo pedido, a montagem manual (o buraco que vira preto, o corte aparado que
 não move os vizinhos, o ímã da batida), a resiliência (um detector que falha

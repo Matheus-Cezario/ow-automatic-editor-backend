@@ -127,6 +127,8 @@ SQLAlchemy 2.0, mesma model em SQLite e Postgres.
 | `tracks` | uma música enviada para a partida, com duração, BPM, batidas e forma de onda — é o que a tela de montagem toca e desenha |
 | `renders` | um **pedido** de geração: as escolhas (opções e música de cada uma), as montagens manuais e o andamento (`pending → rendering → done`) |
 | `clips` | o vídeo gerado, ligado ao pedido e à proposta que o originou (montagem manual não tem proposta) |
+| `montages` | uma montagem **nomeada** de uma partida, com o histórico dela em `montage_versions`. Uma partida rende mais de um vídeo |
+| `presets` | o **jeito** de montar, guardado para a próxima partida. Não pertence a job nenhum, de propósito |
 
 A separação entre `proposals` e `clips` é o que torna o fluxo repetível: gerar
 um vídeo cria um `clip` e **não altera** a `proposal`, então a mesma proposta
@@ -259,16 +261,25 @@ decodificação única é o ponto.
 ### 4.3 A montagem não se perde
 
 Meia hora de encaixe na batida sumia num F5 — a montagem só existia na memória
-da aba. Agora ela é do **job**: uma coluna `draft` guarda a montagem em
-andamento, o app salva sozinho um segundo e meio depois da última mexida (um
-arrasto inteiro vira um salvamento só), e a tela a recupera ao abrir.
+da aba. Agora ela é do **job**, e são **várias**: cada uma na tabela `montages`,
+com nome, porque o corte de 30 s para o Shorts e a montagem longa são trabalhos
+diferentes sobre o mesmo material. O app salva sozinho um segundo e meio depois
+da última mexida (um arrasto inteiro vira um salvamento só), e a tela recupera a
+mais recente ao abrir.
 
-O rascunho é uma `Timeline` sem a exigência de estar pronta: aceita zero cortes,
-porque existe desde antes de o primeiro bloco entrar. Cada bloco, esse sim, é
-validado — guardar lixo agora seria devolver lixo na próxima abertura.
+Cada montagem é uma `Timeline` sem a exigência de estar pronta: aceita zero
+cortes, porque existe desde antes de o primeiro bloco entrar. Cada bloco, esse
+sim, é validado — guardar lixo agora seria devolver lixo na próxima abertura.
 
-Gerar o vídeo **não** apaga o rascunho: depois de gerar, o normal é querer
-ajustar e gerar de novo, e perder a montagem nesse ponto seria o mesmo estrago.
+Gerar o vídeo **não** apaga a montagem: depois de gerar, o normal é querer
+ajustar e gerar de novo, e perder o trabalho nesse ponto seria o mesmo estrago.
+O que gerar faz é tirar uma **foto** (`montage_versions`) — o que saiu foi
+aquilo, e é o que torna o histórico útil sem guardar um estado por salvamento
+automático.
+
+A coluna `draft` do job, que guardava a montagem única, é lida uma última vez:
+na primeira abertura ela vira a primeira montagem nomeada e se esvazia. Quem
+sabe converter o formato velho é o código que lê.
 
 ### 4.4 O monitor
 
@@ -325,8 +336,16 @@ enquanto o usuário arrasta, e quem confere depois tem de chegar no mesmo númer
 | `GET /api/jobs/{id}/video` | a gravação original, com `Range` — é o que o monitor da tela de montagem mostra |
 | `GET /api/jobs/{id}/frame?t=` | o quadro daquele instante, para a barra lateral. 404 = ainda não extraída |
 | `POST /api/jobs/{id}/frames` | manda extrair as que faltam (jobs novos já saem com elas) |
-| `PUT /api/jobs/{id}/draft` | guarda a montagem em andamento (o app chama sozinho) |
-| `DELETE /api/jobs/{id}/draft` | descarta a montagem em andamento |
+| `GET /api/jobs/{id}/montages` | as montagens desta partida, da mais recente para a mais antiga |
+| `POST /api/jobs/{id}/montages` | começa uma montagem, vazia ou com um conteúdo dado |
+| `PUT /api/jobs/{id}/montages/{mid}` | guarda a montagem e/ou renomeia (o app chama sozinho) |
+| `POST /api/jobs/{id}/montages/{mid}/duplicate` | uma cópia, sem o histórico da original |
+| `DELETE /api/jobs/{id}/montages/{mid}` | apaga a montagem e as versões dela |
+| `GET/POST /api/jobs/{id}/montages/{mid}/versions` | o histórico, e marcar uma foto. `409` = nada mudou desde a última |
+| `POST .../versions/{vid}/restore` | volta para uma foto; a de agora vira foto antes |
+| `GET/POST /api/presets`, `PUT/DELETE /api/presets/{id}` | as predefinições. Não pertencem a partida nenhuma |
+| `PUT /api/jobs/{id}/draft` | **legado**: escreve na montagem mais recente |
+| `DELETE /api/jobs/{id}/draft` | **legado**: descarta as montagens da partida |
 | `DELETE /api/tracks/{id}` | tira a música do job; vídeos já gerados com ela ficam |
 | `POST /api/jobs/{id}/renders` | multipart: `selections` (JSON) + um `music_<proposal_id>` por escolha que quiser trilha, e/ou `timelines` (JSON) com as montagens manuais. Os dois convivem no mesmo pedido. Exige o job em `ready` |
 | `GET /api/renders/{id}` | andamento e clipes de um pedido |

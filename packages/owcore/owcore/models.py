@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -740,6 +740,67 @@ class Layer(BaseModel):
         return max((c.until_s for c in self.clips), default=0.0)
 
 
+class Receita(BaseModel):
+    """Como montar um video a partir do que aconteceu numa partida.
+
+    Uma predefinicao nao guarda cortes -- guarda o **jeito** de cortar. "Dois
+    segundos por eliminacao, encaixado na batida, com zoom" vale para qualquer
+    partida, enquanto uma lista de cortes so vale para aquela.
+
+    E o que faz a segunda partida custar um clique em vez de meia hora de
+    encaixe.
+    """
+
+    #: que eventos viram corte
+    kinds: list[str] = Field(default_factory=lambda: ["kill", "sleep", "stun"])
+    #: quanto tempo antes do evento o corte comeca -- o momento precisa de
+    #: embalo, senao a eliminacao aparece no primeiro quadro
+    lead_s: float = 1.0
+    #: tamanho de cada corte. Ignorado quando `beats_per_cut` manda
+    duration_s: float = 2.0
+    #: com trilha, cada corte dura N batidas em vez de `duration_s`
+    beats_per_cut: float = 0.0
+    #: espaco entre um corte e o seguinte
+    gap_s: float = 0.0
+    #: quantos cortes no maximo. `0` = todos os que houver
+    max_cuts: int = 0
+
+    #: efeitos aplicados a cada corte
+    zoom: bool = False
+    fade_s: float = 0.0
+    speed: float = 1.0
+
+    #: texto que o sistema escreve sozinho
+    counter: bool = False
+    streaks: bool = False
+
+    music_volume: float = 1.0
+    game_volume: float = 0.0
+    export: ExportSpec = Field(default_factory=ExportSpec)
+
+    @model_validator(mode="after")
+    def _faz_sentido(self) -> "Receita":
+        if self.lead_s < 0:
+            raise ValueError("lead_s nao pode ser negativo")
+        if self.duration_s < MIN_CUT_S:
+            raise ValueError(f"cada corte tem de ter ao menos {MIN_CUT_S}s")
+        if self.beats_per_cut < 0:
+            raise ValueError("beats_per_cut nao pode ser negativo")
+        if self.gap_s < 0:
+            raise ValueError("gap_s nao pode ser negativo")
+        if self.max_cuts < 0:
+            raise ValueError("max_cuts nao pode ser negativo")
+        if not 0.1 <= self.speed <= 8.0:
+            raise ValueError("speed vai de 0.1 a 8")
+        if self.fade_s < 0:
+            raise ValueError("fade_s nao pode ser negativo")
+        for nome, v in (("music_volume", self.music_volume),
+                        ("game_volume", self.game_volume)):
+            if not 0.0 <= v <= 2.0:
+                raise ValueError(f"{nome} fica entre 0 e 2")
+        return self
+
+
 class MontageDraft(BaseModel):
     """A montagem **em andamento**, do jeito que ficou na tela.
 
@@ -771,6 +832,18 @@ class MontageDraft(BaseModel):
     music_volume: float = 1.0
     game_volume: float = 0.0
     export: ExportSpec = Field(default_factory=ExportSpec)
+
+    @property
+    def clips(self) -> list[TimelineClip]:
+        """Todos os clipes, de todas as camadas -- inclusive os de um rascunho
+        salvo antes de as camadas existirem."""
+        if self.layers:
+            return [c for l in self.layers for c in l.clips]
+        return [TimelineClip.de_corte(c) for c in self.cuts]
+
+    @property
+    def duration_s(self) -> float:
+        return max((c.until_s for c in self.clips), default=0.0)
 
 
 class Timeline(BaseModel):
@@ -1003,6 +1076,9 @@ class Job(Base):
     reports: Mapped[list["DetectorReport"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    montages: Mapped[list["Montage"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
     media: Mapped[list["Media"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -1168,3 +1244,98 @@ class Clip(Base):
     job: Mapped[Job] = relationship(back_populates="clips")
     render: Mapped[Render] = relationship(back_populates="clips")
     proposal: Mapped["Proposal | None"] = relationship(back_populates="clips")
+
+class Montage(Base):
+    """Uma montagem nomeada de uma partida.
+
+    Ate a Fase 8 havia **uma** montagem por job, guardada numa coluna do
+    proprio job. Isso obrigava a escolher: ou o corte de 30 s para o Shorts ou
+    a montagem longa, nunca as duas. Sao trabalhos diferentes sobre o mesmo
+    material, e agora cada um tem o seu nome.
+
+    O conteudo continua sendo um `MontageDraft` -- o mesmo formato que o app ja
+    mandava. O que mudou foi onde ele mora, e o fato de haver varios.
+    """
+
+    __tablename__ = "montages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), default="")
+    #: a montagem em si, no formato do `MontageDraft`
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )
+
+    job: Mapped[Job] = relationship(back_populates="montages")
+    versions: Mapped[list["MontageVersion"]] = relationship(
+        back_populates="montage", cascade="all, delete-orphan"
+    )
+
+    @property
+    def resumo(self) -> dict:
+        """O bastante para a lista de montagens sem baixar a montagem inteira.
+
+        Quem so quer escolher entre "vertical curta" e "a longa" nao precisa
+        dos clipes de nenhuma das duas.
+        """
+        try:
+            m = MontageDraft(**(self.data or {}))
+        except ValidationError:
+            # uma montagem guardada por uma versao anterior do formato nao pode
+            # derrubar a lista: ela aparece vazia e continua abrivel
+            return {"n_clips": 0, "duration_s": 0.0, "has_music": False}
+        clips = m.clips
+        return {
+            "n_clips": len(clips),
+            "duration_s": round(max((c.until_s for c in clips), default=0.0), 2),
+            "has_music": m.track_id is not None,
+        }
+
+
+class MontageVersion(Base):
+    """Uma foto de uma montagem, guardada para se poder voltar a ela.
+
+    Nao e o desfazer -- esse vive no app e morre com a aba. Isto e o "estava bom
+    ontem": marcos raros e deliberados, tirados quando se gera um video (o que
+    saiu foi *isto*) ou quando o usuario pede.
+
+    Guardar uma foto a cada salvamento automatico encheria o banco de estados
+    identicos e tornaria a lista inutil de tao longa.
+    """
+
+    __tablename__ = "montage_versions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    montage_id: Mapped[str] = mapped_column(
+        ForeignKey("montages.id", ondelete="CASCADE"), index=True
+    )
+    #: por que esta foto existe: "gerou o video", "antes de restaurar"...
+    label: Mapped[str] = mapped_column(String(120), default="")
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    montage: Mapped[Montage] = relationship(back_populates="versions")
+
+
+class Preset(Base):
+    """Uma predefinicao: o jeito de montar, guardado para a proxima partida.
+
+    Nao pertence a nenhum job de proposito -- e justamente para atravessar de
+    uma partida para outra que ela existe.
+    """
+
+    __tablename__ = "presets"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), default="")
+    #: a receita, no formato de `Receita`
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )

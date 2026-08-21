@@ -545,7 +545,8 @@ def test_rascunho_com_corte_impossivel_e_recusado(isolated, short_sample):
         json={"cuts": [{"start_s": -5, "duration_s": 1, "at_s": 0}]},
     )
     assert resp.status_code == 422
-    assert "rascunho invalido" in resp.json()["detail"]
+    # o nome mudou na Fase 8: um rascunho agora e uma montagem entre varias
+    assert "montagem invalida" in resp.json()["detail"]
 
 
 def test_salvar_de_novo_substitui_o_anterior(isolated, short_sample):
@@ -1749,3 +1750,356 @@ def test_com_o_som_do_jogo_na_mistura_nao_ha_o_que_reaproveitar(
     clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
     assert clip["meta"]["reused"] is False
     assert clip["video_url"]
+
+# ── varias montagens por partida (Fase 8) ───────────────────────────────────
+
+
+def _montagem(**kw):
+    return {"layers": [{"clips": [
+        {"at_s": 0.0, "duration_s": 2.0, "start_s": 10.0},
+    ]}], **kw}
+
+
+def test_uma_partida_guarda_varias_montagens(isolated, short_sample):
+    """O corte de 30s para o Shorts e a montagem longa sao trabalhos diferentes
+    sobre o mesmo material. Ate a Fase 8 era preciso escolher um."""
+    job_id = run_analysis(short_sample)
+
+    curta = api().post(f"/api/jobs/{job_id}/montages",
+                       json={"name": "vertical curta", "data": _montagem()}).json()
+    longa = api().post(f"/api/jobs/{job_id}/montages",
+                       json={"name": "a longa"}).json()
+
+    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert {m["name"] for m in lista} == {"vertical curta", "a longa"}
+    assert curta["n_clips"] == 1
+    assert curta["duration_s"] == pytest.approx(2.0)
+    assert longa["n_clips"] == 0, "uma montagem nova comeca vazia"
+
+
+def test_a_lista_vem_da_mais_recente_para_a_mais_antiga(isolated, short_sample):
+    """A que se estava editando e a que se quer de volta."""
+    job_id = run_analysis(short_sample)
+    primeira = api().post(f"/api/jobs/{job_id}/montages",
+                          json={"name": "primeira"}).json()
+    api().post(f"/api/jobs/{job_id}/montages", json={"name": "segunda"})
+    api().put(f"/api/jobs/{job_id}/montages/{primeira['id']}",
+              json={"data": _montagem()})
+
+    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert lista[0]["name"] == "primeira"
+
+
+def test_nomes_repetidos_ganham_numero(isolated, short_sample):
+    """Duas "Montagem" numa lista de escolher e o mesmo que nome nenhum."""
+    job_id = run_analysis(short_sample)
+    a = api().post(f"/api/jobs/{job_id}/montages", json={"name": "teste"}).json()
+    b = api().post(f"/api/jobs/{job_id}/montages", json={"name": "teste"}).json()
+
+    assert a["name"] == "teste"
+    assert b["name"] == "teste 2"
+
+
+def test_montagem_sem_nome_ganha_um(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages", json={}).json()
+    assert m["name"] == "Montagem 1"
+
+
+def test_duplicar_para_experimentar_sem_arriscar(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    original = api().post(f"/api/jobs/{job_id}/montages",
+                          json={"name": "boa", "data": _montagem()}).json()
+
+    copia = api().post(
+        f"/api/jobs/{job_id}/montages/{original['id']}/duplicate"
+    ).json()
+
+    assert copia["id"] != original["id"]
+    assert copia["name"] == "boa (copia)"
+    assert copia["data"] == original["data"]
+
+    # mexer na copia nao mexe na original
+    api().put(f"/api/jobs/{job_id}/montages/{copia['id']}",
+              json={"data": {"layers": []}})
+    volta = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    por_id = {m["id"]: m for m in volta}
+    assert por_id[original["id"]]["n_clips"] == 1
+    assert por_id[copia["id"]]["n_clips"] == 0
+
+
+def test_renomear_e_apagar(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages", json={"name": "antiga"}).json()
+
+    api().put(f"/api/jobs/{job_id}/montages/{m['id']}", json={"name": "nova"})
+    assert api().get(f"/api/jobs/{job_id}/montages").json()["items"][0]["name"] == "nova"
+
+    assert api().delete(f"/api/jobs/{job_id}/montages/{m['id']}").status_code == 204
+    assert api().get(f"/api/jobs/{job_id}/montages").json()["items"] == []
+
+
+def test_montagem_de_outra_partida_e_404(isolated, short_sample):
+    """O id sozinho nao basta: a montagem tem de ser desta partida."""
+    a = run_analysis(short_sample)
+    b = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{a}/montages", json={"name": "x"}).json()
+
+    assert api().get(f"/api/jobs/{b}/montages/{m['id']}/versions").status_code == 404
+    assert api().delete(f"/api/jobs/{b}/montages/{m['id']}").status_code == 404
+
+
+def test_montagem_invalida_e_recusada(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    resp = api().post(f"/api/jobs/{job_id}/montages",
+                      json={"data": {"layers": [{"clips": [
+                          {"at_s": -5, "duration_s": 2, "start_s": 1}]}]}})
+    assert resp.status_code == 422
+
+
+def test_apagar_a_partida_leva_as_montagens(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    api().post(f"/api/jobs/{job_id}/montages", json={"data": _montagem()})
+
+    api().delete(f"/api/jobs/{job_id}")
+    with session() as s:
+        from owcore.models import Montage as MontageModel
+        assert s.query(MontageModel).filter_by(job_id=job_id).count() == 0
+
+
+# ── a migracao do rascunho unico ────────────────────────────────────────────
+
+
+def test_o_rascunho_antigo_vira_a_primeira_montagem(isolated, short_sample):
+    """Quem sabe converter o formato velho e o codigo que le -- e por isso uma
+    partida parada ha meses continua abrindo."""
+    job_id = run_analysis(short_sample)
+    api().put(f"/api/jobs/{job_id}/draft",
+              json={"title": "o que eu estava fazendo", "cuts": [
+                  {"at_s": 0.0, "duration_s": 2.0, "start_s": 10.0}]})
+
+    # simula o estado anterior a Fase 8: tudo na coluna do job
+    with session() as s:
+        from owcore.models import Job, Montage as MontageModel
+        job = s.get(Job, job_id)
+        guardado = job.montages[0].data
+        for m in list(job.montages):
+            s.delete(m)
+        job.draft = guardado
+
+    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert len(lista) == 1
+    assert lista[0]["name"] == "o que eu estava fazendo"
+    assert lista[0]["n_clips"] == 1
+
+    # e a coluna some, para nao haver duas verdades sobre a mesma montagem
+    with session() as s:
+        from owcore.models import Job
+        assert not s.get(Job, job_id).draft
+
+
+def test_a_migracao_nao_repete_a_montagem(isolated, short_sample):
+    """Ler duas vezes nao pode criar duas."""
+    job_id = run_analysis(short_sample)
+    api().put(f"/api/jobs/{job_id}/draft", json={"cuts": [
+        {"at_s": 0.0, "duration_s": 2.0, "start_s": 10.0}]})
+
+    api().get(f"/api/jobs/{job_id}")
+    api().get(f"/api/jobs/{job_id}")
+    assert len(api().get(f"/api/jobs/{job_id}/montages").json()["items"]) == 1
+
+
+def test_o_app_antigo_continua_salvando(isolated, short_sample):
+    """`PUT /draft` escreve na montagem mais recente em vez de perder o trabalho
+    em silencio."""
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages", json={"name": "atual"}).json()
+
+    api().put(f"/api/jobs/{job_id}/draft", json=_montagem())
+
+    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert len(lista) == 1, "nao criou uma segunda"
+    assert lista[0]["id"] == m["id"]
+    assert lista[0]["n_clips"] == 1
+
+
+def test_o_detalhe_do_job_traz_as_montagens(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    api().post(f"/api/jobs/{job_id}/montages",
+               json={"name": "uma", "data": _montagem()})
+
+    detail = api().get(f"/api/jobs/{job_id}").json()
+    assert [m["name"] for m in detail["montages"]] == ["uma"]
+    # e `draft` continua respondendo a mais recente, para um app anterior
+    assert detail["draft"]["layers"][0]["clips"][0]["at_s"] == 0.0
+
+
+# ── historico de versoes ────────────────────────────────────────────────────
+
+
+def test_marcar_e_voltar_a_uma_versao(isolated, short_sample):
+    """O "estava bom ontem" -- que nao e o desfazer: esse morre com a aba."""
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages",
+                   json={"name": "x", "data": _montagem()}).json()
+    base = f"/api/jobs/{job_id}/montages/{m['id']}"
+
+    foto = api().post(f"{base}/versions", json={"label": "estava bom"}).json()
+    assert foto["n_clips"] == 1
+
+    api().put(base, json={"data": {"layers": []}})
+    assert api().get(f"/api/jobs/{job_id}/montages").json()["items"][0]["n_clips"] == 0
+
+    voltou = api().post(f"{base}/versions/{foto['id']}/restore").json()
+    assert voltou["n_clips"] == 1
+
+
+def test_restaurar_nao_apaga_o_que_estava_na_frente(isolated, short_sample):
+    """Restaurar troca o que esta na frente; nao joga trabalho fora."""
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages",
+                   json={"name": "x", "data": _montagem()}).json()
+    base = f"/api/jobs/{job_id}/montages/{m['id']}"
+    foto = api().post(f"{base}/versions", json={"label": "primeira"}).json()
+
+    dois = _montagem()
+    dois["layers"][0]["clips"].append(
+        {"at_s": 5.0, "duration_s": 2.0, "start_s": 20.0})
+    api().put(base, json={"data": dois})
+    api().post(f"{base}/versions/{foto['id']}/restore")
+
+    fotos = api().get(f"{base}/versions").json()["items"]
+    assert "antes de restaurar" in [f["label"] for f in fotos]
+    guardada = [f for f in fotos if f["label"] == "antes de restaurar"][0]
+    assert guardada["n_clips"] == 2, "o estado de antes foi guardado inteiro"
+
+
+def test_marcar_duas_vezes_a_mesma_coisa_nao_cria_versao(isolated, short_sample):
+    """Uma lista de estados iguais nao ajuda ninguem a achar o de ontem."""
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages",
+                   json={"name": "x", "data": _montagem()}).json()
+    base = f"/api/jobs/{job_id}/montages/{m['id']}"
+
+    assert api().post(f"{base}/versions", json={}).status_code == 201
+    assert api().post(f"{base}/versions", json={}).status_code == 409
+    assert len(api().get(f"{base}/versions").json()["items"]) == 1
+
+
+def test_o_historico_para_de_crescer(isolated, short_sample):
+    """Vinte marcos ja e mais historia do que alguem percorre numa lista."""
+    from owcore.models import Montage as MontageModel, MontageVersion
+
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages",
+                   json={"name": "x", "data": _montagem()}).json()
+
+    with session() as s:
+        alvo = s.get(MontageModel, m["id"])
+        for i in range(30):
+            dados = _montagem()
+            dados["music_start_s"] = float(i)
+            alvo.data = dados
+            alvo.versions.append(MontageVersion(label=f"n{i}", data=dados))
+            s.flush()
+
+    fotos = api().get(
+        f"/api/jobs/{job_id}/montages/{m['id']}/versions"
+    ).json()["items"]
+    assert len(fotos) == 30, "guardar direto no banco nao passa pela poda"
+
+    # ja o caminho normal poda
+    api().put(f"/api/jobs/{job_id}/montages/{m['id']}",
+              json={"data": {"layers": [], "music_start_s": 99.0}})
+    api().post(f"/api/jobs/{job_id}/montages/{m['id']}/versions", json={})
+    fotos = api().get(
+        f"/api/jobs/{job_id}/montages/{m['id']}/versions"
+    ).json()["items"]
+    assert len(fotos) == 20
+
+
+def test_a_copia_nao_leva_o_historico(isolated, short_sample):
+    """As fotos dizem por onde *aquela* montagem passou; a copia ainda nao passou
+    por lugar nenhum."""
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages",
+                   json={"name": "x", "data": _montagem()}).json()
+    api().post(f"/api/jobs/{job_id}/montages/{m['id']}/versions", json={})
+
+    copia = api().post(
+        f"/api/jobs/{job_id}/montages/{m['id']}/duplicate"
+    ).json()
+    assert copia["n_versions"] == 0
+    fotos = api().get(
+        f"/api/jobs/{job_id}/montages/{copia['id']}/versions"
+    ).json()["items"]
+    assert fotos == []
+
+
+def test_apagar_a_montagem_leva_as_versoes(isolated, short_sample):
+    from owcore.models import MontageVersion
+
+    job_id = run_analysis(short_sample)
+    m = api().post(f"/api/jobs/{job_id}/montages",
+                   json={"name": "x", "data": _montagem()}).json()
+    api().post(f"/api/jobs/{job_id}/montages/{m['id']}/versions", json={})
+
+    api().delete(f"/api/jobs/{job_id}/montages/{m['id']}")
+    with session() as s:
+        assert s.query(MontageVersion).filter_by(montage_id=m["id"]).count() == 0
+
+
+# ── predefinicoes ───────────────────────────────────────────────────────────
+
+
+def test_a_predefinicao_atravessa_partidas(isolated, short_sample):
+    """E o que faz a segunda partida custar um clique em vez de meia hora de
+    encaixe -- por isso ela nao pertence a job nenhum."""
+    a = run_analysis(short_sample)
+    receita = {"kinds": ["kill"], "duration_s": 1.8, "beats_per_cut": 2.0,
+               "zoom": True, "export": {"width": 1080, "height": 1920}}
+    api().post("/api/presets", json={"name": "shorts", "data": receita})
+
+    itens = api().get("/api/presets").json()["items"]
+    assert [p["name"] for p in itens] == ["shorts"]
+    assert itens[0]["data"]["beats_per_cut"] == 2.0
+    assert itens[0]["data"]["export"]["width"] == 1080
+    # a lista e a mesma vista de qualquer partida
+    assert api().get("/api/presets").json() == api().get("/api/presets").json()
+    assert a  # a partida nao entra na conta
+
+
+def test_a_predefinicao_guarda_o_jeito_de_cortar_e_nao_os_cortes(isolated):
+    """Uma lista de cortes so vale para aquela partida; um jeito de cortar vale
+    para qualquer uma."""
+    from owcore.models import Receita
+
+    r = Receita(**{"kinds": ["kill", "sleep"], "lead_s": 1.2, "duration_s": 2.0})
+    assert not hasattr(r, "clips")
+    assert not hasattr(r, "layers")
+    assert r.kinds == ["kill", "sleep"]
+
+
+def test_receita_impossivel_e_recusada(isolated):
+    for ruim in ({"duration_s": 0.0}, {"lead_s": -1}, {"speed": 0},
+                 {"gap_s": -0.5}, {"music_volume": 5}):
+        resp = api().post("/api/presets", json={"name": "x", "data": ruim})
+        assert resp.status_code == 422, ruim
+
+
+def test_predefinicao_sem_nome_e_recusada(isolated):
+    assert api().post("/api/presets", json={"data": {}}).status_code == 422
+    assert api().post("/api/presets", json={"name": "  "}).status_code == 422
+
+
+def test_editar_e_apagar_predefinicao(isolated):
+    p = api().post("/api/presets", json={"name": "um", "data": {}}).json()
+
+    api().put(f"/api/presets/{p['id']}",
+              json={"name": "outro", "data": {"duration_s": 3.0}})
+    volta = api().get("/api/presets").json()["items"][0]
+    assert volta["name"] == "outro"
+    assert volta["data"]["duration_s"] == 3.0
+
+    assert api().delete(f"/api/presets/{p['id']}").status_code == 204
+    assert api().get("/api/presets").json()["items"] == []

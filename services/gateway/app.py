@@ -12,9 +12,10 @@ import re
 import shutil
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,10 +41,14 @@ from owcore.models import (
     Media,
     MediaKind,
     MediaUploaded,
+    Montage as MontageModel,
     MontageDraft,
+    MontageVersion,
+    Preset,
     Proposal,
     Render,
     RenderRequested,
+    Receita,
     RenderStatus,
     Selection,
     ThumbsRequested,
@@ -51,6 +56,7 @@ from owcore.models import (
     TrackStatus,
     frame_key,
     new_id,
+    utcnow,
 )
 from owcore.ffmpeg import probe
 from owcore.storage import get_storage
@@ -222,9 +228,12 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         data["media"] = [_media_dict(m) for m in biblioteca]
         # `tracks` continua sendo so as musicas: e o que o seletor de trilha usa
         data["tracks"] = [_media_dict(m) for m in biblioteca if m.is_audio]
-        # a montagem em andamento volta com o job: e assim que a tela de
-        # montagem se reconstroi depois de um F5
-        data["draft"] = job.draft or {}
+        # as montagens voltam com o job: e assim que a tela se reconstroi
+        # depois de um F5, e e a lista que o seletor mostra
+        montagens = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
+        data["montages"] = [_montagem_dict(m, full=True) for m in montagens]
+        # `draft` continua sendo a mais recente, para um app anterior a Fase 8
+        data["draft"] = (montagens[0].data if montagens else job.draft) or {}
         # a onda do audio da partida, para a regua do editor. So no detalhe: sao
         # alguns milhares de numeros, e a listagem nao tem o que fazer com eles
         data["waveform"] = job.waveform or []
@@ -815,6 +824,7 @@ def get_job(job_id: str) -> dict[str, Any]:
         if job is None:
             raise HTTPException(404, "job nao encontrado")
         _remendar_o_tamanho(job)
+        _adotar_o_rascunho_antigo(s, job)
         return _job_dict(job, full=True)
 
 
@@ -839,33 +849,38 @@ def job_video(job_id: str, request: Request) -> Response:
 
 @app.put("/api/jobs/{job_id}/draft")
 def save_draft(job_id: str, draft: dict = Body(...)) -> dict[str, Any]:
-    """Guarda a montagem em andamento.
+    """Guarda a montagem em andamento. **Legado da V1.**
 
-    O app chama sozinho enquanto o usuario edita. E um rascunho, entao aceita
-    zero cortes -- mas cada corte e validado, porque guardar lixo agora seria
-    devolver lixo na proxima abertura.
+    Desde a Fase 8 uma partida tem varias montagens nomeadas, e o app salva pelo
+    id de uma delas. Esta rota escreve na mais recente -- e cria a primeira, se
+    nao houver nenhuma --, para que um app anterior continue funcionando em vez
+    de perder o trabalho em silencio.
     """
-    try:
-        rascunho = MontageDraft(**draft)
-    except ValidationError as exc:
-        raise HTTPException(422, f"rascunho invalido: {exc}") from exc
+    rascunho = _validar_montagem(draft)
 
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
             raise HTTPException(404, "job nao encontrado")
-        job.draft = rascunho.model_dump()
-    return {"job_id": job_id, "n_cuts": len(rascunho.cuts)}
+        _adotar_o_rascunho_antigo(s, job)
+        atual = max(job.montages, key=lambda m: _hora(m.updated_at), default=None)
+        if atual is None:
+            atual = MontageModel(job_id=job_id, name="Montagem 1")
+            s.add(atual)
+        atual.data = rascunho.model_dump()
+    return {"job_id": job_id, "n_cuts": len(rascunho.clips)}
 
 
 @app.delete("/api/jobs/{job_id}/draft", status_code=204)
 def delete_draft(job_id: str) -> Response:
-    """Joga a montagem em andamento fora e comeca do zero."""
+    """Joga as montagens desta partida fora e comeca do zero. **Legado da V1.**"""
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
             raise HTTPException(404, "job nao encontrado")
         job.draft = {}
+        for m in list(job.montages):
+            s.delete(m)
     return Response(status_code=204)
 
 
@@ -1052,6 +1067,350 @@ def profile() -> dict[str, Any]:
     return load_profile(get_settings().profile).data
 
 
+# ── montagens nomeadas ──────────────────────────────────────────────────────
+
+
+def _hora(t: datetime | None) -> datetime:
+    """A hora de um registro, sempre com fuso.
+
+    O SQLite guarda `datetime` sem fuso, entao uma linha lida do banco volta
+    ingenua enquanto uma criada nesta mesma requisicao ainda esta com o fuso que
+    `utcnow()` deu. Ordenar as duas juntas estoura -- e e exatamente o que
+    acontece ao listar as montagens logo depois de criar uma.
+    """
+    if t is None:
+        return utcnow()
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
+def _montagem_dict(m: MontageModel, *, full: bool = False) -> dict[str, Any]:
+    d: dict[str, Any] = {
+        "id": m.id,
+        "job_id": m.job_id,
+        "name": m.name,
+        "created_at": m.created_at.isoformat(),
+        "updated_at": m.updated_at.isoformat(),
+        "n_versions": len(m.versions),
+        **m.resumo,
+    }
+    if full:
+        d["data"] = m.data or {}
+    return d
+
+
+def _adotar_o_rascunho_antigo(s: Any, job: Job) -> None:
+    """Traz a montagem unica do job para a lista de montagens nomeadas.
+
+    Ate a Fase 8 havia uma so, numa coluna do proprio job. Fazer isto na
+    leitura, e nao numa migracao de banco, e a mesma escolha do resto do
+    sistema: quem sabe converter o formato velho e o codigo que le, e assim uma
+    partida parada ha meses continua abrindo.
+    """
+    if not job.draft or job.montages:
+        return
+    # pela relacao, e nao por `s.add`: assim `job.montages` ja a enxerga nesta
+    # mesma requisicao, que e onde ela precisa aparecer
+    job.montages.append(
+        MontageModel(name=job.draft.get("title") or "Montagem 1", data=job.draft)
+    )
+    # a coluna some para nao haver duas verdades sobre a mesma montagem
+    job.draft = {}
+    s.flush()
+
+
+def _nome_livre(existentes: Sequence[Any], base: str) -> str:
+    """Um nome que ainda nao esta na lista.
+
+    Nomes repetidos numa lista de escolher e o mesmo que nome nenhum.
+    """
+    nomes = {m.name for m in existentes}
+    if base not in nomes:
+        return base
+    for i in range(2, 100):
+        tentativa = f"{base} {i}"
+        if tentativa not in nomes:
+            return tentativa
+    return f"{base} {new_id()[:4]}"
+
+
+def _pegar_montagem(s: Any, job_id: str, montage_id: str) -> MontageModel:
+    m = s.get(MontageModel, montage_id)
+    if m is None or m.job_id != job_id:
+        raise HTTPException(404, "montagem nao encontrada nesta partida")
+    return m
+
+
+def _validar_montagem(data: dict) -> MontageDraft:
+    try:
+        return MontageDraft(**(data or {}))
+    except ValidationError as exc:
+        raise HTTPException(422, f"montagem invalida: {exc}") from exc
+
+
+@app.get("/api/jobs/{job_id}/montages")
+def list_montages(job_id: str) -> dict[str, Any]:
+    """As montagens desta partida, da mais recente para a mais antiga."""
+    with session() as s:
+        job = s.get(Job, job_id)
+        if job is None:
+            raise HTTPException(404, "job nao encontrado")
+        _adotar_o_rascunho_antigo(s, job)
+        montagens = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
+        return {
+            "job_id": job_id,
+            "items": [_montagem_dict(m, full=True) for m in montagens],
+        }
+
+
+@app.post("/api/jobs/{job_id}/montages", status_code=201)
+def create_montage(job_id: str, corpo: dict = Body(default={})) -> dict[str, Any]:
+    """Comeca uma montagem nova, vazia ou a partir de um conteudo dado.
+
+    Sao trabalhos diferentes sobre o mesmo material -- o corte de 30 s para o
+    Shorts e a montagem longa --, e ate aqui era preciso escolher um.
+    """
+    dados = corpo.get("data") or {}
+    _validar_montagem(dados)
+    with session() as s:
+        job = s.get(Job, job_id)
+        if job is None:
+            raise HTTPException(404, "job nao encontrado")
+        _adotar_o_rascunho_antigo(s, job)
+        nome = str(corpo.get("name") or "").strip()
+        m = MontageModel(
+            job_id=job_id,
+            name=_nome_livre(job.montages, nome or f"Montagem {len(job.montages) + 1}"),
+            data=dados,
+        )
+        s.add(m)
+        s.flush()
+        return _montagem_dict(m, full=True)
+
+
+@app.put("/api/jobs/{job_id}/montages/{montage_id}")
+def save_montage(
+    job_id: str, montage_id: str, corpo: dict = Body(...)
+) -> dict[str, Any]:
+    """Guarda a montagem. E o que o app chama sozinho enquanto se edita.
+
+    Um corte invalido e recusado aqui: guardar lixo agora seria devolver lixo na
+    proxima abertura.
+    """
+    with session() as s:
+        m = _pegar_montagem(s, job_id, montage_id)
+        if "data" in corpo:
+            rascunho = _validar_montagem(corpo["data"])
+            m.data = rascunho.model_dump()
+        if "name" in corpo:
+            nome = str(corpo["name"] or "").strip()
+            if not nome:
+                raise HTTPException(422, "uma montagem sem nome nao da para achar")
+            outras = [o for o in m.job.montages if o.id != m.id]
+            m.name = _nome_livre(outras, nome)
+        s.flush()
+        return _montagem_dict(m)
+
+
+@app.post("/api/jobs/{job_id}/montages/{montage_id}/duplicate", status_code=201)
+def duplicate_montage(job_id: str, montage_id: str) -> dict[str, Any]:
+    """Uma copia, para experimentar sem arriscar a que ja esta boa.
+
+    A copia nao leva o historico da original: as fotos dizem por onde *aquela*
+    montagem passou, e a copia ainda nao passou por lugar nenhum.
+    """
+    with session() as s:
+        original = _pegar_montagem(s, job_id, montage_id)
+        copia = MontageModel(
+            job_id=job_id,
+            name=_nome_livre(original.job.montages, f"{original.name} (copia)"),
+            data=dict(original.data or {}),
+        )
+        s.add(copia)
+        s.flush()
+        return _montagem_dict(copia, full=True)
+
+
+@app.delete("/api/jobs/{job_id}/montages/{montage_id}", status_code=204)
+def delete_montage(job_id: str, montage_id: str) -> Response:
+    with session() as s:
+        s.delete(_pegar_montagem(s, job_id, montage_id))
+    return Response(status_code=204)
+
+
+# ── historico de versoes ────────────────────────────────────────────────────
+
+#: quantas fotos cada montagem guarda. Passou disso, a mais velha sai.
+#:
+#: Nao e o desfazer -- esse vive no app. Sao marcos, e vinte marcos ja e mais
+#: historia do que alguem percorre numa lista.
+MAX_VERSOES = 20
+
+
+def _versao_dict(v: MontageVersion, *, full: bool = False) -> dict[str, Any]:
+    d: dict[str, Any] = {
+        "id": v.id,
+        "montage_id": v.montage_id,
+        "label": v.label,
+        "created_at": v.created_at.isoformat(),
+        **MontageModel(data=v.data).resumo,
+    }
+    if full:
+        d["data"] = v.data or {}
+    return d
+
+
+def _guardar_foto(m: MontageModel, label: str) -> MontageVersion | None:
+    """Tira uma foto da montagem como ela esta agora.
+
+    Recusa a foto identica a ultima: gerar o mesmo video duas vezes seguidas
+    nao produziu versao nenhuma, e uma lista de estados iguais nao ajuda
+    ninguem a achar o "estava bom ontem".
+    """
+    if not m.data:
+        return None
+    ultima = max(m.versions, key=lambda v: _hora(v.created_at), default=None)
+    if ultima is not None and ultima.data == m.data:
+        return None
+
+    # a hora vem daqui, e nao do `default` da coluna: sem ela a foto recem-feita
+    # entra na lista com `created_at` nulo e nao da nem para ordenar
+    foto = MontageVersion(label=label, data=dict(m.data), created_at=utcnow())
+    m.versions.append(foto)
+    velhas = sorted(m.versions, key=lambda v: _hora(v.created_at), reverse=True)
+    for v in velhas[MAX_VERSOES:]:
+        m.versions.remove(v)
+    return foto
+
+
+@app.get("/api/jobs/{job_id}/montages/{montage_id}/versions")
+def list_versions(job_id: str, montage_id: str) -> dict[str, Any]:
+    """As fotos desta montagem, da mais recente para a mais antiga."""
+    with session() as s:
+        m = _pegar_montagem(s, job_id, montage_id)
+        fotos = sorted(m.versions, key=lambda v: _hora(v.created_at), reverse=True)
+        return {"montage_id": montage_id, "items": [_versao_dict(v) for v in fotos]}
+
+
+@app.post("/api/jobs/{job_id}/montages/{montage_id}/versions", status_code=201)
+def create_version(
+    job_id: str, montage_id: str, corpo: dict = Body(default={})
+) -> dict[str, Any]:
+    """Marca a montagem como ela esta: o "estava bom assim"."""
+    with session() as s:
+        m = _pegar_montagem(s, job_id, montage_id)
+        foto = _guardar_foto(m, str(corpo.get("label") or "marcada a mao"))
+        if foto is None:
+            raise HTTPException(409, "nao ha nada de novo para marcar")
+        s.flush()
+        return _versao_dict(foto, full=True)
+
+
+@app.post("/api/jobs/{job_id}/montages/{montage_id}/versions/{version_id}/restore")
+def restore_version(job_id: str, montage_id: str, version_id: str) -> dict[str, Any]:
+    """Volta a montagem para uma foto.
+
+    O estado de agora vira foto antes -- restaurar nunca apaga trabalho, so
+    troca o que esta na frente.
+    """
+    with session() as s:
+        m = _pegar_montagem(s, job_id, montage_id)
+        foto = s.get(MontageVersion, version_id)
+        if foto is None or foto.montage_id != montage_id:
+            raise HTTPException(404, "versao nao encontrada nesta montagem")
+        _guardar_foto(m, "antes de restaurar")
+        m.data = dict(foto.data or {})
+        s.flush()
+        return _montagem_dict(m, full=True)
+
+
+@app.delete(
+    "/api/jobs/{job_id}/montages/{montage_id}/versions/{version_id}", status_code=204
+)
+def delete_version(job_id: str, montage_id: str, version_id: str) -> Response:
+    with session() as s:
+        m = _pegar_montagem(s, job_id, montage_id)
+        foto = s.get(MontageVersion, version_id)
+        if foto is None or foto.montage_id != montage_id:
+            raise HTTPException(404, "versao nao encontrada nesta montagem")
+        m.versions.remove(foto)
+    return Response(status_code=204)
+
+
+# ── predefinicoes ───────────────────────────────────────────────────────────
+
+
+def _preset_dict(p: Preset) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "name": p.name,
+        "data": p.data or {},
+        "created_at": p.created_at.isoformat(),
+        "updated_at": p.updated_at.isoformat(),
+    }
+
+
+def _validar_receita(data: dict) -> Receita:
+    try:
+        return Receita(**(data or {}))
+    except ValidationError as exc:
+        raise HTTPException(422, f"receita invalida: {exc}") from exc
+
+
+@app.get("/api/presets")
+def list_presets() -> dict[str, Any]:
+    """As predefinicoes. Nao pertencem a partida nenhuma -- e para atravessar de
+    uma para outra que elas existem."""
+    with session() as s:
+        itens = s.execute(select(Preset).order_by(Preset.created_at)).scalars().all()
+        return {"items": [_preset_dict(p) for p in itens]}
+
+
+@app.post("/api/presets", status_code=201)
+def create_preset(corpo: dict = Body(...)) -> dict[str, Any]:
+    nome = str(corpo.get("name") or "").strip()
+    if not nome:
+        raise HTTPException(422, "uma predefinicao sem nome nao da para achar")
+    receita = _validar_receita(corpo.get("data") or {})
+    with session() as s:
+        existentes = s.execute(select(Preset)).scalars().all()
+        p = Preset(
+            name=_nome_livre(existentes, nome), data=receita.model_dump(mode="json")
+        )
+        s.add(p)
+        s.flush()
+        return _preset_dict(p)
+
+
+@app.put("/api/presets/{preset_id}")
+def update_preset(preset_id: str, corpo: dict = Body(...)) -> dict[str, Any]:
+    with session() as s:
+        p = s.get(Preset, preset_id)
+        if p is None:
+            raise HTTPException(404, "predefinicao nao encontrada")
+        if "data" in corpo:
+            p.data = _validar_receita(corpo["data"]).model_dump(mode="json")
+        if "name" in corpo:
+            nome = str(corpo["name"] or "").strip()
+            if not nome:
+                raise HTTPException(422, "uma predefinicao sem nome nao da para achar")
+            outros = [
+                o for o in s.execute(select(Preset)).scalars().all() if o.id != p.id
+            ]
+            p.name = _nome_livre(outros, nome)
+        s.flush()
+        return _preset_dict(p)
+
+
+@app.delete("/api/presets/{preset_id}", status_code=204)
+def delete_preset(preset_id: str) -> Response:
+    with session() as s:
+        p = s.get(Preset, preset_id)
+        if p is None:
+            raise HTTPException(404, "predefinicao nao encontrada")
+        s.delete(p)
+    return Response(status_code=204)
+
+
 # ── app Flutter compilado, quando existir (deploy de origem unica) ──────────
 #
 # Com o app servido pelo proprio gateway, o Flutter chama a API em caminho
@@ -1067,3 +1426,8 @@ if (_web / "index.html").is_file():
     from fastapi.staticfiles import StaticFiles
 
     app.mount("/", StaticFiles(directory=str(_web), html=True), name="web")
+
+
+# O mount fica **por ultimo** de proposito: ele casa com qualquer caminho, e
+# toda rota registrada depois dele fica inalcancavel -- um `POST` numa delas
+# volta 405, porque quem responde e o servidor de arquivos.
