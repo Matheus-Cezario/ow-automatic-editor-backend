@@ -1,0 +1,45 @@
+# Cuidado ao editar: o Git só entende `#` como comentário quando ele abre a
+# linha. Escrever `data/   # o que é isto` transforma o padrão inteiro numa
+# string literal que não casa com nada — foi assim que 492 MB de gravações e o
+# banco quase entraram num commit. Comentário fica sempre em linha própria.
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── configuração da máquina ───────────────────────────────────────────────
+# `.env.example` continua versionado: é ele que documenta as variáveis.
+.env
+
+# ── tudo o que o sistema produz rodando ───────────────────────────────────
+# Gravações enviadas, recortes das ROIs, clipes gerados, miniaturas, fila em
+# disco e o banco. Nada aqui é fonte: o `data/sample` sai do
+# `tools/make_sample.py` e o resto aparece sozinho ao usar o sistema.
+data/
+
+# O banco pode cair fora de `data/` quando alguém aponta OW_DATA_DIR para
+# outro lugar; o WAL do SQLite vem junto.
+*.db
+*.db-shm
+*.db-wal
+
+# ── assets do jogo ────────────────────────────────────────────────────────
+# Ícones de ultimate e de eliminação são material do Overwatch, recortado por
+# quem usa. As pastas ficam no repositório (vazias) para o sistema achar o
+# caminho — daí a exceção para o `.gitkeep`.
+templates/kills/*
+templates/ults/*
+!templates/**/.gitkeep
+
+# ── editores ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp

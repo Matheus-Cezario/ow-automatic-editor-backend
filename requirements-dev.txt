@@ -1,0 +1,22 @@
+# Tudo que o modo local precisa, num arquivo so:
+#   pip install -r requirements-dev.txt
+-r requirements-base.txt
+
+# gateway
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+
+# detectores
+opencv-python-headless>=4.9
+numpy>=1.26
+
+# ritmo
+librosa>=0.10
+
+# testes
+pytest>=8.0
+httpx>=0.27
+
+# nucleo compartilhado, em modo editavel
+-e packages/owcore

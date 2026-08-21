@@ -1,0 +1,7 @@
+# dependencias comuns a todos os microsservicos python
+pydantic>=2.6
+pydantic-settings>=2.2
+sqlalchemy>=2.0
+redis>=5.0
+boto3>=1.34
+psycopg[binary]>=3.1
