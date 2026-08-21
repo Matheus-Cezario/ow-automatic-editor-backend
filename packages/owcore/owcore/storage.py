@@ -83,6 +83,10 @@ class LocalStorage(Storage):
         """Atalho só do backend local: evita cópia quando o ffmpeg pode ler direto."""
         return self._p(key)
 
+    def url(self, key: str, expira_s: int = 3600) -> str:
+        """O próprio caminho: aqui o ffmpeg já lê direto do disco."""
+        return str(self._p(key))
+
 
 class S3Storage(Storage):
     def __init__(self, s: Settings):
@@ -134,6 +138,19 @@ class S3Storage(Storage):
             Bucket=self.bucket, Key=key, Range=f"bytes={start}-{end}"
         )
         return obj["Body"].read()
+
+    def url(self, key: str, expira_s: int = 3600) -> str:
+        """Um endereço temporário que o ffmpeg lê sozinho, por `Range`.
+
+        Serve para *medir* um arquivo sem baixá-lo: o `ffprobe` puxa o
+        cabeçalho e para. Baixar uma gravação inteira só para saber a largura
+        dela seria pior do que o problema.
+        """
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=expira_s,
+        )
 
 
 _storage: Storage | None = None

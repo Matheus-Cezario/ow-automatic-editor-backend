@@ -45,7 +45,9 @@ class MediaInfo:
     audio_rate: int = 0
 
 
-def probe(path: Path) -> MediaInfo:
+def probe(path: Path | str) -> MediaInfo:
+    """Mede um arquivo. Aceita um endereço `http` tambem: o ffprobe puxa so
+    o cabecalho, por `Range`."""
     s = get_settings()
     out = _run(
         [
@@ -313,7 +315,7 @@ def compose(comp, dest: Path) -> Path:
         cmd += ["-map", comp.mapa_audio, "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
     else:
         cmd += ["-an"]
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(comp.crf),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dest)]
     _run(cmd)
     return dest

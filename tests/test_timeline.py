@@ -488,6 +488,43 @@ def test_o_rascunho_lembra_as_correcoes_da_grade_de_batidas(
     assert draft["beat_bar"] == 4
 
 
+def test_o_rascunho_lembra_a_mistura_e_o_formato_de_saida(
+    isolated, short_sample
+):
+    """Quem baixou o volume do jogo e escolheu 9:16 nao quer refazer as duas
+    coisas depois de um F5. Sao trabalho como qualquer outro."""
+    job_id = run_analysis(short_sample)
+    api().put(
+        f"/api/jobs/{job_id}/draft",
+        json={
+            "layers": [{"clips": [{"at_s": 0, "duration_s": 1, "start_s": 2}]}],
+            "music_volume": 0.4,
+            "game_volume": 0.8,
+            "export": {"width": 1080, "height": 1920, "crf": 26,
+                       "fit": "contain", "from_s": 1.0},
+        },
+    )
+
+    draft = api().get(f"/api/jobs/{job_id}").json()["draft"]
+    assert draft["music_volume"] == pytest.approx(0.4)
+    assert draft["game_volume"] == pytest.approx(0.8)
+    assert draft["export"]["width"] == 1080
+    assert draft["export"]["height"] == 1920
+    assert draft["export"]["crf"] == 26
+    assert draft["export"]["fit"] == "contain"
+    assert draft["export"]["from_s"] == pytest.approx(1.0)
+
+
+def test_rascunho_com_saida_impossivel_e_recusado(isolated, short_sample):
+    """Guardar lixo agora e devolver lixo depois."""
+    job_id = run_analysis(short_sample)
+    resp = api().put(
+        f"/api/jobs/{job_id}/draft",
+        json={"cuts": [], "export": {"width": 1080}},
+    )
+    assert resp.status_code == 422
+
+
 def test_rascunho_sem_corte_nenhum_e_valido(isolated, short_sample):
     """Um rascunho existe desde antes de o primeiro bloco entrar -- salvar so a
     musica escolhida tem de funcionar."""
@@ -591,6 +628,19 @@ def test_o_proxy_sai_da_mesma_decodificacao_e_e_muito_menor(
     assert proxy.stat().st_size < short_sample.stat().st_size
 
 
+def test_o_job_diz_o_tamanho_da_gravacao(isolated, short_sample):
+    """E o padrao de exportacao -- e o que deixa o editor avisar que a saida
+    pedida vai cortar o quadro."""
+    from owcore import ffmpeg
+
+    job_id = run_analysis(short_sample)
+    esperado = ffmpeg.probe(short_sample)
+
+    detail = api().get(f"/api/jobs/{job_id}").json()
+    assert detail["width"] == esperado.width
+    assert detail["height"] == esperado.height
+
+
 def test_o_proxy_e_servido_com_range(isolated, short_sample):
     job_id = run_analysis(short_sample)
 
@@ -612,6 +662,40 @@ def test_partida_analisada_antes_do_proxy_diz_isso_em_vez_de_quebrar(isolated):
 
     assert api().get("/api/jobs/antigo0000000001").json()["proxy_url"] is None
     assert api().get("/api/jobs/antigo0000000001/proxy").status_code == 404
+
+
+def test_partida_antiga_e_medida_ao_abrir_o_editor(isolated, short_sample):
+    """A coluna nova nasce vazia numa partida analisada antes dela existir, e o
+    reconciliador de esquema nao tem como saber o que ela deveria valer -- so o
+    arquivo sabe. Sem isso o editor abriria sem poder dizer se um 9:16 corta o
+    quadro dela."""
+    from owcore import ffmpeg
+    from owcore.models import Job
+    from owcore.storage import get_storage
+
+    key = get_storage().put_file("antigo/video.mp4", short_sample)
+    with session() as s:
+        s.add(Job(id="antigo0000000002", video_key=key, video_name="v.mp4"))
+
+    esperado = ffmpeg.probe(short_sample)
+    detail = api().get("/api/jobs/antigo0000000002").json()
+    assert detail["width"] == esperado.width
+    assert detail["height"] == esperado.height
+
+    # e a medida fica guardada: o proximo GET nao paga outro ffprobe
+    with session() as s:
+        assert s.get(Job, "antigo0000000002").width == esperado.width
+
+
+def test_medir_uma_gravacao_sumida_nao_derruba_a_tela(isolated):
+    """Vale mais abrir o editor sem o tamanho do que nao abrir."""
+    from owcore.models import Job
+
+    with session() as s:
+        s.add(Job(id="antigo0000000003", video_key="sumido.mp4", video_name="v"))
+
+    detail = api().get("/api/jobs/antigo0000000003").json()
+    assert detail["width"] == 0
 
 
 def test_a_onda_da_partida_volta_com_o_job(isolated, short_sample):
@@ -748,6 +832,26 @@ def test_duas_camadas_viram_um_video_com_a_de_cima_por_cima(
     assert info.duration_s == pytest.approx(4.5, abs=0.35)
     # a tela e a da gravacao: a sobreposicao nao muda o quadro
     assert (info.width, info.height) == (original.width, original.height)
+
+
+def test_uma_saida_fora_do_padrao_tira_a_montagem_do_caminho_antigo(isolated):
+    """Corte-e-emenda nao sabe mudar a proporcao nem por marca d'agua: essas
+    coisas so existem no grafo de filtros. Foi assim que um pedido de 9:16 saiu
+    16:9 sem reclamar de nada."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def montagem(**export):
+        return Timeline(
+            export=export,
+            layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=2, start_s=1)])],
+        )
+
+    assert montagem().de_uma_camada_so, "sem pedido nenhum, o caminho antigo"
+    assert not montagem(width=1080, height=1920).de_uma_camada_so
+    assert not montagem(from_s=1.0).de_uma_camada_so
+    assert not montagem(watermark_id="m1").de_uma_camada_so
+    assert not montagem(crf=30).de_uma_camada_so
+    assert not montagem(fps=24).de_uma_camada_so
 
 
 def test_montagem_de_uma_camada_so_continua_pelo_caminho_antigo(
@@ -1390,3 +1494,258 @@ def test_sem_fonte_o_erro_aparece_na_hora_certa(isolated, monkeypatch):
     finally:
         fonts.padrao.cache_clear()
         config.get_settings.cache_clear()
+
+
+# ── exportação (Fase 7) ─────────────────────────────────────────────────────
+
+
+def _timeline_simples(**export):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    return Timeline(
+        export=export,
+        layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=1),
+            TimelineClip(at_s=2, duration_s=2, start_s=8),
+        ])],
+    )
+
+
+def test_a_mesma_montagem_sai_em_qualquer_proporcao(
+    isolated, short_sample, tmp_path
+):
+    """O que muda entre 16:9 e 9:16 nao e a montagem: e a janela por onde se
+    olha. Nada dos clipes precisa mudar."""
+    from owcore import ffmpeg
+
+    for nome, exp, esperado in [
+        ("padrao", {}, (1280, 720)),
+        ("vertical", {"width": 1080, "height": 1920}, (1080, 1920)),
+        ("quadrado", {"width": 720, "height": 720}, (720, 720)),
+    ]:
+        saida = compor_e_render(
+            _timeline_simples(**exp), short_sample, tmp_path / f"{nome}.mp4"
+        )
+        info = ffmpeg.probe(saida)
+        assert (info.width, info.height) == esperado, nome
+        assert info.duration_s == pytest.approx(4.0, abs=0.35), nome
+
+
+def test_cover_preenche_e_contain_deixa_barras(
+    isolated, short_sample, tmp_path
+):
+    """As duas respostas sao legitimas, e dao imagens bem diferentes."""
+    cover = compor_e_render(
+        _timeline_simples(width=720, height=1280),
+        short_sample, tmp_path / "cover.mp4",
+    )
+    contain = compor_e_render(
+        _timeline_simples(width=720, height=1280, fit="contain"),
+        short_sample, tmp_path / "contain.mp4",
+    )
+
+    a, b = quadro_cru(cover, 1.0), quadro_cru(contain, 1.0)
+    assert abs(a - b).mean() > 15, "os dois enquadramentos deram na mesma coisa"
+    # o `contain` tem barras pretas: ele e visivelmente mais escuro no total
+    assert b.mean() < a.mean()
+
+
+def test_exportar_um_trecho_reposiciona_os_clipes(isolated):
+    """Nao e cortar o video depois de pronto: os clipes sao reposicionados como
+    se a janela fosse o comeco."""
+    from owcore.compose import compor
+
+    c = compor(
+        _timeline_simples(from_s=1.0, to_s=3.0),
+        source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600,
+    )
+
+    assert c.duracao_s == pytest.approx(2.0)
+    # dos dois clipes, os dois entram — mas cada um pela metade
+    assert c.filter_complex.count("overlay=") == 2
+    assert "between(t,0.000,1.000)" in c.filter_complex
+    assert "between(t,1.000,2.000)" in c.filter_complex
+
+
+def test_um_clipe_que_comeca_antes_da_janela_entra_pelo_meio(isolated):
+    """E o ponto de entrada na fonte anda junto, senao a imagem saltaria."""
+    from owcore.compose import _na_janela
+    from owcore.models import TimelineClip
+
+    clip = TimelineClip(at_s=0, duration_s=4, start_s=10)
+    visto = _na_janela(clip, 1.0, 3.0)
+
+    assert visto is not None
+    assert visto.at_s == 0.0, "ele passa a comecar no primeiro quadro"
+    assert visto.duration_s == pytest.approx(2.0)
+    assert visto.start_s == pytest.approx(11.0), "pulou 1s da gravacao tambem"
+
+
+def test_a_velocidade_conta_no_pulo_da_janela(isolated):
+    from owcore.compose import _na_janela
+    from owcore.models import TimelineClip
+
+    # a 2x, um segundo de video pulado custa dois de gravacao
+    clip = TimelineClip(at_s=0, duration_s=4, start_s=10, speed=2.0)
+    visto = _na_janela(clip, 1.0, 3.0)
+
+    assert visto.start_s == pytest.approx(12.0)
+
+
+def test_clipe_fora_da_janela_nao_entra(isolated):
+    from owcore.compose import _na_janela
+    from owcore.models import TimelineClip
+
+    clip = TimelineClip(at_s=10, duration_s=2, start_s=1)
+    assert _na_janela(clip, 0.0, 5.0) is None
+    assert _na_janela(TimelineClip(at_s=0, duration_s=1, start_s=1), 5.0, 9.0) is None
+
+
+def test_trecho_vazio_e_recusado(isolated):
+    from owcore.compose import compor
+
+    with pytest.raises(ValueError, match="vazio"):
+        compor(_timeline_simples(from_s=50, to_s=60), source=Path("x.mp4"),
+               width=640, height=360, fps=30, source_duration_s=600)
+
+
+def test_a_marca_dagua_vem_por_cima_de_tudo(isolated, short_sample, tmp_path):
+    """Marca que alguma camada cobre nao e marca d'agua."""
+    from owcore.compose import MidiaNoDisco, compor
+    from owcore import ffmpeg
+
+    png = png_de_teste(tmp_path / "marca.png", cor="white")
+    t = _timeline_simples(watermark_id="m1", watermark_scale=0.3)
+    info = ffmpeg.probe(short_sample)
+    c = compor(t, source=short_sample, width=info.width, height=info.height,
+               fps=info.fps, source_duration_s=info.duration_s,
+               midias={"m1": MidiaNoDisco(png, "image")})
+
+    # a marca e o ultimo overlay antes da saida: o que sai dela vai direto para
+    # o corte final, sem nenhuma camada por cima
+    filtros = c.filter_complex
+    assert "[marca]overlay" in filtros
+    assert "[marcado]trim=" in filtros
+
+    com = tmp_path / "com_marca.mp4"
+    ffmpeg.compose(c, com)
+    sem = compor_e_render(_timeline_simples(), short_sample, tmp_path / "sem.mp4")
+    assert abs(quadro_cru(com, 1.0) - quadro_cru(sem, 1.0)).mean() > 3
+
+
+def test_marca_dagua_que_nao_esta_na_biblioteca_e_recusada(isolated):
+    from owcore.compose import compor
+
+    with pytest.raises(ValueError, match="marca"):
+        compor(_timeline_simples(watermark_id="sumida"), source=Path("x.mp4"),
+               width=640, height=360, fps=30, source_duration_s=600)
+
+
+def test_a_qualidade_pedida_chega_ao_arquivo(isolated, short_sample, tmp_path):
+    """CRF alto e resolucao baixa tem de dar um arquivo visivelmente menor."""
+    from owcore import ffmpeg
+
+    cheio = compor_e_render(
+        _timeline_simples(), short_sample, tmp_path / "cheio.mp4"
+    )
+    leve = compor_e_render(
+        _timeline_simples(width=854, height=480, fps=24, crf=32),
+        short_sample, tmp_path / "leve.mp4",
+    )
+
+    assert leve.stat().st_size < cheio.stat().st_size / 3
+    assert ffmpeg.probe(leve).fps == pytest.approx(24, abs=1)
+
+
+# ── reaproveitamento ────────────────────────────────────────────────────────
+
+
+def test_a_assinatura_visual_ignora_o_som(isolated):
+    """Duas montagens com a mesma imagem tem a mesma assinatura -- e e por isso
+    que trocar a musica e reexportar nao precisa cortar nada de novo."""
+    from owcore.models import ClipAudio, Layer, Timeline, TimelineClip
+
+    def montagem(**kw):
+        return Timeline(
+            layers=[Layer(clips=[
+                TimelineClip(at_s=0, duration_s=2, start_s=1,
+                             audio=ClipAudio(volume=kw.pop("vol", 1.0))),
+            ])],
+            **kw,
+        )
+
+    base = montagem().assinatura_visual()
+    assert montagem(track_id="outra").assinatura_visual() == base
+    assert montagem(music_volume=0.3).assinatura_visual() == base
+    assert montagem(vol=0.2).assinatura_visual() == base
+
+
+def test_a_assinatura_muda_com_o_que_se_ve(isolated):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def montagem(**clip):
+        return Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=1, **clip),
+        ])])
+
+    base = montagem().assinatura_visual()
+    assert montagem(speed=2.0).assinatura_visual() != base
+    assert montagem(transform={"scale": 1.2}).assinatura_visual() != base
+    assert montagem(color={"saturation": 1.5}).assinatura_visual() != base
+
+    vertical = Timeline(
+        export={"width": 1080, "height": 1920},
+        layers=montagem().layers,
+    )
+    assert vertical.assinatura_visual() != base
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_trocar_a_musica_reaproveita_a_imagem(isolated, short_sample):
+    """A promessa da fase: reexportar com outra trilha nao recorta tudo de novo."""
+    job_id = run_analysis(short_sample)
+    track_id = subir_musica(job_id)
+
+    camadas = [{"clips": [
+        {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
+        {"at_s": 2.0, "duration_s": 1.5, "start_s": 6.0,
+         "transform": {"scale": 0.6}},
+    ]}]
+
+    def pedir():
+        rid = montar(job_id, [{"title": "x", "track_id": track_id,
+                               "layers": camadas}])
+        run_render()
+        return api().get(f"/api/renders/{rid}").json()["clips"][0]
+
+    primeiro = pedir()
+    assert primeiro["meta"]["reused"] is False, "a primeira vez monta a imagem"
+    assert primeiro["video_url"]
+
+    segundo = pedir()
+    assert segundo["meta"]["reused"] is True, "a segunda reaproveita"
+    assert segundo["video_url"]
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_com_o_som_do_jogo_na_mistura_nao_ha_o_que_reaproveitar(
+    isolated, short_sample
+):
+    """O audio precisa dos mesmos cortes que a imagem; nao ha economia."""
+    job_id = run_analysis(short_sample)
+    track_id = subir_musica(job_id)
+
+    render_id = montar(job_id, [{
+        "track_id": track_id, "game_volume": 0.5,
+        "layers": [{"clips": [
+            {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
+            {"at_s": 2.0, "duration_s": 1.0, "start_s": 6.0,
+             "transform": {"scale": 0.6}},
+        ]}],
+    }])
+    run_render()
+
+    clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
+    assert clip["meta"]["reused"] is False
+    assert clip["video_url"]

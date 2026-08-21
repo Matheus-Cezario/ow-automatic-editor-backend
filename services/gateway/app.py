@@ -7,6 +7,7 @@ cria o job e publica no barramento; o resto acontece nos workers.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -51,6 +52,7 @@ from owcore.models import (
     frame_key,
     new_id,
 )
+from owcore.ffmpeg import probe
 from owcore.storage import get_storage
 
 #: propostas cujo video e montado em cortes -- so nelas a musica faz sentido.
@@ -108,6 +110,8 @@ async def lifespan(_app: FastAPI):
     yield
 
 
+LOG = logging.getLogger("gateway")
+
 app = FastAPI(
     title="OW Editor",
     description="Melhores momentos de partidas de Overwatch 2, automaticamente.",
@@ -161,6 +165,8 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         # `or 0` porque uma partida analisada antes desta coluna existir a le
         # como NULL ate o backfill passar por ela
         "fps": round(job.fps or 0.0, 3),
+        "width": job.width or 0,
+        "height": job.height or 0,
         "params": job.params,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
@@ -509,6 +515,13 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                     422,
                     f"midia desconhecida neste job: {clip.media_id!r}",
                 )
+        # a marca d'agua vem da mesma biblioteca, e recusa-la aqui e melhor do
+        # que deixar a renderizacao inteira falhar la na frente por causa dela
+        if spec.export.watermark_id and spec.export.watermark_id not in biblioteca:
+            raise HTTPException(
+                422,
+                f"marca desconhecida neste job: {spec.export.watermark_id!r}",
+            )
         montagens.append(spec)
 
     with session() as s:
@@ -773,12 +786,35 @@ def list_jobs(limit: int = 50, offset: int = 0) -> dict[str, Any]:
         return {"jobs": [_job_dict(j) for j in jobs]}
 
 
+def _remendar_o_tamanho(job: Job) -> None:
+    """Descobre o tamanho de uma gravacao analisada antes desta coluna existir.
+
+    O reconciliador de esquema poe a coluna, mas nao tem como saber o que ela
+    deveria valer -- so o arquivo sabe. Uma partida antiga abriria o editor sem
+    poder dizer se um 9:16 corta o quadro dela. Custa um `ffprobe`, uma vez na
+    vida de cada job. O ffmpeg le o arquivo onde ele esta -- por `Range`, se
+    estiver no S3 --, entao medir uma gravacao de dois gigas custa o cabecalho
+    dela, e nao os dois gigas.
+    """
+    if job.width or not job.video_key:
+        return
+    try:
+        info = probe(get_storage().url(job.video_key))
+    except Exception:  # noqa: BLE001 - um remendo nao derruba a tela do editor
+        LOG.warning("nao deu para medir a gravacao de %s", job.id, exc_info=True)
+        return
+    job.width, job.height = info.width, info.height
+    if not job.fps:
+        job.fps = info.fps
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
             raise HTTPException(404, "job nao encontrado")
+        _remendar_o_tamanho(job)
         return _job_dict(job, full=True)
 
 

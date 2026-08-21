@@ -77,6 +77,8 @@ class Preprocessor(Worker):
             if job is not None:
                 job.duration_s = info.duration_s
                 job.fps = info.fps
+                job.width = info.width
+                job.height = info.height
 
         params = get_params(job_id)
         profile = load_profile(params.profile or settings.profile)

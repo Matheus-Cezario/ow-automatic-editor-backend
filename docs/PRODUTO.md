@@ -144,6 +144,26 @@ termina; o vídeo é montado para caber nesse trecho:
 O início é encaixado na primeira batida a partir do ponto pedido, para o
 primeiro corte cair no tempo em vez de entrar no meio de um compasso.
 
+### Escolhendo o formato de saída
+
+Uma montagem não tem formato: ela tem cortes, camadas e efeitos. O formato é a
+janela por onde se olha para ela, escolhida na hora de gerar — e por isso o
+mesmo trabalho vira um **16:9** para o YouTube e um **9:16** para os Shorts sem
+que nada dele mude.
+
+Dá para escolher tamanho, taxa de quadros e qualidade; exportar **só um trecho**
+(ou só o que está selecionado, para conferir uma emenda sem esperar o vídeo
+inteiro); e pôr uma **marca d'água** de qualquer imagem da biblioteca, num dos
+quatro cantos.
+
+Quando a proporção pedida não é a da gravação, há duas respostas e as duas
+estão lá: **preencher**, que corta as sobras dos lados — numa montagem de
+gameplay a ação está no meio —, ou **caber**, que mostra o quadro inteiro e
+deixa barras, para quando o que importa está nos cantos.
+
+Reexportar a mesma montagem **trocando só a música** não recorta tudo de novo:
+o que se vê já está pronto, e a trilha nova entra por cima.
+
 ### Levando os cortes para editar por fora
 
 Cada partida oferece um **zip com tudo** — direto da lista, sem abrir vídeo
@@ -264,7 +284,7 @@ player de áudio dentro do app — se a música não tocar no seu navegador, a
 montagem continua possível pela onda e pelas batidas desenhadas, e a tela diz
 isso em vez de travar.
 
-**Suíte de testes**: 134 no backend, 73 no frontend. Cobrem as duas fases, os
+**Suíte de testes**: 199 no backend, 209 no frontend. Cobrem as duas fases, os
 contratos entre os microsserviços, o corte no ritmo, músicas diferentes no
 mesmo pedido, a montagem manual (o buraco que vira preto, o corte aparado que
 não move os vizinhos, o ímã da batida), a resiliência (um detector que falha

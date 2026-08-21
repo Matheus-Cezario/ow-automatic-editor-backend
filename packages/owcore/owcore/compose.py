@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import textfx
-from .models import ClipSource, MediaKind, Timeline, TimelineClip
+from .models import MIN_CUT_S, ClipSource, Fit, MediaKind, Timeline, TimelineClip
 
 
 
@@ -88,6 +88,7 @@ class Composicao:
     mapa_video: str = ""
     mapa_audio: str | None = None
     duracao_s: float = 0.0
+    crf: int = 20
 
     @property
     def filter_complex(self) -> str:
@@ -130,6 +131,29 @@ def _interpolacao(chaves: list, campo: str, duracao_s: float) -> str:
     return f"if(lt(t,{pontos[0][0]:.4f}),{pontos[0][1]:.4f},{expr})"
 
 
+def _enquadrar(fit: Fit, width: int, height: int) -> list[str]:
+    """Põe o clipe na tela de saída, que pode ter outra proporção.
+
+    Aparece de verdade ao exportar 9:16 de uma gravação 16:9, e as duas
+    respostas são legítimas: `cover` preenche e corta as sobras — numa montagem
+    de gameplay a ação está no meio, e barra preta num celular é desperdício de
+    tela; `contain` mostra o quadro inteiro e aceita as barras, para quem
+    precisa do que está nos cantos.
+
+    O `increase`/`decrease` do `force_original_aspect_ratio` faz a conta do lado
+    maior; o `crop` ou o `pad` resolve o que sobrou.
+    """
+    if fit is Fit.CONTAIN:
+        return [
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0.0",
+        ]
+    return [
+        f"scale={width}:{height}:force_original_aspect_ratio=increase",
+        f"crop={width}:{height}",
+    ]
+
+
 def _cadeia_de_zoom(clip: TimelineClip, width: int, height: int) -> list[str]:
     """A janela que anda e aperta dentro do clipe.
 
@@ -150,7 +174,12 @@ def _cadeia_de_zoom(clip: TimelineClip, width: int, height: int) -> list[str]:
 
 
 def _cadeia_de_video(
-    clip: TimelineClip, entrada: int, saida: str, width: int, height: int
+    clip: TimelineClip,
+    entrada: int,
+    saida: str,
+    width: int,
+    height: int,
+    fit: Fit,
 ) -> str:
     """O que acontece com um clipe antes de ele encostar na tela.
 
@@ -181,6 +210,11 @@ def _cadeia_de_video(
 
     if clip.zoom:
         passos += _cadeia_de_zoom(clip, width, height)
+
+    # antes de qualquer coisa que dependa do tamanho, o clipe passa a ter o
+    # tamanho da tela de saída
+    if clip.source is not ClipSource.TEXT:
+        passos += _enquadrar(fit, width, height)
 
     if not clip.color.neutra:
         passos.append(
@@ -270,6 +304,59 @@ def _cadeia_de_audio(clip: TimelineClip, entrada: int, saida: str) -> str | None
     if ms > 0:
         passos.append(f"adelay={ms}|{ms}")
     return ",".join(passos) + f"[{saida}]"
+
+
+def _na_janela(
+    clip: TimelineClip, inicio: float, fim: float
+) -> TimelineClip | None:
+    """O clipe visto pela janela de exportação, ou `None` se ele ficou de fora.
+
+    Exportar um trecho não é cortar o vídeo depois de pronto: os clipes são
+    reposicionados como se a janela fosse o começo. Um clipe que começa antes
+    dela entra pelo meio — e aí o ponto de entrada **na fonte** anda junto, na
+    medida da velocidade, senão a imagem saltaria.
+    """
+    if clip.until_s <= inicio + 1e-6 or clip.at_s >= fim - 1e-6:
+        return None
+
+    comeu_antes = max(0.0, inicio - clip.at_s)
+    sobra_depois = max(0.0, clip.until_s - fim)
+    nova_duracao = clip.duration_s - comeu_antes - sobra_depois
+    if nova_duracao < MIN_CUT_S:
+        return None
+
+    return clip.model_copy(
+        update={
+            "at_s": max(0.0, clip.at_s - inicio),
+            "duration_s": nova_duracao,
+            # o quanto se pulou do clipe custa mais fonte quando ele corre
+            # acelerado; num texto ou numa imagem, `start_s` não quer dizer nada
+            "start_s": clip.start_s + comeu_antes * clip.speed,
+        }
+    )
+
+
+def _marca_dagua(
+    exp,
+    entrada: int,
+    anterior: str,
+    saida: str,
+    width: int,
+) -> list[str]:
+    """A marca por cima de tudo, no canto escolhido.
+
+    Vem depois de todas as camadas de propósito: marca d'água que alguma camada
+    cobre não é marca d'água.
+    """
+    largura = max(1, int(round(exp.watermark_scale * width)))
+    passos = [
+        f"[{entrada}:v]scale={largura}:-1,format=rgba"
+        f",colorchannelmixer=aa={exp.watermark_opacity:.4f}[marca]"
+    ]
+    x = f"(W-w)/2+({exp.watermark_x:.4f})*(W/2)"
+    y = f"(H-h)/2+({exp.watermark_y:.4f})*(H/2)"
+    passos.append(f"[{anterior}][marca]overlay=x={x}:y={y}[{saida}]")
+    return passos
 
 
 def _entrada_do_clipe(
@@ -364,6 +451,7 @@ def compor(
     music_start_s: float = 0.0,
     source_duration_s: float = 0.0,
     midias: dict[str, MidiaNoDisco] | None = None,
+    so_video: bool = False,
 ) -> Composicao:
     """O grafo que monta esta linha do tempo.
 
@@ -379,9 +467,19 @@ def compor(
     sobrar do lugar dele fica sendo a tela de fundo, e os clipes seguintes não
     saem do lugar onde foram postos.
     """
-    fps = fps if fps > 0 else 30.0
-    duracao = timeline.duration_s
-    c = Composicao(duracao_s=duracao)
+    exp = timeline.export
+    fps_fonte = fps if fps > 0 else 30.0
+    fps = exp.fps or fps_fonte
+    width, height = exp.dimensoes(width, height)
+    fit = exp.fit
+
+    # o trecho pedido: tudo, ou uma janela dele
+    inicio = exp.from_s
+    fim = min(exp.to_s, timeline.duration_s) if exp.to_s else timeline.duration_s
+    duracao = max(0.0, fim - inicio)
+    if duracao <= 0:
+        raise ValueError("o trecho pedido para exportar esta vazio")
+    c = Composicao(duracao_s=duracao, crf=exp.crf)
 
     # a tela de fundo: é ela que aparece em todo instante que ninguém cobriu
     c.entradas.append(
@@ -400,7 +498,11 @@ def compor(
     for camada in timeline.layers:
         if camada.hidden:
             continue
-        for clip in camada.clips:
+        for original in camada.clips:
+            clip = _na_janela(original, inicio, fim)
+            if clip is None:
+                continue  # fora do trecho pedido
+
             entrada, duracao_util, tem_som = _entrada_do_clipe(
                 clip,
                 source=source,
@@ -418,7 +520,7 @@ def compor(
             aparado = clip.model_copy(update={"duration_s": duracao_util})
 
             c.filtros.append(
-                _cadeia_de_video(aparado, n, f"v{n}", width, height)
+                _cadeia_de_video(aparado, n, f"v{n}", width, height, fit)
             )
             x, y = _posicao(aparado)
             saida = f"t{n}"
@@ -429,7 +531,9 @@ def compor(
             )
             anterior = saida
 
-            if not camada.muted and tem_som:
+            # com `so_video` nem se monta o som dos clipes: uma cadeia de áudio
+            # sem saída deixa o grafo inválido, e o ffmpeg recusa o conjunto
+            if not so_video and not camada.muted and tem_som:
                 cadeia = _cadeia_de_audio(aparado, n, f"a{n}")
                 if cadeia is not None:
                     c.filtros.append(cadeia)
@@ -438,14 +542,33 @@ def compor(
     if n == 0:
         raise ValueError("nenhum clipe cai dentro da gravacao")
 
+    if exp.watermark_id:
+        marca = (midias or {}).get(exp.watermark_id)
+        if marca is None:
+            raise ValueError(
+                f"a marca d'agua {exp.watermark_id!r} nao esta na biblioteca"
+            )
+        c.entradas.append(Entrada(caminho=str(marca.caminho), loop=marca.e_imagem,
+                                  duracao=duracao if marca.e_imagem else None))
+        c.filtros += _marca_dagua(exp, len(c.entradas) - 1, anterior, "marcado",
+                                  width)
+        anterior = "marcado"
+
     c.filtros.append(f"[{anterior}]trim=duration={duracao:.3f},setpts=PTS-STARTPTS[vout]")
     c.mapa_video = "[vout]"
 
     # Com trilha e `game_volume` em 0, ela substitui o áudio -- o que a V1 fazia.
     # Acima disso os dois se misturam, e é o que deixa o tiro aparecer por baixo
     # da música.
+    if so_video:
+        # a imagem sozinha, para ser guardada e reaproveitada quando só a música
+        # mudar. O som entra depois, por cima
+        return c
+
     if music is not None:
-        c.entradas.append(Entrada(caminho=str(music), seek=music_start_s))
+        c.entradas.append(
+            Entrada(caminho=str(music), seek=music_start_s + inicio)
+        )
         indice = len(c.entradas) - 1
         volume = (
             f",volume={timeline.music_volume:.4f}"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import random
+import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,6 +65,22 @@ class TimelineItem:
     music_name: str | None = None
     #: os itens da biblioteca que esta montagem usa, já em disco
     midias: dict = field(default_factory=dict)
+
+    #: onde guardar e procurar a imagem já montada, por assinatura visual.
+    #: `None` desliga o reaproveitamento.
+    cache_dir: Path | None = None
+
+    def cache_de(self, assinatura: str) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / f"{assinatura}.mp4"
+
+    def guardar_cache(self, assinatura: str, video: Path) -> None:
+        alvo = self.cache_de(assinatura)
+        if alvo is None or alvo == video:
+            return
+        alvo.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(video, alvo)
 
 
 @dataclass(slots=True)
@@ -395,22 +412,45 @@ def _render_composicao(
     seria pagar a montagem duas vezes.
     """
     spec = item.timeline
+
+    # Quando a trilha manda sozinha, a imagem não depende de nada do som — e aí
+    # ela pode ser reaproveitada. Trocar a música e reexportar deixa de recortar
+    # o vídeo inteiro de novo: monta-se o áudio por cima do que já existe.
+    #
+    # Com o som do jogo na mistura isso não vale: o áudio precisa dos mesmos
+    # cortes que a imagem, e não há o que economizar.
+    so_a_trilha = item.music is not None and spec.game_volume <= 0
+
     comp = compor(
         spec,
         source=source,
         width=media.width,
         height=media.height,
         fps=media.fps,
-        music=item.music,
+        music=None if so_a_trilha else item.music,
         music_start_s=spec.music_start_s,
         source_duration_s=media.duration_s,
         midias=item.midias,
+        so_video=so_a_trilha,
     )
 
     dest: Path | None = out_dir / f"{index:02d}_custom.mp4"
     erro: str | None = None
+    reaproveitado = False
     try:
-        ffmpeg.compose(comp, dest)
+        if so_a_trilha:
+            imagem = item.cache_de(spec.assinatura_visual())
+            if imagem is not None and imagem.exists():
+                reaproveitado = True
+            else:
+                imagem = out_dir / f"{index:02d}_imagem.mp4"
+                ffmpeg.compose(comp, imagem)
+                item.guardar_cache(spec.assinatura_visual(), imagem)
+            ffmpeg.add_music(
+                imagem, item.music, dest, music_start=spec.music_start_s
+            )
+        else:
+            ffmpeg.compose(comp, dest)
     except ffmpeg.FFmpegError as exc:
         log.exception("composicao de '%s' falhou", item.title)
         erro = str(exc)[:500]
@@ -436,6 +476,7 @@ def _render_composicao(
             "layers": len(camadas),
             "composed": True,
             "hand_made": True,
+            "reused": reaproveitado,
             "media": len({c.media_id for c in clips if c.media_id}),
             "music_name": item.music_name,
             "original_audio": item.music is None,

@@ -139,6 +139,12 @@ vai sair) — duas coisas independentes, e é essa independência que deixa o me
 momento aparecer duas vezes, em pontos diferentes da música e com durações
 diferentes.
 
+Junto dos blocos vai o `export`: tamanho, fps, qualidade, enquadramento, trecho
+e marca d'água. Ele fica **fora** das camadas de propósito — a mesma montagem
+vira um 16:9 e um 9:16 sem que um bloco se mexa. E é ele, sozinho, que decide o
+caminho de renderização: uma saída fora do padrão não existe no corte-e-emenda
+da V1, só no grafo de filtros.
+
 ## 3. Detecção — como cada evento é reconhecido
 
 | Detector | ROI enviada | Técnica | Evento emitido |

@@ -429,6 +429,94 @@ class ClipFade(BaseModel):
         return self.in_s == 0.0 and self.out_s == 0.0
 
 
+class Fit(StrEnum):
+    """O que fazer quando a proporcao do clipe nao e a da saida.
+
+    Sai de verdade quando alguem exporta 9:16 de uma gravacao 16:9 -- e as duas
+    respostas sao legitimas, dependendo do que se quer.
+    """
+
+    #: preenche a tela e corta o que sobra. O padrao: numa montagem de gameplay
+    #: a acao esta no meio, e barra preta em cima e embaixo e desperdicio de
+    #: tela num celular
+    COVER = "cover"
+    #: mostra o quadro inteiro e deixa barras. Serve a quem precisa do que esta
+    #: nos cantos -- a HUD, o placar
+    CONTAIN = "contain"
+
+
+class ExportSpec(BaseModel):
+    """Como o video final e escrito.
+
+    Separado da montagem de proposito: a mesma montagem vira um 16:9 para o
+    YouTube e um 9:16 para os Shorts sem que nada dela mude. O que muda e a
+    janela por onde se olha.
+    """
+
+    #: `0` em qualquer um deles = o tamanho da gravacao
+    width: int = 0
+    height: int = 0
+    #: `0` = o fps da gravacao
+    fps: float = 0.0
+    #: qualidade do H.264: menor e melhor. 20 e o padrao do sistema
+    crf: int = 20
+    fit: Fit = Fit.COVER
+
+    #: recorte do tempo, em segundos do video montado. `None` = tudo
+    from_s: float = 0.0
+    to_s: float | None = None
+
+    #: item da biblioteca desenhado por cima de tudo
+    watermark_id: str | None = None
+    #: tamanho da marca, em fracao da largura do quadro
+    watermark_scale: float = 0.12
+    #: canto onde ela fica, do centro: (1, -1) e o canto superior direito
+    watermark_x: float = 0.82
+    watermark_y: float = -0.82
+    watermark_opacity: float = 0.65
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "ExportSpec":
+        if self.width < 0 or self.height < 0:
+            raise ValueError("as dimensoes nao podem ser negativas")
+        if (self.width > 0) != (self.height > 0):
+            raise ValueError("de as duas dimensoes ou nenhuma")
+        if not 0 <= self.crf <= 51:
+            raise ValueError("crf vai de 0 a 51")
+        if self.from_s < 0:
+            raise ValueError("from_s nao pode ser negativo")
+        if self.to_s is not None and self.to_s <= self.from_s:
+            raise ValueError("to_s tem de ser maior que from_s")
+        if not 0.0 <= self.watermark_opacity <= 1.0:
+            raise ValueError("watermark_opacity vai de 0 a 1")
+        if not 0.01 <= self.watermark_scale <= 1.0:
+            raise ValueError("watermark_scale vai de 0.01 a 1")
+        return self
+
+    @property
+    def padrao(self) -> bool:
+        """E a exportacao que o sistema faria sozinho?"""
+        return (
+            self.width == 0
+            and self.fps == 0
+            and self.crf == 20
+            and self.fit is Fit.COVER
+            and self.from_s == 0
+            and self.to_s is None
+            and self.watermark_id is None
+        )
+
+    def dimensoes(self, largura_fonte: int, altura_fonte: int) -> tuple[int, int]:
+        """O tamanho da tela final.
+
+        Arredondado para par: o H.264 em `yuv420p` guarda a cor em blocos de
+        2x2, e uma dimensao impar simplesmente nao codifica.
+        """
+        w = self.width or largura_fonte
+        h = self.height or altura_fonte
+        return (int(w) // 2 * 2, int(h) // 2 * 2)
+
+
 class TextStyle(BaseModel):
     """Como o texto aparece.
 
@@ -678,6 +766,12 @@ class MontageDraft(BaseModel):
     beat_multiplier: float = 1.0
     beat_bar: int = 1
 
+    #: a mistura e o formato de saida tambem sao trabalho: quem baixou o volume
+    #: do jogo e escolheu 9:16 nao quer refazer as duas coisas depois de um F5
+    music_volume: float = 1.0
+    game_volume: float = 0.0
+    export: ExportSpec = Field(default_factory=ExportSpec)
+
 
 class Timeline(BaseModel):
     """Um video montado a mao: as camadas e a musica por baixo delas.
@@ -702,6 +796,10 @@ class Timeline(BaseModel):
     #: por baixo da musica.
     music_volume: float = 1.0
     game_volume: float = 0.0
+
+    #: como o video final e escrito. A mesma montagem vira 16:9 e 9:16 sem que
+    #: nada dela mude -- o que muda e a janela por onde se olha
+    export: ExportSpec = Field(default_factory=ExportSpec)
 
     @model_validator(mode="before")
     @classmethod
@@ -746,10 +844,17 @@ class Timeline(BaseModel):
         """Da para montar pelo caminho de corte-e-emenda da V1?
 
         Uma camada, nenhum clipe com transformacao, som ajustado ou fonte que
-        nao seja a gravacao. E o caso da maioria das montagens, e nele o
-        caminho antigo e mais resistente: um corte que falha custa so ele,
-        enquanto um erro no grafo de filtros derruba o render inteiro.
+        nao seja a gravacao, e a saida no formato da gravacao. E o caso da
+        maioria das montagens, e nele o caminho antigo e mais resistente: um
+        corte que falha custa so ele, enquanto um erro no grafo de filtros
+        derruba o render inteiro.
+
+        Uma saida fora do padrao -- outra proporcao, um trecho, uma marca
+        d'agua -- so existe no grafo de filtros, entao ela sozinha ja tira a
+        montagem deste caminho.
         """
+        if not self.export.padrao:
+            return False
         visiveis = [l for l in self.layers if not l.hidden]
         if len(visiveis) != 1:
             return False
@@ -759,6 +864,35 @@ class Timeline(BaseModel):
     def cuts(self) -> list[TimelineCut]:
         """A visao V1 desta linha do tempo. So faz sentido com uma camada."""
         return [c.como_corte() for c in self.clips]
+
+    def assinatura_visual(self) -> str:
+        """Uma impressao digital do que se **ve** neste video.
+
+        Nao entra nada de som: nem a musica, nem os volumes, nem o audio dos
+        clipes. Duas montagens com a mesma assinatura dao exatamente a mesma
+        imagem -- e e por isso que trocar a musica e reexportar nao precisa
+        cortar nada de novo.
+        """
+        import hashlib
+        import json
+
+        def sem_som(clip: dict) -> dict:
+            return {k: v for k, v in clip.items() if k != "audio"}
+
+        visual = {
+            "layers": [
+                {
+                    "hidden": camada.hidden,
+                    "clips": [
+                        sem_som(c.model_dump(mode="json")) for c in camada.clips
+                    ],
+                }
+                for camada in self.layers
+            ],
+            "export": self.export.model_dump(mode="json"),
+        }
+        cru = json.dumps(visual, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(cru.encode()).hexdigest()[:32]
 
 
 # ───────────────────────── mensagens do barramento ──────────────────────────
@@ -835,6 +969,10 @@ class Job(Base):
     #: quadros por segundo da gravação — o editor precisa dele para o passo de
     #: um quadro fazer sentido
     fps: Mapped[float] = mapped_column(Float, default=0.0)
+    #: tamanho da gravação. É o padrão de exportação — e o que deixa o editor
+    #: dizer se a saída pedida corta o quadro ou deixa barras
+    width: Mapped[int] = mapped_column(Integer, default=0)
+    height: Mapped[int] = mapped_column(Integer, default=0)
     params: Mapped[dict] = mapped_column(JSON, default=dict)
     #: cópia reduzida da gravação, para o monitor do editor. Sai da mesma
     #: decodificação dos recortes, então custa quase nada

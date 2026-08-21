@@ -13,7 +13,7 @@ sozinho: o frontend é opcional, e a API é navegável em
 |---|---|
 | [`docs/PRODUTO.md`](docs/PRODUTO.md) | o produto inteiro: as duas fases, os dois caminhos para virar vídeo, e o que está verificado e o que não está |
 | [`docs/PLAN.md`](docs/PLAN.md) | arquitetura, detecção, regras dos melhores momentos, montagem manual e o contrato REST |
-| [`docs/V2.md`](docs/V2.md) | o que falta para a tela de montagem virar um editor completo, em fases — **planejamento, nada implementado** |
+| [`docs/V2.md`](docs/V2.md) | o que falta para a tela de montagem virar um editor completo, em fases — **7 das 8 feitas**, cada uma com o que ficou de fora e por quê |
 
 O app Flutter é um repositório à parte, e o `docker-compose.yml` (que orquestra
 os dois) vive com ele. Em disco os dois ficam lado a lado — `ow_editor/backend`
@@ -58,7 +58,7 @@ python tools/make_sample.py --out data/sample/match.mp4 \
 pytest tests/ -q
 ```
 
-São 179 testes em cinco camadas:
+São 199 testes em cinco camadas:
 
 | Arquivo | O que cobre |
 |---|---|
@@ -66,7 +66,7 @@ São 179 testes em cinco camadas:
 | `test_infra.py` | barramento (fan-out entre grupos, competição dentro do grupo), storage, primitivas de visão, marcação de cor dos recortes |
 | `test_detectors.py` | precisão de cada detector contra o gabarito do vídeo sintético, incluindo as duas habilidades do rodapé não se confundirem |
 | `test_pipeline.py` | as duas fases atravessando todos os serviços — é o que verifica os *contratos* das mensagens, mais músicas diferentes por vídeo, a janela de música, o áudio original e o zip dos cortes |
-| `test_timeline.py` | a montagem manual: a matemática da linha do tempo (buraco vira preto, corte aparado não move o vizinho), o caminho inteiro do upload da música ao mp4 conferido com `ffprobe`, e as entregas com `Range` que o app usa para tocar a música e mostrar o preview |
+| `test_timeline.py` | a montagem manual e o editor da V2: a matemática da linha do tempo (buraco vira preto, corte aparado não move o vizinho), camadas, efeitos e texto conferidos **no pixel** do mp4 que saiu, a exportação (dimensão, fps e trecho por `ffprobe`; `cover` contra `contain`) e o reaproveitamento da imagem ao trocar de música, mais as entregas com `Range` que o app usa para tocar a música e mostrar o preview |
 
 Os testes que dependem do vídeo sintético se auto-pulam se ele não existir,
 dizendo como gerá-lo.

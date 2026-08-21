@@ -248,6 +248,11 @@ class Editor(Worker):
                         music=music,
                         music_name=music_name,
                         midias=midias,
+                        # o cache é do job: a mesma montagem reexportada com
+                        # outra música reaproveita a imagem já montada
+                        cache_dir=Path(get_settings().work_dir)
+                        / job_id
+                        / "imagens",
                     )
                 )
         return items
