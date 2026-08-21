@@ -58,7 +58,7 @@ python tools/make_sample.py --out data/sample/match.mp4 \
 pytest tests/ -q
 ```
 
-São 172 testes em cinco camadas:
+São 179 testes em cinco camadas:
 
 | Arquivo | O que cobre |
 |---|---|
@@ -145,6 +145,8 @@ packages/owcore/   núcleo compartilhado, instalado em cada serviço
   ffmpeg.py        recorte, corte, concatenação, trilha
   audio.py         leitura de WAV e forma de onda (música e partida)
   compose.py       linha do tempo em camadas -> grafo de filtros (função pura)
+  textfx.py        texto -> `drawtext`, com o escape que o filtergraph exige
+  fonts.py         onde está a fonte; falha alto quando não há nenhuma
   detector.py      base dos microsserviços detectores
   worker.py        laço de consumo, ack, encerramento limpo
 services/          um diretório por microsserviço

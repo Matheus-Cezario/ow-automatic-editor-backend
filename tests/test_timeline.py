@@ -1284,3 +1284,109 @@ def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
     assert inicio.size > 0 and inicio.size == fim.size
     # mesma imagem, lentes diferentes: os quadros tem de ser bem distintos
     assert abs(inicio - fim).mean() > 10, "a lente nao se mexeu"
+
+
+# ── texto (Fase 6) ──────────────────────────────────────────────────────────
+
+
+def test_o_texto_escapa_o_que_quebraria_o_grafo(isolated):
+    """Dois pontos, aspas e porcentagem aparecem em texto de verdade -- e cada
+    um deles, solto, parte o filtergraph em dois."""
+    from owcore.textfx import escapar
+
+    assert escapar("TRIPLE KILL: 50%") == r"TRIPLE KILL\: 50\%"
+    assert escapar("o 'x'") == r"o \'x\'"
+    assert escapar("a\\b") == r"a\\b"
+    # uma quebra crua partiria o grafo: o filtergraph e uma linha so
+    assert "\n" not in escapar("duas\nlinhas")
+
+
+def test_o_tamanho_do_texto_e_fracao_da_altura(isolated):
+    """A mesma montagem tem de sair igual em 720p e em 4K."""
+    from owcore.models import TimelineClip
+    from owcore.textfx import cadeia
+
+    clip = TimelineClip(at_s=0, duration_s=1, source="text", text="oi",
+                        text_style={"size": 0.1})
+
+    assert "fontsize=72" in cadeia(clip, 720)
+    assert "fontsize=216" in cadeia(clip, 2160)
+
+
+def test_um_clipe_de_texto_precisa_de_texto(isolated):
+    from owcore.models import TimelineClip
+
+    with pytest.raises(ValueError, match="precisa de texto"):
+        TimelineClip(at_s=0, duration_s=1, source="text", text="   ")
+
+
+def test_o_texto_entra_numa_tela_transparente(isolated):
+    """Se a tela fosse preta, o texto viria dentro de uma caixa."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=1, source="text", text="oi"),
+    ])])
+    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+
+    assert any("color=c=black@0.0" in e.caminho for e in c.entradas)
+    g = c.filter_complex
+    # o alfa tem de existir antes de o texto ser escrito
+    assert g.index("format=rgba") < g.index("drawtext")
+    # e um texto nao tem som que corra junto
+    assert c.mapa_audio is None
+
+
+def test_o_texto_aparece_no_video_e_some_sem_deixar_caixa(
+    isolated, short_sample, tmp_path
+):
+    """O que importa nao e o grafo: e o quadro."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    base = TimelineClip(at_s=0, duration_s=2, start_s=1)
+    texto = TimelineClip(
+        at_s=0.2, duration_s=1.2, source="text", text="TRIPLE KILL: 50%",
+        text_style={"size": 0.14, "color": "yellow"}, transform={"y": -0.5},
+    )
+
+    com = compor_e_render(
+        Timeline(layers=[Layer(clips=[base]), Layer(clips=[texto])]),
+        short_sample, tmp_path / "com.mp4",
+    )
+    sem = compor_e_render(
+        Timeline(layers=[Layer(clips=[base])]), short_sample, tmp_path / "sem.mp4"
+    )
+
+    # com o texto na tela, os quadros sao bem diferentes
+    assert abs(quadro_cru(com, 0.8) - quadro_cru(sem, 0.8)).mean() > 10
+    # depois dele, identicos: a tela do texto e transparente, nao preta
+    assert abs(quadro_cru(com, 1.9) - quadro_cru(sem, 1.9)).mean() < 5
+
+
+def test_texto_e_montado_pelo_grafo_e_nao_pelo_caminho_antigo(isolated):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=1, source="text", text="oi"),
+    ])])
+    assert not t.de_uma_camada_so
+
+
+def test_sem_fonte_o_erro_aparece_na_hora_certa(isolated, monkeypatch):
+    """Descobrir que nao ha fonte no meio de um render seria pior."""
+    from owcore import fonts
+
+    fonts.padrao.cache_clear()
+    monkeypatch.setattr(fonts, "CANDIDATAS", ())
+    monkeypatch.setenv("OW_FONT", "")
+
+    import owcore.config as config
+
+    config.get_settings.cache_clear()
+    try:
+        with pytest.raises(FileNotFoundError, match="OW_FONT"):
+            fonts.padrao()
+    finally:
+        fonts.padrao.cache_clear()
+        config.get_settings.cache_clear()

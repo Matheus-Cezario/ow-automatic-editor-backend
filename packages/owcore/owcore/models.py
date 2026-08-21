@@ -429,6 +429,33 @@ class ClipFade(BaseModel):
         return self.in_s == 0.0 and self.out_s == 0.0
 
 
+class TextStyle(BaseModel):
+    """Como o texto aparece.
+
+    O tamanho e a borda sao **fracoes da altura do quadro**, e nao pixels: a
+    mesma montagem tem de sair igual em 720p e em 4K, e um corpo de 48px que
+    fica bem num sairia minusculo no outro.
+    """
+
+    #: altura da letra, de 0 a 1 da altura do quadro
+    size: float = 0.08
+    color: str = "white"
+    #: espessura do contorno, em fracao do tamanho da letra. Contorno nao e
+    #: enfeite: sem ele, texto branco some em cena clara
+    outline: float = 0.12
+    outline_color: str = "black"
+    #: caminho da fonte; vazio usa a do sistema
+    font: str = ""
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "TextStyle":
+        if not 0.01 <= self.size <= 0.5:
+            raise ValueError("size do texto vai de 0.01 a 0.5 da altura")
+        if not 0.0 <= self.outline <= 1.0:
+            raise ValueError("outline vai de 0 a 1 do tamanho da letra")
+        return self
+
+
 class ZoomKey(BaseModel):
     """Um ponto da animacao de zoom, dentro do clipe.
 
@@ -478,8 +505,11 @@ class TimelineClip(BaseModel):
     #: a correcao de cor -- sao a *cor do conteudo* e o *ajuste do conteudo*,
     #: duas coisas que se encontram no mesmo clipe
     fill: str = "black"
-    #: id do item da biblioteca quando `source` e MEDIA (Fase 4)
+    #: id do item da biblioteca quando `source` e MEDIA
     media_id: str | None = None
+    #: o que esta escrito, quando `source` e TEXT
+    text: str = ""
+    text_style: TextStyle = Field(default_factory=TextStyle)
     transform: Transform = Field(default_factory=Transform)
     audio: ClipAudio = Field(default_factory=ClipAudio)
     color: ClipColor = Field(default_factory=ClipColor)
@@ -525,6 +555,8 @@ class TimelineClip(BaseModel):
                 raise ValueError("os quadros-chave tem de estar em ordem")
         if self.freeze and self.reverse:
             raise ValueError("congelar e inverter ao mesmo tempo nao faz sentido")
+        if self.source is ClipSource.TEXT and not self.text.strip():
+            raise ValueError("um clipe de texto precisa de texto")
         return self
 
     @property

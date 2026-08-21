@@ -32,7 +32,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import textfx
 from .models import ClipSource, MediaKind, Timeline, TimelineClip
+
 
 
 @dataclass(slots=True)
@@ -172,6 +174,11 @@ def _cadeia_de_video(
         # dividir o PTS acelera: a 2x, cada quadro vale metade do tempo
         passos.append(f"setpts=PTS/{clip.speed:.4f}")
 
+    if clip.source is ClipSource.TEXT:
+        # a tela é transparente, então o alfa tem de existir antes do texto
+        passos.append("format=rgba")
+        passos.append(textfx.cadeia(clip, height))
+
     if clip.zoom:
         passos += _cadeia_de_zoom(clip, width, height)
 
@@ -188,7 +195,9 @@ def _cadeia_de_video(
         )
 
     # o alfa só existe em rgba, e daqui para baixo tudo mexe nele
-    if not clip.fade.neutro or clip.transform.opacity < 1.0:
+    if (not clip.fade.neutro or clip.transform.opacity < 1.0) and (
+        clip.source is not ClipSource.TEXT
+    ):
         passos.append("format=rgba")
 
     if not clip.fade.neutro:
@@ -269,6 +278,9 @@ def _entrada_do_clipe(
     source: Path,
     source_duration_s: float,
     midias: dict[str, MidiaNoDisco],
+    width: int,
+    height: int,
+    fps: float,
 ) -> tuple[Entrada | None, float, bool]:
     """A entrada do ffmpeg para este clipe, a duração útil e se ele tem som.
 
@@ -290,6 +302,21 @@ def _entrada_do_clipe(
             Entrada(caminho=str(source), seek=clip.start_s, duracao=pedido),
             clip.duration_s if clip.freeze else pedido / clip.speed,
             True,
+        )
+
+    if clip.source is ClipSource.TEXT:
+        # uma tela transparente do tamanho do quadro, onde o texto é escrito.
+        # Ela é um clipe como qualquer outro daí em diante -- move, some, anda
+        # em camada. O `format=rgba` vem na cadeia de vídeo, junto do resto.
+        return (
+            Entrada(
+                caminho=f"color=c=black@0.0:s={int(width)}x{int(height)}"
+                f":r={fps:.3f}",
+                duracao=clip.duration_s,
+                lavfi=True,
+            ),
+            clip.duration_s,
+            False,
         )
 
     if clip.source is ClipSource.MEDIA:
@@ -321,8 +348,8 @@ def _entrada_do_clipe(
             True,
         )
 
-    # cor e texto chegam nas fases que as desenham; ignorar em silêncio seria
-    # pior do que não aceitar
+    # cor sólida chega quando fizer falta; ignorar em silêncio seria pior do que
+    # não aceitar
     raise ValueError(f"fonte '{clip.source}' ainda nao e montavel")
 
 
@@ -379,6 +406,9 @@ def compor(
                 source=source,
                 source_duration_s=source_duration_s,
                 midias=midias or {},
+                width=width,
+                height=height,
+                fps=fps,
             )
             if entrada is None:
                 continue  # cai fora da fonte; o lugar dele fica de fundo

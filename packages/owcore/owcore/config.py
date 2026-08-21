@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     # ── binários externos ───────────────────────────────────────────────────
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
+    #: fonte do `drawtext`. Vazio procura uma no sistema -- veja `owcore.fonts`
+    font: str = ""
 
     # ── comportamento ───────────────────────────────────────────────────────
     profile: str = "ow2_default"
