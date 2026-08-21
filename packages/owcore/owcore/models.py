@@ -429,6 +429,32 @@ class ClipFade(BaseModel):
         return self.in_s == 0.0 and self.out_s == 0.0
 
 
+class ZoomKey(BaseModel):
+    """Um ponto da animacao de zoom, dentro do clipe.
+
+    `t` vai de 0 a 1 -- e a fracao do clipe, nao segundos. Assim a animacao
+    sobrevive a esticar ou aparar o bloco: um zoom que fecha no fim continua
+    fechando no fim.
+    """
+
+    t: float
+    #: 1 = tamanho cheio; 2 = o dobro, ou seja, metade do quadro na tela
+    scale: float = 1.0
+    #: para onde a lente aponta, do centro, de -1 a 1
+    x: float = 0.0
+    y: float = 0.0
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "ZoomKey":
+        if not 0.0 <= self.t <= 1.0:
+            raise ValueError("t de um quadro-chave vai de 0 a 1")
+        if not 1.0 <= self.scale <= 8.0:
+            raise ValueError(
+                "scale de zoom vai de 1 a 8: menos que 1 mostraria fora do quadro"
+            )
+        return self
+
+
 class TimelineClip(BaseModel):
     """Um pedaco do video final: o que aparece, onde e por quanto tempo.
 
@@ -459,6 +485,19 @@ class TimelineClip(BaseModel):
     color: ClipColor = Field(default_factory=ClipColor)
     fade: ClipFade = Field(default_factory=ClipFade)
 
+    #: Animacao de zoom dentro do clipe. Vazio = sem animacao.
+    #:
+    #: E o *punch* na batida: dois quadros-chave bastam. Zoom e coisa do
+    #: conteudo -- olhar mais de perto o que esta ali --, e nao se confunde com
+    #: `transform.scale`, que e o tamanho do clipe dentro do quadro (o PiP).
+    zoom: list[ZoomKey] = Field(default_factory=list)
+
+    #: Congela no ultimo quadro em vez de correr. A duracao continua sendo a do
+    #: clipe; o que muda e que a imagem para.
+    freeze: bool = False
+    #: Toca de tras para frente.
+    reverse: bool = False
+
     #: Quanto mais rapido o clipe corre. 2 = dobro, 0.5 = camera lenta.
     #:
     #: Muda quanto da fonte ele consome: um clipe de 2s a 2x come 4s de
@@ -478,6 +517,14 @@ class TimelineClip(BaseModel):
             raise ValueError("speed fica entre 0.1 e 10")
         if self.fade.in_s + self.fade.out_s > self.duration_s + 1e-6:
             raise ValueError("os fades somados passam da duracao do clipe")
+        if self.zoom:
+            if len(self.zoom) < 2:
+                raise ValueError("uma animacao de zoom precisa de dois pontos")
+            ts = [k.t for k in self.zoom]
+            if ts != sorted(ts):
+                raise ValueError("os quadros-chave tem de estar em ordem")
+        if self.freeze and self.reverse:
+            raise ValueError("congelar e inverter ao mesmo tempo nao faz sentido")
         return self
 
     @property
@@ -488,6 +535,9 @@ class TimelineClip(BaseModel):
         de gravacao. E `duration_s` que o usuario arrasta na regua; isto aqui e
         consequencia.
         """
+        # um clipe congelado come um quadro só: o resto é o mesmo quadro parado
+        if self.freeze:
+            return MIN_CUT_S
         return self.duration_s * self.speed
 
     @property
@@ -510,6 +560,9 @@ class TimelineClip(BaseModel):
             and self.color.neutra
             and self.fade.neutro
             and self.speed == 1.0
+            and not self.zoom
+            and not self.freeze
+            and not self.reverse
         )
 
     def como_corte(self) -> TimelineCut:

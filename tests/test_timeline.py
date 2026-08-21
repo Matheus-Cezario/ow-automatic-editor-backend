@@ -1119,3 +1119,168 @@ def test_camera_lenta_e_fade_viram_video_de_verdade(isolated, short_sample):
     # 2s + 1.5s: a velocidade muda o que se consome da fonte, nao o que se ve
     assert info.duration_s == pytest.approx(3.5, abs=0.35)
     assert info.has_audio
+
+
+# ── quadros-chave, congelar, inverter (Fase 5, segunda metade) ──────────────
+
+
+def quadro_cru(video: Path, t: float) -> "np.ndarray":
+    """Um quadro em RGB, pequeno, direto do ffmpeg."""
+    import numpy as np
+
+    from owcore.config import get_settings
+
+    saida = subprocess.run(
+        [get_settings().ffmpeg, "-v", "error", "-ss", f"{t:.3f}",
+         "-i", str(video), "-frames:v", "1", "-vf", "scale=80:45",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True,
+    ).stdout
+    return np.frombuffer(saida, dtype=np.uint8).astype(float)
+
+
+def compor_e_render(timeline, source: Path, destino: Path) -> Path:
+    from owcore import ffmpeg
+    from owcore.compose import compor
+
+    info = ffmpeg.probe(source)
+    c = compor(timeline, source=source, width=info.width, height=info.height,
+               fps=info.fps, source_duration_s=info.duration_s)
+    ffmpeg.compose(c, destino)
+    return destino
+
+
+def test_o_fade_revela_a_camada_de_baixo_em_vez_de_pintar_preto(
+    isolated, short_sample, tmp_path
+):
+    """O `fade` do ffmpeg pinta preto; numa camada de cima isso e um borrao
+    escuro por cima do que deveria aparecer. Com `alpha=1` ele revela.
+
+    Sobre o fundo preto os dois dao no mesmo -- e por isso o erro passou
+    despercebido na primeira metade da fase.
+    """
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    baixo = TimelineClip(at_s=0, duration_s=2, start_s=1)
+    cima = TimelineClip(at_s=0, duration_s=2, start_s=6, fade={"out_s": 1.0})
+
+    juntos = compor_e_render(
+        Timeline(layers=[Layer(clips=[baixo]), Layer(clips=[cima])]),
+        short_sample, tmp_path / "juntos.mp4",
+    )
+    so_baixo = compor_e_render(
+        Timeline(layers=[Layer(clips=[baixo])]),
+        short_sample, tmp_path / "baixo.mp4",
+    )
+
+    # no fim do fade, o composto tem de ser a camada de baixo
+    a = quadro_cru(juntos, 1.95)
+    b = quadro_cru(so_baixo, 1.95)
+    assert a.size > 0 and a.size == b.size
+    assert abs(a - b).mean() < 12, "o fade pintou preto em vez de revelar"
+
+
+def test_o_grafo_usa_fade_no_alfa(isolated):
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, fade={"in_s": 0.5}),
+    ])])
+    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+
+    assert "fade=t=in:st=0:d=0.500:alpha=1" in g
+    # sem rgba o alfa nao existe, e o filtro nao teria onde mexer
+    assert g.index("format=rgba") < g.index("fade=t=in")
+
+
+def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
+    """`scale` nao anima no ffmpeg; quem anima e o `crop`, com expressoes em t."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1,
+                     zoom=[{"t": 0, "scale": 1}, {"t": 0.5, "scale": 2}]),
+    ])])
+    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+
+    assert "crop=w=" in g
+    # a fracao 0.5 do clipe de 2s e o segundo 1
+    assert "lt(t,1.0000)" in g
+    # e o quadro volta ao tamanho da tela depois do recorte
+    assert "scale=640:360" in g
+
+
+def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
+    """Um zoom que fecha no fim continua fechando no fim depois de esticar."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def grafo(duracao: float) -> str:
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=duracao, start_s=1,
+                         zoom=[{"t": 0, "scale": 1}, {"t": 1.0, "scale": 2}]),
+        ])])
+        return compor(t, source=Path("x.mp4"), width=640, height=360,
+                      fps=30).filter_complex
+
+    assert "lt(t,2.0000)" in grafo(2.0)
+    assert "lt(t,5.0000)" in grafo(5.0)
+
+
+def test_congelar_come_um_quadro_so_da_gravacao(isolated):
+    from owcore.models import TimelineClip
+
+    c = TimelineClip(at_s=0, duration_s=3, start_s=10, freeze=True)
+
+    assert c.fonte_consumida_s < 0.2, "um quadro parado nao come tres segundos"
+    assert c.until_s == pytest.approx(3.0), "mas ocupa os tres no video"
+
+
+def test_congelar_e_inverter_viram_video(isolated, short_sample, tmp_path):
+    from owcore import ffmpeg
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    for nome, kw in [("congelado", {"freeze": True}),
+                     ("invertido", {"reverse": True})]:
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=1.5, start_s=3, **kw),
+        ])])
+        saida = compor_e_render(t, short_sample, tmp_path / f"{nome}.mp4")
+        assert ffmpeg.probe(saida).duration_s == pytest.approx(1.5, abs=0.35)
+
+
+def test_um_quadro_congelado_nao_tem_som_correndo(isolated):
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, freeze=True),
+    ])])
+    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+
+    assert c.mapa_audio is None
+
+
+def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
+    """Nao basta o grafo estar certo: a imagem tem de aproximar mesmo.
+
+    O clipe e **congelado** de proposito: com o conteudo parado, a unica coisa
+    que muda entre um instante e outro e a lente. Comparar dois videos cujo
+    conteudo tambem corre no tempo nao diria nada.
+    """
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=3, freeze=True,
+                     zoom=[{"t": 0, "scale": 1}, {"t": 1, "scale": 3}]),
+    ])])
+    video = compor_e_render(t, short_sample, tmp_path / "zoom.mp4")
+
+    inicio = quadro_cru(video, 0.1)
+    fim = quadro_cru(video, 1.8)
+
+    assert inicio.size > 0 and inicio.size == fim.size
+    # mesma imagem, lentes diferentes: os quadros tem de ser bem distintos
+    assert abs(inicio - fim).mean() > 10, "a lente nao se mexeu"

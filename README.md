@@ -58,7 +58,7 @@ python tools/make_sample.py --out data/sample/match.mp4 \
 pytest tests/ -q
 ```
 
-São 164 testes em cinco camadas:
+São 172 testes em cinco camadas:
 
 | Arquivo | O que cobre |
 |---|---|

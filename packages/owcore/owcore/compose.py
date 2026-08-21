@@ -107,7 +107,49 @@ def _posicao(clip: TimelineClip) -> tuple[str, str]:
     return x, y
 
 
-def _cadeia_de_video(clip: TimelineClip, entrada: int, saida: str) -> str:
+def _interpolacao(chaves: list, campo: str, duracao_s: float) -> str:
+    """Uma expressão do ffmpeg que interpola o campo entre os quadros-chave.
+
+    Sai uma escada de `if`, do primeiro ponto ao último, com reta entre cada
+    par. O `t` dentro dela é o tempo do clipe já com a velocidade aplicada —
+    por isso os quadros-chave são frações, e não segundos: eles seguem o bloco
+    quando ele estica.
+    """
+    pontos = [
+        (max(0.0, k.t * duracao_s), float(getattr(k, campo))) for k in chaves
+    ]
+
+    # antes do primeiro ponto e depois do último, o valor é o do extremo
+    expr = f"{pontos[-1][1]:.4f}"
+    for (t0, v0), (t1, v1) in reversed(list(zip(pontos, pontos[1:]))):
+        span = max(1e-6, t1 - t0)
+        reta = f"({v0:.4f}+({v1 - v0:.4f})*(t-{t0:.4f})/{span:.4f})"
+        expr = f"if(lt(t,{t1:.4f}),{reta},{expr})"
+    return f"if(lt(t,{pontos[0][0]:.4f}),{pontos[0][1]:.4f},{expr})"
+
+
+def _cadeia_de_zoom(clip: TimelineClip, width: int, height: int) -> list[str]:
+    """A janela que anda e aperta dentro do clipe.
+
+    `scale` não anima no ffmpeg. Quem anima é o `crop`, que aceita expressões em
+    `t`: recorta-se uma janela cada vez menor e devolve-se ela ao tamanho da
+    tela. O efeito é a lente fechando.
+    """
+    z = _interpolacao(clip.zoom, "scale", clip.duration_s)
+    x = _interpolacao(clip.zoom, "x", clip.duration_s)
+    y = _interpolacao(clip.zoom, "y", clip.duration_s)
+    return [
+        f"crop=w='iw/({z})':h='ih/({z})'"
+        f":x='(iw-iw/({z}))*(0.5+({x})/2)'"
+        f":y='(ih-ih/({z}))*(0.5+({y})/2)'",
+        # de volta ao tamanho da tela: o recorte encolheu o quadro
+        f"scale={int(width)}:{int(height)}",
+    ]
+
+
+def _cadeia_de_video(
+    clip: TimelineClip, entrada: int, saida: str, width: int, height: int
+) -> str:
     """O que acontece com um clipe antes de ele encostar na tela.
 
     A ordem importa. A velocidade vem **antes** de tudo, porque ela muda o
@@ -118,9 +160,20 @@ def _cadeia_de_video(clip: TimelineClip, entrada: int, saida: str) -> str:
     passos = [f"[{entrada}:v]trim=duration={clip.fonte_consumida_s:.3f}"]
     passos.append("setpts=PTS-STARTPTS")
 
-    if clip.speed != 1.0:
+    if clip.reverse:
+        # `reverse` precisa do trecho inteiro na memória, e por isso só serve a
+        # clipes curtos — que é o caso de uma montagem na batida
+        passos.append("reverse")
+
+    if clip.freeze:
+        # um quadro só, esticado pela duração do bloco
+        passos.append(f"tpad=stop_mode=clone:stop_duration={clip.duration_s:.3f}")
+    elif clip.speed != 1.0:
         # dividir o PTS acelera: a 2x, cada quadro vale metade do tempo
         passos.append(f"setpts=PTS/{clip.speed:.4f}")
+
+    if clip.zoom:
+        passos += _cadeia_de_zoom(clip, width, height)
 
     if not clip.color.neutra:
         passos.append(
@@ -134,20 +187,25 @@ def _cadeia_de_video(clip: TimelineClip, entrada: int, saida: str) -> str:
             f"scale=iw*{clip.transform.scale:.4f}:ih*{clip.transform.scale:.4f}"
         )
 
+    # o alfa só existe em rgba, e daqui para baixo tudo mexe nele
+    if not clip.fade.neutro or clip.transform.opacity < 1.0:
+        passos.append("format=rgba")
+
     if not clip.fade.neutro:
-        # sobre o relógio já acelerado: o fade dura o que dura no vídeo
+        # `alpha=1` é o que faz o fade **revelar** o que está embaixo em vez de
+        # pintar preto por cima. Sobre o fundo preto dá no mesmo; sobre outra
+        # camada, é a diferença entre uma transição e um borrão escuro.
+        #
+        # E vai sobre o relógio já acelerado: o fade dura o que dura no vídeo.
         if clip.fade.in_s > 0:
-            passos.append(f"fade=t=in:st=0:d={clip.fade.in_s:.3f}")
+            passos.append(f"fade=t=in:st=0:d={clip.fade.in_s:.3f}:alpha=1")
         if clip.fade.out_s > 0:
             inicio = max(0.0, clip.duration_s - clip.fade.out_s)
             passos.append(
-                f"fade=t=out:st={inicio:.3f}:d={clip.fade.out_s:.3f}"
+                f"fade=t=out:st={inicio:.3f}:d={clip.fade.out_s:.3f}:alpha=1"
             )
 
     if clip.transform.opacity < 1.0:
-        # o alfa só existe em rgba; sem o `format` o colorchannelmixer não tem
-        # canal onde mexer
-        passos.append("format=rgba")
         passos.append(f"colorchannelmixer=aa={clip.transform.opacity:.4f}")
 
     # só agora o clipe é posto na hora dele no vídeo final
@@ -179,11 +237,16 @@ def _cadeia_de_audio(clip: TimelineClip, entrada: int, saida: str) -> str | None
     """O som do clipe, atrasado até a hora em que ele entra."""
     if clip.audio.mute or clip.audio.volume <= 0:
         return None
+    # um quadro congelado não tem som que corra junto
+    if clip.freeze:
+        return None
     ms = int(round(clip.at_s * 1000))
     passos = [
         f"[{entrada}:a]atrim=duration={clip.fonte_consumida_s:.3f}",
         "asetpts=PTS-STARTPTS",
     ]
+    if clip.reverse:
+        passos.append("areverse")
     if clip.speed != 1.0:
         passos += _atempo(clip.speed)
     if clip.audio.fade_in_s > 0:
@@ -220,10 +283,12 @@ def _entrada_do_clipe(
             pedido = min(pedido, max(0.0, source_duration_s - clip.start_s))
         if pedido <= 0:
             return None, 0.0, False
-        # aparado na fonte, ele encolhe no vídeo na mesma proporção
+        # Aparado na fonte, ele encolhe no vídeo na mesma proporção — exceto
+        # congelado, que consome um quadro e ocupa o bloco inteiro: ali a
+        # duração no vídeo não é consequência do que se consumiu.
         return (
             Entrada(caminho=str(source), seek=clip.start_s, duracao=pedido),
-            pedido / clip.speed,
+            clip.duration_s if clip.freeze else pedido / clip.speed,
             True,
         )
 
@@ -322,7 +387,9 @@ def compor(
             c.entradas.append(entrada)
             aparado = clip.model_copy(update={"duration_s": duracao_util})
 
-            c.filtros.append(_cadeia_de_video(aparado, n, f"v{n}"))
+            c.filtros.append(
+                _cadeia_de_video(aparado, n, f"v{n}", width, height)
+            )
             x, y = _posicao(aparado)
             saida = f"t{n}"
             c.filtros.append(
