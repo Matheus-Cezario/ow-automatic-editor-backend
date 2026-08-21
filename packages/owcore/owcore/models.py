@@ -375,6 +375,60 @@ class ClipAudio(BaseModel):
         )
 
 
+class ClipColor(BaseModel):
+    """Ajuste de cor do clipe.
+
+    Os tres que resolvem quase tudo numa montagem de gameplay: gravacao escura,
+    gravacao lavada, gravacao sem cor. O resto (curva, temperatura) chega quando
+    fizer falta.
+    """
+
+    brightness: float = 0.0
+    contrast: float = 1.0
+    saturation: float = 1.0
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "ClipColor":
+        if not -1.0 <= self.brightness <= 1.0:
+            raise ValueError("brightness fica entre -1 e 1")
+        if not 0.0 <= self.contrast <= 3.0:
+            raise ValueError("contrast fica entre 0 e 3")
+        if not 0.0 <= self.saturation <= 3.0:
+            raise ValueError("saturation fica entre 0 e 3")
+        return self
+
+    @property
+    def neutra(self) -> bool:
+        return (
+            self.brightness == 0.0
+            and self.contrast == 1.0
+            and self.saturation == 1.0
+        )
+
+
+class ClipFade(BaseModel):
+    """Entrada e saida do clipe, em segundos.
+
+    Sao transicoes de e para o **fundo** -- que numa montagem em camadas e
+    preto. A transicao *entre dois clipes* (crossfade) e outra coisa e nao cabe
+    no formato de sobreposicao: ela exige os dois existindo ao mesmo tempo com
+    pesos que mudam.
+    """
+
+    in_s: float = 0.0
+    out_s: float = 0.0
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "ClipFade":
+        if self.in_s < 0 or self.out_s < 0:
+            raise ValueError("fade nao pode ser negativo")
+        return self
+
+    @property
+    def neutro(self) -> bool:
+        return self.in_s == 0.0 and self.out_s == 0.0
+
+
 class TimelineClip(BaseModel):
     """Um pedaco do video final: o que aparece, onde e por quanto tempo.
 
@@ -394,12 +448,23 @@ class TimelineClip(BaseModel):
     source_t: float = 0.0
     #: kill/sleep/stun, para nomear e colorir
     kind: str = ""
-    #: cor solida quando `source` e COLOR
-    color: str = "black"
+    #: cor solida quando `source` e COLOR. Chama-se `fill` porque `color` ja e
+    #: a correcao de cor -- sao a *cor do conteudo* e o *ajuste do conteudo*,
+    #: duas coisas que se encontram no mesmo clipe
+    fill: str = "black"
     #: id do item da biblioteca quando `source` e MEDIA (Fase 4)
     media_id: str | None = None
     transform: Transform = Field(default_factory=Transform)
     audio: ClipAudio = Field(default_factory=ClipAudio)
+    color: ClipColor = Field(default_factory=ClipColor)
+    fade: ClipFade = Field(default_factory=ClipFade)
+
+    #: Quanto mais rapido o clipe corre. 2 = dobro, 0.5 = camera lenta.
+    #:
+    #: Muda quanto da fonte ele consome: um clipe de 2s a 2x come 4s de
+    #: gravacao. Nao muda quanto ele ocupa no video -- isso e `duration_s`, e e
+    #: o que o usuario arrasta.
+    speed: float = 1.0
 
     @model_validator(mode="after")
     def _coerente(self) -> "TimelineClip":
@@ -409,12 +474,26 @@ class TimelineClip(BaseModel):
             raise ValueError("at_s nao pode ser negativo")
         if self.duration_s < MIN_CUT_S:
             raise ValueError(f"um clipe tem de durar ao menos {MIN_CUT_S}s")
+        if not 0.1 <= self.speed <= 10.0:
+            raise ValueError("speed fica entre 0.1 e 10")
+        if self.fade.in_s + self.fade.out_s > self.duration_s + 1e-6:
+            raise ValueError("os fades somados passam da duracao do clipe")
         return self
 
     @property
+    def fonte_consumida_s(self) -> float:
+        """Quanto da fonte este clipe come.
+
+        Nao e a duracao dele no video: a 2x, dois segundos de video comem quatro
+        de gravacao. E `duration_s` que o usuario arrasta na regua; isto aqui e
+        consequencia.
+        """
+        return self.duration_s * self.speed
+
+    @property
     def end_s(self) -> float:
-        """Onde termina *na fonte*."""
-        return self.start_s + self.duration_s
+        """Onde termina *na fonte* -- ja contando a velocidade."""
+        return self.start_s + self.fonte_consumida_s
 
     @property
     def until_s(self) -> float:
@@ -428,6 +507,9 @@ class TimelineClip(BaseModel):
             self.source is ClipSource.RECORDING
             and self.transform.neutra
             and self.audio.neutro
+            and self.color.neutra
+            and self.fade.neutro
+            and self.speed == 1.0
         )
 
     def como_corte(self) -> TimelineCut:
@@ -528,6 +610,14 @@ class Timeline(BaseModel):
     music_start_s: float = 0.0
     layers: list[Layer] = Field(default_factory=list)
 
+    #: Volume da trilha e do som do jogo, de 0 a 2.
+    #:
+    #: Com `game_volume` em 0 a musica **substitui** o audio, que e o que a V1
+    #: fazia. Acima disso os dois se misturam -- e o que deixa o tiro aparecer
+    #: por baixo da musica.
+    music_volume: float = 1.0
+    game_volume: float = 0.0
+
     @model_validator(mode="before")
     @classmethod
     def _aceita_o_formato_da_v1(cls, dados: Any) -> Any:
@@ -548,6 +638,10 @@ class Timeline(BaseModel):
     def _tem_o_que_montar(self) -> "Timeline":
         if self.music_start_s < 0:
             raise ValueError("music_start_s nao pode ser negativo")
+        for nome, v in (("music_volume", self.music_volume),
+                        ("game_volume", self.game_volume)):
+            if not 0.0 <= v <= 2.0:
+                raise ValueError(f"{nome} fica entre 0 e 2")
         if not any(l.clips for l in self.layers):
             raise ValueError("uma linha do tempo vazia nao vira video")
         return self

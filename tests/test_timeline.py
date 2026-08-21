@@ -795,7 +795,7 @@ def test_fonte_que_ainda_nao_da_para_montar_e_recusada(isolated):
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
-        TimelineClip(at_s=0, duration_s=1, source="color", color="black"),
+        TimelineClip(at_s=0, duration_s=1, source="color", fill="black"),
     ])])
     with pytest.raises(ValueError, match="ainda nao e montavel"):
         compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
@@ -966,3 +966,156 @@ def test_tirar_da_biblioteca(isolated, short_sample, tmp_path):
     assert api().delete(f"/api/media/{media_id}").status_code == 204
     assert api().get(f"/api/media/{media_id}").status_code == 404
     assert api().get(f"/api/jobs/{job_id}").json()["media"] == []
+
+
+# ── efeitos (Fase 5) ────────────────────────────────────────────────────────
+
+
+def test_velocidade_muda_quanto_da_fonte_o_clipe_come(isolated):
+    """Nao a duracao dele no video -- essa e o que o usuario arrasta."""
+    from owcore.models import TimelineClip
+
+    lento = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=0.5)
+    rapido = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=2.0)
+
+    assert lento.fonte_consumida_s == pytest.approx(1.0)
+    assert rapido.fonte_consumida_s == pytest.approx(4.0)
+    # e onde ele termina na gravacao muda junto
+    assert lento.end_s == pytest.approx(11.0)
+    assert rapido.end_s == pytest.approx(14.0)
+    # mas os dois ocupam os mesmos 2s do video
+    assert lento.until_s == rapido.until_s == pytest.approx(2.0)
+
+
+def test_o_grafo_acelera_imagem_e_som_juntos(isolated):
+    """Descompasso entre imagem e som e pior do que nao ter som."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=10, speed=0.4),
+    ])])
+    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+
+    # 2s de video a 0.4x comem 0.8s de gravacao
+    assert "trim=duration=0.800" in g
+    assert "setpts=PTS/0.4000" in g
+    # `atempo` so aceita de 0.5 em diante, entao 0.4 vira 0.5 x 0.8
+    assert "atempo=0.5" in g and "atempo=0.8000" in g
+
+
+def test_a_ordem_dos_filtros_poe_o_fade_no_relogio_do_video(isolated):
+    """Um fade de meio segundo dura meio segundo no video, nao na fonte."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, speed=2.0,
+                     fade={"in_s": 0.5, "out_s": 0.5}),
+    ])])
+    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+
+    # a velocidade vem antes do fade: ela muda o relogio do clipe
+    assert g.index("setpts=PTS/2.0000") < g.index("fade=t=in")
+    # e o fade de saida comeca contando a duracao no *video*
+    assert "fade=t=out:st=1.500:d=0.500" in g
+
+
+def test_cor_e_aplicada_e_o_neutro_nao_polui_o_grafo(isolated):
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def grafo(**kw):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=1, start_s=1, **kw),
+        ])])
+        return compor(t, source=Path("x.mp4"), width=640, height=360,
+                      fps=30).filter_complex
+
+    assert "eq=" not in grafo()
+    assert "saturation=1.4000" in grafo(color={"saturation": 1.4})
+
+
+def test_a_musica_deixa_o_jogo_aparecer_por_baixo(isolated):
+    """Com `game_volume` em 0 ela substitui, como na V1; acima disso, mistura."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def grafo(**kw):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=1, start_s=1),
+        ])], **kw)
+        return compor(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      music=Path("m.mp3")).filter_complex
+
+    # o padrao continua sendo o da V1: a trilha manda sozinha
+    assert "[jogo]" not in grafo()
+    misturado = grafo(game_volume=0.5, music_volume=0.8)
+    assert "volume=0.8000[trilha]" in misturado
+    assert "[trilha][jogo]amix" in misturado
+
+
+def test_efeito_tira_a_montagem_do_caminho_de_corte_e_emenda(isolated):
+    """Corte-e-emenda nao sabe fazer nada disto."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def so_uma_camada(**kw):
+        return Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=1, start_s=1, **kw),
+        ])]).de_uma_camada_so
+
+    assert so_uma_camada()
+    assert not so_uma_camada(speed=2.0)
+    assert not so_uma_camada(fade={"in_s": 0.2})
+    assert not so_uma_camada(color={"contrast": 1.2})
+
+
+def test_efeitos_absurdos_sao_recusados(isolated):
+    """Guardar lixo agora seria um render quebrado depois."""
+    from owcore.models import TimelineClip
+
+    with pytest.raises(ValueError, match="speed"):
+        TimelineClip(at_s=0, duration_s=1, start_s=0, speed=50)
+    with pytest.raises(ValueError, match="fades somados"):
+        TimelineClip(at_s=0, duration_s=1, start_s=0,
+                     fade={"in_s": 0.7, "out_s": 0.7})
+    with pytest.raises(ValueError, match="saturation"):
+        TimelineClip(at_s=0, duration_s=1, start_s=0,
+                     color={"saturation": 9})
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_camera_lenta_e_fade_viram_video_de_verdade(isolated, short_sample):
+    """Do pedido ao mp4, com o relogio conferido."""
+    job_id = run_analysis(short_sample)
+    track_id = subir_musica(job_id)
+
+    camadas = [{"clips": [
+        {"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0, "speed": 0.5,
+         "fade": {"in_s": 0.4}, "color": {"saturation": 1.3}},
+        {"at_s": 2.0, "duration_s": 1.5, "start_s": 6.0, "speed": 2.0,
+         "fade": {"out_s": 0.5}},
+    ]}]
+    render_id = montar(job_id, [{
+        "title": "Com efeitos", "track_id": track_id,
+        "music_volume": 0.9, "game_volume": 0.3, "layers": camadas,
+    }])
+    run_render()
+
+    pedido = api().get(f"/api/renders/{render_id}").json()
+    assert pedido["status"] == "done", pedido["error"]
+    clip = pedido["clips"][0]
+    assert clip["meta"]["composed"] is True
+    assert clip["video_url"], "o video nao saiu"
+
+    from owcore import ffmpeg
+    from owcore.storage import local_copy
+
+    with session() as s:
+        key = next(c.key for c in s.get(Job, job_id).clips)
+    saida = local_copy(key, Path(isolated.work_dir) / "efeitos")
+    info = ffmpeg.probe(saida)
+
+    # 2s + 1.5s: a velocidade muda o que se consome da fonte, nao o que se ve
+    assert info.duration_s == pytest.approx(3.5, abs=0.35)
+    assert info.has_audio

@@ -108,20 +108,71 @@ def _posicao(clip: TimelineClip) -> tuple[str, str]:
 
 
 def _cadeia_de_video(clip: TimelineClip, entrada: int, saida: str) -> str:
-    """O que acontece com um clipe antes de ele encostar na tela."""
-    passos = [f"[{entrada}:v]trim=duration={clip.duration_s:.3f}"]
-    # o clipe passa a correr no tempo do vídeo final, e não no dele
-    passos.append(f"setpts=PTS-STARTPTS+{clip.at_s:.3f}/TB")
+    """O que acontece com um clipe antes de ele encostar na tela.
+
+    A ordem importa. A velocidade vem **antes** de tudo, porque ela muda o
+    relógio do clipe: um fade de meio segundo tem de durar meio segundo no vídeo
+    final, não meio segundo da fonte.
+    """
+    # o trim é sobre a fonte, então conta a velocidade
+    passos = [f"[{entrada}:v]trim=duration={clip.fonte_consumida_s:.3f}"]
+    passos.append("setpts=PTS-STARTPTS")
+
+    if clip.speed != 1.0:
+        # dividir o PTS acelera: a 2x, cada quadro vale metade do tempo
+        passos.append(f"setpts=PTS/{clip.speed:.4f}")
+
+    if not clip.color.neutra:
+        passos.append(
+            f"eq=brightness={clip.color.brightness:.4f}"
+            f":contrast={clip.color.contrast:.4f}"
+            f":saturation={clip.color.saturation:.4f}"
+        )
+
     if clip.transform.scale != 1.0:
         passos.append(
             f"scale=iw*{clip.transform.scale:.4f}:ih*{clip.transform.scale:.4f}"
         )
+
+    if not clip.fade.neutro:
+        # sobre o relógio já acelerado: o fade dura o que dura no vídeo
+        if clip.fade.in_s > 0:
+            passos.append(f"fade=t=in:st=0:d={clip.fade.in_s:.3f}")
+        if clip.fade.out_s > 0:
+            inicio = max(0.0, clip.duration_s - clip.fade.out_s)
+            passos.append(
+                f"fade=t=out:st={inicio:.3f}:d={clip.fade.out_s:.3f}"
+            )
+
     if clip.transform.opacity < 1.0:
         # o alfa só existe em rgba; sem o `format` o colorchannelmixer não tem
         # canal onde mexer
         passos.append("format=rgba")
         passos.append(f"colorchannelmixer=aa={clip.transform.opacity:.4f}")
+
+    # só agora o clipe é posto na hora dele no vídeo final
+    passos.append(f"setpts=PTS+{clip.at_s:.3f}/TB")
     return ",".join(passos) + f"[{saida}]"
+
+
+def _atempo(fator: float) -> list[str]:
+    """A cadeia de `atempo` para um fator qualquer.
+
+    O filtro só aceita de 0.5 a 100 por vez; fora disso encadeiam-se dois. Sem
+    isto, câmera lenta abaixo de 0.5x sairia com o áudio intacto — e o descompasso
+    entre imagem e som é pior do que não ter som.
+    """
+    passos: list[str] = []
+    resto = fator
+    while resto < 0.5:
+        passos.append("atempo=0.5")
+        resto /= 0.5
+    while resto > 100.0:
+        passos.append("atempo=100")
+        resto /= 100.0
+    if abs(resto - 1.0) > 1e-6:
+        passos.append(f"atempo={resto:.4f}")
+    return passos
 
 
 def _cadeia_de_audio(clip: TimelineClip, entrada: int, saida: str) -> str | None:
@@ -130,9 +181,11 @@ def _cadeia_de_audio(clip: TimelineClip, entrada: int, saida: str) -> str | None
         return None
     ms = int(round(clip.at_s * 1000))
     passos = [
-        f"[{entrada}:a]atrim=duration={clip.duration_s:.3f}",
+        f"[{entrada}:a]atrim=duration={clip.fonte_consumida_s:.3f}",
         "asetpts=PTS-STARTPTS",
     ]
+    if clip.speed != 1.0:
+        passos += _atempo(clip.speed)
     if clip.audio.fade_in_s > 0:
         passos.append(f"afade=t=in:st=0:d={clip.audio.fade_in_s:.3f}")
     if clip.audio.fade_out_s > 0:
@@ -160,14 +213,17 @@ def _entrada_do_clipe(
     tela de fundo, e os clipes seguintes não saem de onde foram postos.
     """
     if clip.source is ClipSource.RECORDING:
-        duracao = clip.duration_s
+        # o que se pede à fonte é o que a velocidade consome, não o que o clipe
+        # ocupa no vídeo
+        pedido = clip.fonte_consumida_s
         if source_duration_s > 0:
-            duracao = min(duracao, max(0.0, source_duration_s - clip.start_s))
-        if duracao <= 0:
+            pedido = min(pedido, max(0.0, source_duration_s - clip.start_s))
+        if pedido <= 0:
             return None, 0.0, False
+        # aparado na fonte, ele encolhe no vídeo na mesma proporção
         return (
-            Entrada(caminho=str(source), seek=clip.start_s, duracao=duracao),
-            duracao,
+            Entrada(caminho=str(source), seek=clip.start_s, duracao=pedido),
+            pedido / clip.speed,
             True,
         )
 
@@ -179,7 +235,8 @@ def _entrada_do_clipe(
             )
         if item.e_imagem:
             # uma imagem não corre no tempo: ela entra em laço e dura o que o
-            # clipe pedir, sem `-ss` (não há onde buscar num quadro só)
+            # clipe pedir, sem `-ss` (não há onde buscar num quadro só) e sem
+            # velocidade (não há o que acelerar num quadro parado)
             return (
                 Entrada(
                     caminho=str(item.caminho),
@@ -193,7 +250,7 @@ def _entrada_do_clipe(
             Entrada(
                 caminho=str(item.caminho),
                 seek=clip.start_s,
-                duracao=clip.duration_s,
+                duracao=clip.fonte_consumida_s,
             ),
             clip.duration_s,
             True,
@@ -287,14 +344,33 @@ def compor(
     c.filtros.append(f"[{anterior}]trim=duration={duracao:.3f},setpts=PTS-STARTPTS[vout]")
     c.mapa_video = "[vout]"
 
-    # Com trilha, ela **é** o áudio -- o som do jogo por baixo dela é mistura, e
-    # mistura é da fase dos efeitos. Sem trilha, vale o som dos próprios clipes.
+    # Com trilha e `game_volume` em 0, ela substitui o áudio -- o que a V1 fazia.
+    # Acima disso os dois se misturam, e é o que deixa o tiro aparecer por baixo
+    # da música.
     if music is not None:
         c.entradas.append(Entrada(caminho=str(music), seek=music_start_s))
         indice = len(c.entradas) - 1
-        c.filtros.append(
-            f"[{indice}:a]atrim=duration={duracao:.3f},asetpts=PTS-STARTPTS[aout]"
+        volume = (
+            f",volume={timeline.music_volume:.4f}"
+            if timeline.music_volume != 1.0
+            else ""
         )
+        c.filtros.append(
+            f"[{indice}:a]atrim=duration={duracao:.3f},asetpts=PTS-STARTPTS"
+            f"{volume}[trilha]"
+        )
+        if timeline.game_volume > 0 and audios:
+            jogo = "".join(f"[{a}]" for a in audios)
+            c.filtros.append(
+                f"{jogo}amix=inputs={len(audios)}:dropout_transition=0:"
+                f"normalize=0,volume={timeline.game_volume:.4f}[jogo]"
+            )
+            c.filtros.append(
+                "[trilha][jogo]amix=inputs=2:dropout_transition=0:"
+                "normalize=0[aout]"
+            )
+        else:
+            c.filtros.append("[trilha]anull[aout]")
         c.mapa_audio = "[aout]"
     elif len(audios) == 1:
         # misturar uma faixa só é trabalho à toa, e o `amix` ainda mexeria no
