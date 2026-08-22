@@ -309,8 +309,7 @@ def test_montagem_manual_vira_video_com_os_blocos_onde_o_usuario_pos(
     ]
     render_id = montar(
         job_id,
-        [{"title": "Minha montagem", "track_id": track_id,
-          "music_start_s": 2.0, "cuts": cuts}],
+        [{"title": "Minha montagem", "cuts": cuts}],
     )
     run_render()
 
@@ -324,7 +323,6 @@ def test_montagem_manual_vira_video_com_os_blocos_onde_o_usuario_pos(
     assert clip["meta"]["hand_made"] is True
     assert clip["meta"]["segments"] == 2
     assert clip["meta"]["blackfill_s"] == pytest.approx(1.0, abs=0.05)
-    assert clip["meta"]["music_start_s"] == pytest.approx(2.0)
     assert clip["video_url"], "o video nao saiu"
     assert clip["segments_zip_url"], "os cortes avulsos nao sairam"
 
@@ -387,13 +385,16 @@ def test_musica_de_outro_job_e_recusada(isolated, short_sample):
     job_id = run_analysis(short_sample)
     resp = api().post(
         f"/api/jobs/{job_id}/renders",
-        data={"timelines": json.dumps([
-            {"track_id": "naoexiste",
-             "cuts": [{"start_s": 1, "duration_s": 1, "at_s": 0}]}
-        ])},
+        data={"timelines": json.dumps([{"layers": [
+            {"clips": [{"start_s": 1, "duration_s": 1, "at_s": 0}]},
+            {"kind": "audio", "clips": [
+                {"at_s": 0, "duration_s": 1, "start_s": 0,
+                 "source": "media", "media_id": "naoexiste"},
+            ]},
+        ]}])},
     )
     assert resp.status_code == 422
-    assert "musica desconhecida" in resp.json()["detail"]
+    assert "midia desconhecida" in resp.json()["detail"]
 
 
 @pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
@@ -1144,20 +1145,37 @@ def test_cor_e_aplicada_e_o_neutro_nao_polui_o_grafo(isolated):
 def test_a_musica_deixa_o_jogo_aparecer_por_baixo(isolated):
     """Com `game_volume` em 0 ela substitui, como na V1; acima disso, mistura."""
     from owcore.compose import compor
-    from owcore.models import Layer, Timeline, TimelineClip
 
     def grafo(**kw):
-        t = Timeline(layers=[Layer(clips=[
-            TimelineClip(at_s=0, duration_s=1, start_s=1),
-        ])], **kw)
-        return compor(t, source=Path("x.mp4"), width=640, height=360, fps=30,
-                      music=Path("m.mp3")).filter_complex
+        return compor(
+            _com_musica_na_regua(**kw),
+            source=Path("x.mp4"), width=640, height=360, fps=30,
+            source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        ).filter_complex
 
-    # o padrao continua sendo o da V1: a trilha manda sozinha
+    # o padrao continua sendo o da V1: a musica manda sozinha
     assert "[jogo]" not in grafo()
     misturado = grafo(game_volume=0.5, music_volume=0.8)
-    assert "volume=0.8000[trilha]" in misturado
-    assert "[trilha][jogo]amix" in misturado
+    assert "volume=0.8000[musica]" in misturado
+    assert "volume=0.5000[jogo]" in misturado
+    assert "[musica][jogo]amix" in misturado
+
+
+def test_sem_musica_nenhuma_o_som_dos_cortes_vale_por_si(isolated):
+    """Nem `music_volume` nem `game_volume` tem o que fazer aqui: nao ha duas
+    coisas a equilibrar."""
+    from owcore.compose import compor
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(game_volume=0.5, layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=1, start_s=1),
+    ])])
+    g = compor(t, source=Path("x.mp4"), width=640, height=360,
+               fps=30).filter_complex
+
+    assert "[jogo]" not in g
+    assert "volume=0.5000" not in g
+    assert "[a1]anull[aout]" in g
 
 
 def test_efeito_tira_a_montagem_do_caminho_de_corte_e_emenda(isolated):
@@ -1662,98 +1680,6 @@ def test_a_qualidade_pedida_chega_ao_arquivo(isolated, short_sample, tmp_path):
 # ── reaproveitamento ────────────────────────────────────────────────────────
 
 
-def test_a_assinatura_visual_ignora_o_som(isolated):
-    """Duas montagens com a mesma imagem tem a mesma assinatura -- e e por isso
-    que trocar a musica e reexportar nao precisa cortar nada de novo."""
-    from owcore.models import ClipAudio, Layer, Timeline, TimelineClip
-
-    def montagem(**kw):
-        return Timeline(
-            layers=[Layer(clips=[
-                TimelineClip(at_s=0, duration_s=2, start_s=1,
-                             audio=ClipAudio(volume=kw.pop("vol", 1.0))),
-            ])],
-            **kw,
-        )
-
-    base = montagem().assinatura_visual()
-    assert montagem(track_id="outra").assinatura_visual() == base
-    assert montagem(music_volume=0.3).assinatura_visual() == base
-    assert montagem(vol=0.2).assinatura_visual() == base
-
-
-def test_a_assinatura_muda_com_o_que_se_ve(isolated):
-    from owcore.models import Layer, Timeline, TimelineClip
-
-    def montagem(**clip):
-        return Timeline(layers=[Layer(clips=[
-            TimelineClip(at_s=0, duration_s=2, start_s=1, **clip),
-        ])])
-
-    base = montagem().assinatura_visual()
-    assert montagem(speed=2.0).assinatura_visual() != base
-    assert montagem(transform={"scale": 1.2}).assinatura_visual() != base
-    assert montagem(color={"saturation": 1.5}).assinatura_visual() != base
-
-    vertical = Timeline(
-        export={"width": 1080, "height": 1920},
-        layers=montagem().layers,
-    )
-    assert vertical.assinatura_visual() != base
-
-
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_trocar_a_musica_reaproveita_a_imagem(isolated, short_sample):
-    """A promessa da fase: reexportar com outra trilha nao recorta tudo de novo."""
-    job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
-
-    camadas = [{"clips": [
-        {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
-        {"at_s": 2.0, "duration_s": 1.5, "start_s": 6.0,
-         "transform": {"scale": 0.6}},
-    ]}]
-
-    def pedir():
-        rid = montar(job_id, [{"title": "x", "track_id": track_id,
-                               "layers": camadas}])
-        run_render()
-        return api().get(f"/api/renders/{rid}").json()["clips"][0]
-
-    primeiro = pedir()
-    assert primeiro["meta"]["reused"] is False, "a primeira vez monta a imagem"
-    assert primeiro["video_url"]
-
-    segundo = pedir()
-    assert segundo["meta"]["reused"] is True, "a segunda reaproveita"
-    assert segundo["video_url"]
-
-
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_com_o_som_do_jogo_na_mistura_nao_ha_o_que_reaproveitar(
-    isolated, short_sample
-):
-    """O audio precisa dos mesmos cortes que a imagem; nao ha economia."""
-    job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
-
-    render_id = montar(job_id, [{
-        "track_id": track_id, "game_volume": 0.5,
-        "layers": [{"clips": [
-            {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
-            {"at_s": 2.0, "duration_s": 1.0, "start_s": 6.0,
-             "transform": {"scale": 0.6}},
-        ]}],
-    }])
-    run_render()
-
-    clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
-    assert clip["meta"]["reused"] is False
-    assert clip["video_url"]
-
-# ── varias montagens por partida (Fase 8) ───────────────────────────────────
-
-
 def _montagem(**kw):
     return {"layers": [{"clips": [
         {"at_s": 0.0, "duration_s": 2.0, "start_s": 10.0},
@@ -2184,7 +2110,10 @@ def test_dois_blocos_de_musica_se_misturam(isolated):
         source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
     )
 
-    assert "amix=inputs=3" in c.filter_complex, "o som do jogo e os dois blocos"
+    # os dois blocos se misturam entre si; o som do jogo fica de fora porque
+    # `game_volume` e 0 -- com musica tocando, o padrao e ela mandar sozinha
+    assert "amix=inputs=2" in c.filter_complex
+    assert "[musica]" in c.filter_complex
     assert "volume=0.4000" in c.filter_complex
 
 
@@ -2258,16 +2187,16 @@ def test_o_bloco_de_musica_entra_na_janela_de_exportacao(isolated):
     assert "atrim=duration=2.000" in c.filter_complex
 
 
-def test_musica_na_regua_tira_a_montagem_dos_caminhos_curtos(isolated):
+def test_musica_na_regua_tira_a_montagem_do_caminho_curto(isolated):
     """Corte-e-emenda nao mistura som que corre por fora dos cortes, e o
     reaproveitamento da imagem supoe que o som venha depois, por fora."""
     t = _com_musica_na_regua()
 
-    assert t.musica_na_regua
+    assert t.tem_musica
     assert not t.de_uma_camada_so
 
 
-def test_camada_de_audio_vazia_ainda_nao_e_musica_na_regua(isolated):
+def test_camada_de_audio_vazia_ainda_nao_e_musica(isolated):
     """Criar a camada e so abrir espaco; nada mudou ainda no video que sai."""
     from owcore.models import Timeline
 
@@ -2275,7 +2204,7 @@ def test_camada_de_audio_vazia_ainda_nao_e_musica_na_regua(isolated):
         {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
         {"kind": "audio", "clips": []},
     ])
-    assert not t.musica_na_regua
+    assert not t.tem_musica
 
 
 @pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
@@ -2380,46 +2309,61 @@ def test_imagem_numa_camada_de_audio_e_recusada(isolated, short_sample, tmp_path
 
 
 @pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_a_faixa_continua_continua_valendo(isolated, short_sample):
-    """Os dois jeitos convivem: `track_id` e a trilha por baixo de tudo, e e o
-    unico que reaproveita a imagem ja montada."""
+def test_a_faixa_continua_vira_bloco_na_leitura(isolated):
+    """Houve dois jeitos de ter musica e sobrou um. Quem converte o formato
+    velho e o codigo que le -- nao ha migracao a rodar no banco."""
+    from owcore.models import MontageDraft, Timeline
+
+    t = Timeline(
+        track_id="m1", music_start_s=12.0,
+        layers=[{"clips": [
+            {"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0},
+            {"at_s": 2.0, "duration_s": 3.0, "start_s": 6.0},
+        ]}],
+    )
+
+    assert t.track_id is None, "a faixa continua nao sobrevive a leitura"
+    assert t.music_start_s == 0.0
+    som = t.layers[-1]
+    assert som.e_audio and len(som.clips) == 1
+    bloco = som.clips[0]
+    assert bloco.media_id == "m1"
+    assert bloco.at_s == 0.0, "a musica entrava com o video"
+    assert bloco.duration_s == pytest.approx(5.0), "e cobria o video inteiro"
+    assert bloco.start_s == pytest.approx(12.0), "do mesmo ponto da musica"
+    assert t.tem_musica
+
+    # o rascunho salvo na V1 (cortes, sem camadas) chega no mesmo lugar
+    d = MontageDraft(
+        track_id="m1", music_start_s=3.0,
+        cuts=[{"start_s": 10.0, "duration_s": 2.0, "at_s": 0.0}],
+    )
+    assert [l.e_audio for l in d.layers] == [False, True]
+    assert d.layers[0].clips[0].start_s == pytest.approx(10.0)
+    assert d.layers[1].clips[0].start_s == pytest.approx(3.0)
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_um_pedido_no_formato_antigo_ainda_vira_video(isolated, short_sample):
+    """A conversao nao e so do modelo: o pedido de um app anterior a esta fase
+    tem de sair do outro lado como video com musica."""
     job_id = run_analysis(short_sample)
     track_id = subir_musica(job_id)
 
     render_id = montar(job_id, [{
         "title": "trilha de sempre", "track_id": track_id,
+        "music_start_s": 2.0,
         "layers": [{"clips": [
             {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
-            {"at_s": 2.0, "duration_s": 1.5, "start_s": 6.0,
-             "transform": {"scale": 0.6}},
+            {"at_s": 2.0, "duration_s": 1.5, "start_s": 6.0},
         ]}],
     }])
     run_render()
 
     clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
-    assert clip["video_url"]
-    assert clip["meta"]["reused"] is False, "primeira vez monta"
-
-
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_com_bloco_de_musica_nao_se_reaproveita_a_imagem(isolated, short_sample):
-    """O som passa a ser montado dentro do mesmo grafo que a imagem, entao nao
-    ha uma imagem sem som para guardar."""
-    job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
-
-    render_id = montar(job_id, [{
-        "title": "com bloco", "track_id": track_id,
-        "layers": [
-            {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
-            {"kind": "audio", "clips": [
-                {"at_s": 0.0, "duration_s": 2.0, "start_s": 5.0,
-                 "source": "media", "media_id": track_id},
-            ]},
-        ],
-    }])
-    run_render()
-
-    clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
     assert clip["video_url"], clip.get("meta")
-    assert clip["meta"]["reused"] is False
+    assert clip["meta"]["composed"] is True, "musica so existe no grafo"
+    assert clip["meta"]["original_audio"] is False
+    assert clip["meta"]["music_name"], "a lista diz com que musica ele saiu"
+
+

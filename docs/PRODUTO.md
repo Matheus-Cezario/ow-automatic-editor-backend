@@ -88,9 +88,10 @@ O sistema não gera nada sozinho. Ele **analisa** e depois **espera**:
 Ou, no lugar do passo 2, você monta o vídeo à mão:
 
 ```
-2'. você envia a música     → o sistema ouve e devolve a onda e as batidas
-3'. você toca a música e põe cada momento onde quiser, do tamanho que quiser,
-    vendo no monitor o que vai sair — arrastando o bloco e as bordas dele
+2'. você traz a música para a biblioteca → o sistema ouve e devolve a onda e as
+    batidas
+3'. você põe a música na régua e cada momento onde quiser, do tamanho que
+    quiser, vendo no monitor o que vai sair — arrastando o bloco e as bordas
 4'. o vídeo sai exatamente assim
 ```
 
@@ -146,28 +147,24 @@ primeiro corte cair no tempo em vez de entrar no meio de um compasso.
 
 ### Mais de uma música, e música que se corta
 
-Na montagem à mão a música começa como uma **faixa contínua**: você escolhe uma,
-diz de que ponto dela o vídeo começa, e ela toca por baixo de tudo. É um clique,
-e para a maioria dos vídeos é o que se quer.
+Na montagem à mão a música entra pela **Biblioteca**, no mesmo lugar em que
+entram vídeo e imagem de fora da partida — clique para pô-la na cabeça de
+leitura, ou arraste-a até o ponto da régua onde ela deve começar.
 
-Quando não é, a música vai para a **régua**. Ali ela vira bloco: corta, anda e se
-apara como qualquer corte de vídeo — e é isso que deixa fazer o que a faixa
-contínua nunca deixou:
+Na régua ela é um **bloco**: corta, anda e se apara como qualquer corte de vídeo.
+É isso que deixa fazer o que uma trilha de fundo nunca deixou:
 
 - **trocar de música no meio do vídeo**, uma faixa por trecho;
 - **deixar um pedaço em silêncio**, para o tiro e o grito da jogada aparecerem
   sozinhos;
 - **pôr o refrão só na virada**, e não do começo ao fim.
 
-"Cortar na régua" converte a faixa que já está tocando num bloco que cobre o
-vídeo inteiro, começando no mesmo ponto da música: o mesmo som de antes, agora
-com pontas para pegar. E o ímã continua funcionando — com mais de uma faixa, ele
-gruda na batida **da música que está tocando ali**, que é a única grade que faz
-sentido naquele ponto.
+O ímã continua funcionando — com mais de uma faixa, ele gruda na batida **da
+música que está tocando ali**, que é a única grade que faz sentido naquele ponto.
 
-O preço, dito na cara: uma montagem com música na régua não reaproveita a imagem
-já montada ao reexportar (veja abaixo) — o som passa a ser montado junto com a
-imagem, e não por cima dela.
+Montagens feitas antes disto não se perdem: a trilha de fundo que elas tinham
+volta como um bloco que começa no mesmo ponto da música e cobre o vídeo inteiro.
+O que se ouve é o mesmo; o que muda é que agora dá para pegar nas pontas.
 
 ### Várias montagens da mesma partida
 
@@ -212,10 +209,9 @@ estão lá: **preencher**, que corta as sobras dos lados — numa montagem de
 gameplay a ação está no meio —, ou **caber**, que mostra o quadro inteiro e
 deixa barras, para quando o que importa está nos cantos.
 
-Reexportar a mesma montagem **trocando só a música** não recorta tudo de novo:
-o que se vê já está pronto, e a trilha nova entra por cima. Isso vale para a
-faixa contínua; com blocos de música na régua o som é montado junto com a
-imagem, e a reexportação refaz o vídeo.
+Trocar a música e reexportar refaz o vídeo: o som é montado junto com a imagem,
+e não por cima dela. (Houve um atalho aqui, quando a música era uma trilha de
+fundo que não se cortava; ele foi embora com ela.)
 
 ### Levando os cortes para editar por fora
 

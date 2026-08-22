@@ -212,19 +212,6 @@ class Editor(Worker):
         items: list[render.TimelineItem] = []
         with session() as s:
             for i, spec in enumerate(timelines, start=1):
-                music = None
-                music_name = None
-                if spec.track_id:
-                    track = s.get(Media, spec.track_id)
-                    if track is None or track.job_id != job_id:
-                        # a musica sumiu, o video nao: sai com o audio da partida
-                        self.log.warning(
-                            "musica %s nao e deste job; monto sem trilha",
-                            spec.track_id,
-                        )
-                    else:
-                        music = local_copy(track.key, work)
-                        music_name = track.name
                 # a biblioteca de midia que esta montagem usa, ja em disco
                 midias: dict[str, object] = {}
                 for clip in spec.clips:
@@ -241,18 +228,27 @@ class Editor(Worker):
                         caminho=local_copy(item.key, work), kind=item.kind
                     )
 
+                # o nome da musica e so rotulo -- serve para a lista de videos
+                # dizer com que musica aquele saiu. Vem do primeiro bloco de
+                # som, que e o que comeca tocando
+                music_name = None
+                for camada in spec.layers:
+                    if not camada.e_audio:
+                        continue
+                    for clip in camada.clips:
+                        item = s.get(Media, clip.media_id) if clip.media_id else None
+                        if item is not None:
+                            music_name = item.name
+                            break
+                    if music_name:
+                        break
+
                 items.append(
                     render.TimelineItem(
                         timeline=spec,
                         title=spec.title or f"Montagem {i}",
-                        music=music,
                         music_name=music_name,
                         midias=midias,
-                        # o cache é do job: a mesma montagem reexportada com
-                        # outra música reaproveita a imagem já montada
-                        cache_dir=Path(get_settings().work_dir)
-                        / job_id
-                        / "imagens",
                     )
                 )
         return items

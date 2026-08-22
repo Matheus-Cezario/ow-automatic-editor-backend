@@ -451,8 +451,6 @@ def compor(
     width: int,
     height: int,
     fps: float,
-    music: Path | None = None,
-    music_start_s: float = 0.0,
     source_duration_s: float = 0.0,
     midias: dict[str, MidiaNoDisco] | None = None,
     so_video: bool = False,
@@ -495,10 +493,11 @@ def compor(
     )
     c.filtros.append(f"[0:v]setsar=1[fundo]")
 
-    # Com trilha e `game_volume` em 0, a musica substitui o som dos cortes.
+    # Com musica e `game_volume` em 0, ela substitui o som dos cortes.
     # Nao montar a cadeia deles nao e economia: uma cadeia de audio sem saida
     # deixa o grafo invalido, e o ffmpeg recusa o conjunto inteiro.
-    jogo_entra = music is None or timeline.game_volume > 0
+    tem_musica = timeline.tem_musica
+    jogo_entra = not tem_musica or timeline.game_volume > 0
 
     anterior = "fundo"
     #: o som que vem dos cortes -- e o que `game_volume` governa
@@ -577,49 +576,54 @@ def compor(
     c.filtros.append(f"[{anterior}]trim=duration={duracao:.3f},setpts=PTS-STARTPTS[vout]")
     c.mapa_video = "[vout]"
 
-    # Com trilha e `game_volume` em 0, ela substitui o áudio -- o que a V1 fazia.
-    # Acima disso os dois se misturam, e é o que deixa o tiro aparecer por baixo
-    # da música.
     if so_video:
-        # a imagem sozinha, para ser guardada e reaproveitada quando só a música
-        # mudar. O som entra depois, por cima
+        # a imagem sozinha, sem trilha de áudio nenhuma: quem pede assim quer o
+        # vídeo mudo
         return c
 
-    # A mistura final. Cada parte entra por um motivo diferente: a trilha por
-    # baixo de tudo, o som do jogo se `game_volume` o deixar, e os blocos de
-    # musica sempre -- eles nao sao som de jogo e nao obedecem a ele.
+    # A mistura final. Sao dois sons, e eles nao querem dizer a mesma coisa: os
+    # blocos de musica de um lado, o som dos cortes do outro -- e `game_volume`
+    # governa so o segundo.
     partes: list[str] = []
 
-    if music is not None:
-        c.entradas.append(
-            Entrada(caminho=str(music), seek=music_start_s + inicio)
-        )
-        indice = len(c.entradas) - 1
+    if musicas:
         volume = (
             f",volume={timeline.music_volume:.4f}"
             if timeline.music_volume != 1.0
             else ""
         )
-        c.filtros.append(
-            f"[{indice}:a]atrim=duration={duracao:.3f},asetpts=PTS-STARTPTS"
-            f"{volume}[trilha]"
-        )
-        partes.append("trilha")
-        # Com trilha e `game_volume` em 0, ela substitui o audio dos cortes --
-        # o que a V1 fazia. Acima disso os dois se misturam, e e o que deixa o
-        # tiro aparecer por baixo da musica.
-        if timeline.game_volume > 0 and audios:
-            jogo = "".join(f"[{a}]" for a in audios)
-            c.filtros.append(
-                f"{jogo}amix=inputs={len(audios)}:dropout_transition=0:"
-                f"normalize=0,volume={timeline.game_volume:.4f}[jogo]"
+        if len(musicas) == 1 and not volume:
+            partes.append(musicas[0])
+        else:
+            entrada = "".join(f"[{m}]" for m in musicas)
+            junta = (
+                f"amix=inputs={len(musicas)}:dropout_transition=0:normalize=0"
+                if len(musicas) > 1
+                else "anull"
             )
-            partes.append("jogo")
-    else:
-        # sem trilha, o audio original dos cortes vale por si
-        partes += audios
+            c.filtros.append(f"{entrada}{junta}{volume}[musica]")
+            partes.append("musica")
 
-    partes += musicas
+    if audios and jogo_entra:
+        if tem_musica:
+            # com musica tocando, o som do jogo entra na medida pedida -- e o
+            # que deixa o tiro aparecer por baixo dela
+            jogo = "".join(f"[{a}]" for a in audios)
+            junta = (
+                f"amix=inputs={len(audios)}:dropout_transition=0:normalize=0"
+                if len(audios) > 1
+                else "anull"
+            )
+            volume = (
+                f",volume={timeline.game_volume:.4f}"
+                if timeline.game_volume != 1.0
+                else ""
+            )
+            c.filtros.append(f"{jogo}{junta}{volume}[jogo]")
+            partes.append("jogo")
+        else:
+            # sem musica nenhuma, o audio original dos cortes vale por si
+            partes += audios
 
     if len(partes) == 1:
         # misturar uma faixa so e trabalho a toa, e o `amix` ainda mexeria no

@@ -58,7 +58,7 @@ python tools/make_sample.py --out data/sample/match.mp4 \
 pytest tests/ -q
 ```
 
-São 237 testes em cinco camadas:
+São 234 testes em cinco camadas:
 
 | Arquivo | O que cobre |
 |---|---|
@@ -66,7 +66,7 @@ São 237 testes em cinco camadas:
 | `test_infra.py` | barramento (fan-out entre grupos, competição dentro do grupo), storage, primitivas de visão, marcação de cor dos recortes |
 | `test_detectors.py` | precisão de cada detector contra o gabarito do vídeo sintético, incluindo as duas habilidades do rodapé não se confundirem |
 | `test_pipeline.py` | as duas fases atravessando todos os serviços — é o que verifica os *contratos* das mensagens, mais músicas diferentes por vídeo, a janela de música, o áudio original e o zip dos cortes |
-| `test_timeline.py` | a montagem manual e o editor da V2: a matemática da linha do tempo (buraco vira preto, corte aparado não move o vizinho), camadas, efeitos e texto conferidos **no pixel** do mp4 que saiu, a exportação (dimensão, fps e trecho por `ffprobe`; `cover` contra `contain`), o reaproveitamento da imagem ao trocar de música, as várias montagens nomeadas com histórico e predefinições, a música na régua (camada de som, blocos cortados e posicionados, o silêncio entre eles), mais as entregas com `Range` que o app usa para tocar a música e mostrar o preview |
+| `test_timeline.py` | a montagem manual e o editor da V2: a matemática da linha do tempo (buraco vira preto, corte aparado não move o vizinho), camadas, efeitos e texto conferidos **no pixel** do mp4 que saiu, a exportação (dimensão, fps e trecho por `ffprobe`; `cover` contra `contain`), o reaproveitamento da imagem ao trocar de música, as várias montagens nomeadas com histórico e predefinições, a música na régua (camada de som, blocos cortados e posicionados, o silêncio entre eles) e a conversão da faixa contínua antiga em bloco na leitura, mais as entregas com `Range` que o app usa para tocar a música e mostrar o preview |
 
 Os testes que dependem do vídeo sintético se auto-pulam se ele não existir,
 dizendo como gerá-lo.

@@ -219,29 +219,38 @@ Para isso existe a linha do tempo, e nela o sistema não decide nada:
 
 | Decisão | Quem toma |
 |---|---|
-| que momento entra | o usuário, escolhendo da lista de instantes que a análise achou |
-| onde ele entra na música | o usuário, arrastando o corpo do bloco; com o **ímã** ligado ele gruda na batida mais próxima (até 0,12 s) |
+| que momento entra | o usuário, escolhendo da lista de instantes que a análise achou — clicando, ou arrastando o momento até o ponto da régua onde ele deve entrar |
+| onde ele entra no vídeo | o usuário, arrastando o corpo do bloco; com o **ímã** ligado ele gruda na batida mais próxima (até 0,12 s) |
 | quanto ele dura | o usuário, arrastando as bordas: a direita **estica** (cresce o rabo), a esquerda **apara** (come o começo sem mover o que está enquadrado) |
 | onde a jogada cai dentro do corte | por padrão a **70%** do bloco — sobra embalo antes e o impacto cai perto do fim, que é onde ele funciona. Ajustável bloco a bloco, e **marcado dentro do bloco**: é a jogada que se alinha com a percussão, não a borda do corte |
 | o que aparece nos espaços vazios | **tela preta, com a música tocando** |
-| onde a música entra | por padrão no começo dela: **música e vídeo começam juntos**. Quem quiser entrar no refrão move a entrada explicitamente, e aí os blocos andam junto — eles ficam grudados no ponto da música em que foram encaixados, não no tempo do vídeo |
+| onde a música entra | o usuário, pondo o bloco de música onde ele deve começar. A régua é o tempo do **vídeo**: o instante zero é o primeiro quadro dele, e a música mora dentro dessa escala |
 
 > Houve aqui uma regra automática que não sobreviveu ao uso: o primeiro bloco
 > movia sozinho a entrada da música para o cursor, para evitar tela preta antes
 > dele. O efeito era o vídeo passar a começar com a música já em 0:02, jogando
 > fora o começo dela — e a tela anunciando isso como se fosse pedido. Espaço
 > vazio no começo é uma escolha visível na régua e contada no resumo;
-> retimar a música às escondidas não é.
+> retimar a música às escondidas não é. (A entrada da música, hoje, é onde o
+> bloco dela começa: a régua inteira é tempo de vídeo.)
 
-**Dois jeitos de ter música, e um vira o outro.** A faixa contínua acima é o
-caminho de um clique: escolhe-se uma música, ela toca por baixo de tudo e não se
-corta. Quando isso não basta — trocar de faixa no meio, deixar um trecho em
-silêncio, pôr o refrão só na virada — a música vai para uma **camada de som**,
-onde vira bloco: corta, anda e se apara como qualquer outro, e "Cortar na régua"
-converte a faixa contínua num bloco que cobre o vídeo, sem mudar o que se ouve.
-Uma camada de som não desenha nada, e o servidor recusa conteúdo trocado de
-camada. O ímã, com blocos, segue a grade da música que está tocando sob a cabeça
-de leitura: duas faixas num vídeo são dois andamentos.
+**A música é um bloco, e vem da biblioteca.** Houve uma faixa contínua que tocava
+por baixo de tudo e não se cortava; ela saiu. Hoje a música entra pela biblioteca
+de mídia, como vídeo e imagem, e vai para uma **camada de som**, onde é um clipe
+como qualquer outro: corta, anda, se apara, se duplica. Uma camada desenha ou
+toca — nunca as duas coisas —, e o servidor recusa conteúdo trocado de camada.
+O ímã segue a grade da música que está tocando sob a cabeça de leitura: duas
+faixas num vídeo são dois andamentos.
+
+Montagens antigas não migram no banco: `track_id` e `music_start_s` continuam
+sendo entrada válida e viram, **na leitura**, um bloco que começa onde a faixa
+entrava e cobre o vídeo inteiro.
+
+| Decisão | Quem toma |
+|---|---|
+| que música toca, e em que pedaço do vídeo | o usuário, arrastando da biblioteca para a régua ou clicando para pôr na cabeça de leitura |
+| de que ponto da música o bloco sai | o usuário, pelo "trecho da música" — e a grade de batidas é medida a partir daí |
+| o que se ouve onde não há bloco | o áudio da partida, na medida do `game_volume`: o silêncio é a falta de bloco |
 
 Esticar e aparar não reenquadram o conteúdo: o começo do corte só se move quando
 é a borda esquerda que anda, e na mesma medida que ela. Se a imagem se

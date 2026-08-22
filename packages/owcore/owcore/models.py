@@ -816,6 +816,32 @@ class Receita(BaseModel):
         return self
 
 
+def _bloco_da_trilha(
+    track_id: str, music_start_s: float, duracao_s: float
+) -> "Layer":
+    """A faixa continua vira um bloco de musica que cobre o video.
+
+    Houve dois jeitos de ter musica: uma faixa continua por baixo de tudo, que
+    nao se cortava, e blocos postos na regua. Sobrou o segundo -- e como o
+    primeiro e exatamente um bloco que comeca onde a musica entrava e cobre o
+    video inteiro, montagens antigas nao precisam de migracao no banco: **quem
+    converte o formato velho e o codigo que le**, como sempre foi aqui.
+    """
+    return Layer(
+        kind=LayerKind.AUDIO,
+        name="Musica",
+        clips=[
+            TimelineClip(
+                source=ClipSource.MEDIA,
+                media_id=track_id,
+                at_s=0.0,
+                duration_s=duracao_s,
+                start_s=max(0.0, music_start_s),
+            )
+        ],
+    )
+
+
 class MontageDraft(BaseModel):
     """A montagem **em andamento**, do jeito que ficou na tela.
 
@@ -848,6 +874,27 @@ class MontageDraft(BaseModel):
     game_volume: float = 0.0
     export: ExportSpec = Field(default_factory=ExportSpec)
 
+    @model_validator(mode="after")
+    def _a_trilha_vira_bloco(self) -> "MontageDraft":
+        if not self.track_id:
+            return self
+        # um rascunho da V1 guarda `cuts` em vez de camadas; materializa-los
+        # antes e o que impede a camada de som de virar a unica camada
+        if not self.layers and self.cuts:
+            self.layers = [
+                Layer(clips=[TimelineClip.de_corte(c) for c in self.cuts])
+            ]
+            self.cuts = []
+        fim = max((c.until_s for c in self.clips), default=0.0)
+        if fim >= MIN_CUT_S:
+            self.layers = [
+                *self.layers,
+                _bloco_da_trilha(self.track_id, self.music_start_s, fim),
+            ]
+        self.track_id = None
+        self.music_start_s = 0.0
+        return self
+
     @property
     def clips(self) -> list[TimelineClip]:
         """Todos os clipes, de todas as camadas -- inclusive os de um rascunho
@@ -871,17 +918,20 @@ class Timeline(BaseModel):
     """
 
     title: str = ""
-    #: musica de fundo; None deixa o audio original dos clipes
+    #: **formato antigo**: a faixa continua por baixo de tudo. Continua sendo
+    #: entrada valida e vira um bloco na camada de som na leitura -- ninguem
+    #: monta mais assim
     track_id: str | None = None
-    #: de que ponto da musica o video comeca a tocar
+    #: de que ponto da musica a faixa continua entrava
     music_start_s: float = 0.0
     layers: list[Layer] = Field(default_factory=list)
 
-    #: Volume da trilha e do som do jogo, de 0 a 2.
+    #: Volume da musica e do som do jogo, de 0 a 2.
     #:
     #: Com `game_volume` em 0 a musica **substitui** o audio, que e o que a V1
     #: fazia. Acima disso os dois se misturam -- e o que deixa o tiro aparecer
-    #: por baixo da musica.
+    #: por baixo da musica. Sem bloco de musica nenhum, o audio dos cortes vale
+    #: por si e nenhum dos dois volumes tem o que fazer.
     music_volume: float = 1.0
     game_volume: float = 0.0
 
@@ -915,6 +965,20 @@ class Timeline(BaseModel):
                 raise ValueError(f"{nome} fica entre 0 e 2")
         if not any(l.clips for l in self.layers):
             raise ValueError("uma linha do tempo vazia nao vira video")
+        return self
+
+    @model_validator(mode="after")
+    def _a_trilha_vira_bloco(self) -> "Timeline":
+        if not self.track_id:
+            return self
+        fim = max((l.duration_s for l in self.layers), default=0.0)
+        if fim >= MIN_CUT_S:
+            self.layers = [
+                *self.layers,
+                _bloco_da_trilha(self.track_id, self.music_start_s, fim),
+            ]
+        self.track_id = None
+        self.music_start_s = 0.0
         return self
 
     @property
@@ -952,14 +1016,12 @@ class Timeline(BaseModel):
         return all(c.simples for c in visiveis[0].clips)
 
     @property
-    def musica_na_regua(self) -> bool:
-        """A montagem tem som posto a mao na linha do tempo?
+    def tem_musica(self) -> bool:
+        """A montagem tem musica, isto e: algum bloco numa camada de som.
 
-        Distingue os dois jeitos de ter musica. `track_id` e uma faixa continua
-        por baixo de tudo -- e o caso comum, e o unico que da para montar por
-        fora do grafo (e, por isso, o unico que reaproveita a imagem ja
-        montada). Blocos de musica sao pedacos posicionados, e esses so existem
-        no grafo de filtros.
+        E o que decide o que os dois volumes significam. Sem musica nenhuma o
+        audio dos cortes sai como esta; com musica, `game_volume` diz quanto do
+        jogo aparece por baixo dela.
         """
         return any(l.e_audio and l.clips for l in self.layers)
 
@@ -967,35 +1029,6 @@ class Timeline(BaseModel):
     def cuts(self) -> list[TimelineCut]:
         """A visao V1 desta linha do tempo. So faz sentido com uma camada."""
         return [c.como_corte() for c in self.clips]
-
-    def assinatura_visual(self) -> str:
-        """Uma impressao digital do que se **ve** neste video.
-
-        Nao entra nada de som: nem a musica, nem os volumes, nem o audio dos
-        clipes. Duas montagens com a mesma assinatura dao exatamente a mesma
-        imagem -- e e por isso que trocar a musica e reexportar nao precisa
-        cortar nada de novo.
-        """
-        import hashlib
-        import json
-
-        def sem_som(clip: dict) -> dict:
-            return {k: v for k, v in clip.items() if k != "audio"}
-
-        visual = {
-            "layers": [
-                {
-                    "hidden": camada.hidden,
-                    "clips": [
-                        sem_som(c.model_dump(mode="json")) for c in camada.clips
-                    ],
-                }
-                for camada in self.layers
-            ],
-            "export": self.export.model_dump(mode="json"),
-        }
-        cru = json.dumps(visual, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(cru.encode()).hexdigest()[:32]
 
 
 # ───────────────────────── mensagens do barramento ──────────────────────────
@@ -1323,7 +1356,7 @@ class Montage(Base):
         return {
             "n_clips": len(clips),
             "duration_s": round(max((c.until_s for c in clips), default=0.0), 2),
-            "has_music": m.track_id is not None,
+            "has_music": any(l.e_audio and l.clips for l in m.layers),
         }
 
 

@@ -459,7 +459,6 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
         # a montagem aponta para uma musica; a biblioteca guarda mais que isso
         musicas = {m.id: m.status for m in job.media if m.is_audio}
         biblioteca = {m.id for m in job.media}
-        sons = {m.id for m in job.media if m.is_audio}
 
     escolhas: list[Selection] = []
     vistos: set[str] = set()
@@ -504,19 +503,6 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
             spec = Timeline(**item)
         except ValidationError as exc:
             raise HTTPException(422, f"linha do tempo invalida: {exc}") from exc
-        if spec.track_id is not None:
-            if spec.track_id not in musicas:
-                raise HTTPException(
-                    422, f"musica desconhecida neste job: {spec.track_id!r}"
-                )
-            # sem a analise pronta nao ha batida nem duracao; e tambem sinal de
-            # que o app mandou antes da hora
-            if musicas[spec.track_id] != TrackStatus.READY:
-                raise HTTPException(
-                    409,
-                    f"a musica {spec.track_id} ainda nao foi analisada "
-                    f"(status: {musicas[spec.track_id]})",
-                )
         # um clipe que aponta para midia de outro job nao entra: a montagem
         # sairia sem ele, e sem aviso
         for clip in spec.clips:
@@ -525,7 +511,7 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                     422,
                     f"midia desconhecida neste job: {clip.media_id!r}",
                 )
-        _conferir_as_camadas(spec, sons)
+        _conferir_as_camadas(spec, musicas)
         # a marca d'agua vem da mesma biblioteca, e recusa-la aqui e melhor do
         # que deixar a renderizacao inteira falhar la na frente por causa dela
         if spec.export.watermark_id and spec.export.watermark_id not in biblioteca:
@@ -1142,7 +1128,7 @@ def _pegar_montagem(s: Any, job_id: str, montage_id: str) -> MontageModel:
     return m
 
 
-def _conferir_as_camadas(spec: Any, sons: set[str]) -> None:
+def _conferir_as_camadas(spec: Any, sons: dict[str, str]) -> None:
     """Uma camada desenha ou toca -- e o conteudo tem de ser do tipo dela.
 
     Uma musica numa camada de video faria o ffmpeg tentar redimensionar um fluxo
@@ -1163,6 +1149,14 @@ def _conferir_as_camadas(spec: Any, sons: set[str]) -> None:
                     422,
                     f"a midia {clip.media_id!r} e som: ela vai numa camada "
                     "de audio",
+                )
+            # sem a analise pronta nao ha batida nem duracao; e tambem sinal de
+            # que o app mandou antes da hora
+            if e_som and sons[clip.media_id] != TrackStatus.READY:
+                raise HTTPException(
+                    409,
+                    f"a musica {clip.media_id} ainda nao foi analisada "
+                    f"(status: {sons[clip.media_id]})",
                 )
 
 
