@@ -52,6 +52,10 @@ class MidiaNoDisco:
     def e_imagem(self) -> bool:
         return self.kind == MediaKind.IMAGE
 
+    @property
+    def e_audio(self) -> bool:
+        return self.kind == MediaKind.AUDIO
+
 
 @dataclass(slots=True)
 class Entrada:
@@ -491,12 +495,25 @@ def compor(
     )
     c.filtros.append(f"[0:v]setsar=1[fundo]")
 
+    # Com trilha e `game_volume` em 0, a musica substitui o som dos cortes.
+    # Nao montar a cadeia deles nao e economia: uma cadeia de audio sem saida
+    # deixa o grafo invalido, e o ffmpeg recusa o conjunto inteiro.
+    jogo_entra = music is None or timeline.game_volume > 0
+
     anterior = "fundo"
+    #: o som que vem dos cortes -- e o que `game_volume` governa
     audios: list[str] = []
+    #: o som dos blocos de musica, que nao e som de jogo e nao obedece a ele
+    musicas: list[str] = []
     n = 0
 
     for camada in timeline.layers:
         if camada.hidden:
+            continue
+        # uma camada de audio nao desenha nada: com `so_video` ela nao tem o que
+        # fazer aqui, e montar a entrada dela seria pagar por um arquivo que
+        # ninguem ia ouvir
+        if camada.e_audio and so_video:
             continue
         for original in camada.clips:
             clip = _na_janela(original, inicio, fim)
@@ -519,25 +536,28 @@ def compor(
             c.entradas.append(entrada)
             aparado = clip.model_copy(update={"duration_s": duracao_util})
 
-            c.filtros.append(
-                _cadeia_de_video(aparado, n, f"v{n}", width, height, fit)
-            )
-            x, y = _posicao(aparado)
-            saida = f"t{n}"
-            c.filtros.append(
-                f"[{anterior}][v{n}]overlay=x={x}:y={y}:"
-                f"enable='between(t,{aparado.at_s:.3f},{aparado.until_s:.3f})':"
-                f"eof_action=pass[{saida}]"
-            )
-            anterior = saida
+            if not camada.e_audio:
+                c.filtros.append(
+                    _cadeia_de_video(aparado, n, f"v{n}", width, height, fit)
+                )
+                x, y = _posicao(aparado)
+                saida = f"t{n}"
+                c.filtros.append(
+                    f"[{anterior}][v{n}]overlay=x={x}:y={y}:"
+                    f"enable='between(t,{aparado.at_s:.3f},"
+                    f"{aparado.until_s:.3f})':"
+                    f"eof_action=pass[{saida}]"
+                )
+                anterior = saida
 
             # com `so_video` nem se monta o som dos clipes: uma cadeia de áudio
             # sem saída deixa o grafo inválido, e o ffmpeg recusa o conjunto
-            if not so_video and not camada.muted and tem_som:
+            aproveita_o_som = camada.e_audio or jogo_entra
+            if not so_video and not camada.muted and tem_som and aproveita_o_som:
                 cadeia = _cadeia_de_audio(aparado, n, f"a{n}")
                 if cadeia is not None:
                     c.filtros.append(cadeia)
-                    audios.append(f"a{n}")
+                    (musicas if camada.e_audio else audios).append(f"a{n}")
 
     if n == 0:
         raise ValueError("nenhum clipe cai dentro da gravacao")
@@ -565,6 +585,11 @@ def compor(
         # mudar. O som entra depois, por cima
         return c
 
+    # A mistura final. Cada parte entra por um motivo diferente: a trilha por
+    # baixo de tudo, o som do jogo se `game_volume` o deixar, e os blocos de
+    # musica sempre -- eles nao sao som de jogo e nao obedecem a ele.
+    partes: list[str] = []
+
     if music is not None:
         c.entradas.append(
             Entrada(caminho=str(music), seek=music_start_s + inicio)
@@ -579,28 +604,32 @@ def compor(
             f"[{indice}:a]atrim=duration={duracao:.3f},asetpts=PTS-STARTPTS"
             f"{volume}[trilha]"
         )
+        partes.append("trilha")
+        # Com trilha e `game_volume` em 0, ela substitui o audio dos cortes --
+        # o que a V1 fazia. Acima disso os dois se misturam, e e o que deixa o
+        # tiro aparecer por baixo da musica.
         if timeline.game_volume > 0 and audios:
             jogo = "".join(f"[{a}]" for a in audios)
             c.filtros.append(
                 f"{jogo}amix=inputs={len(audios)}:dropout_transition=0:"
                 f"normalize=0,volume={timeline.game_volume:.4f}[jogo]"
             )
-            c.filtros.append(
-                "[trilha][jogo]amix=inputs=2:dropout_transition=0:"
-                "normalize=0[aout]"
-            )
-        else:
-            c.filtros.append("[trilha]anull[aout]")
-        c.mapa_audio = "[aout]"
-    elif len(audios) == 1:
-        # misturar uma faixa só é trabalho à toa, e o `amix` ainda mexeria no
+            partes.append("jogo")
+    else:
+        # sem trilha, o audio original dos cortes vale por si
+        partes += audios
+
+    partes += musicas
+
+    if len(partes) == 1:
+        # misturar uma faixa so e trabalho a toa, e o `amix` ainda mexeria no
         # volume dela sem necessidade
-        c.filtros.append(f"[{audios[0]}]anull[aout]")
+        c.filtros.append(f"[{partes[0]}]anull[aout]")
         c.mapa_audio = "[aout]"
-    elif audios:
-        entrada = "".join(f"[{a}]" for a in audios)
+    elif partes:
+        entrada = "".join(f"[{p}]" for p in partes)
         c.filtros.append(
-            f"{entrada}amix=inputs={len(audios)}:dropout_transition=0:"
+            f"{entrada}amix=inputs={len(partes)}:dropout_transition=0:"
             f"normalize=0[aout]"
         )
         c.mapa_audio = "[aout]"

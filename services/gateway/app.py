@@ -459,6 +459,7 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
         # a montagem aponta para uma musica; a biblioteca guarda mais que isso
         musicas = {m.id: m.status for m in job.media if m.is_audio}
         biblioteca = {m.id for m in job.media}
+        sons = {m.id for m in job.media if m.is_audio}
 
     escolhas: list[Selection] = []
     vistos: set[str] = set()
@@ -524,6 +525,7 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                     422,
                     f"midia desconhecida neste job: {clip.media_id!r}",
                 )
+        _conferir_as_camadas(spec, sons)
         # a marca d'agua vem da mesma biblioteca, e recusa-la aqui e melhor do
         # que deixar a renderizacao inteira falhar la na frente por causa dela
         if spec.export.watermark_id and spec.export.watermark_id not in biblioteca:
@@ -1138,6 +1140,30 @@ def _pegar_montagem(s: Any, job_id: str, montage_id: str) -> MontageModel:
     if m is None or m.job_id != job_id:
         raise HTTPException(404, "montagem nao encontrada nesta partida")
     return m
+
+
+def _conferir_as_camadas(spec: Any, sons: set[str]) -> None:
+    """Uma camada desenha ou toca -- e o conteudo tem de ser do tipo dela.
+
+    Uma musica numa camada de video faria o ffmpeg tentar redimensionar um fluxo
+    de audio, e o render inteiro morreria com uma mensagem que nao explica nada.
+    Uma imagem numa camada de audio seria pior: ela nao tem som, entao sairia em
+    silencio, sem erro nenhum, e o usuario procuraria o problema na mixagem.
+    """
+    for camada in spec.layers:
+        for clip in camada.clips:
+            e_som = bool(clip.media_id) and clip.media_id in sons
+            if camada.e_audio and not e_som:
+                raise HTTPException(
+                    422,
+                    "uma camada de audio so aceita musica da biblioteca",
+                )
+            if not camada.e_audio and e_som:
+                raise HTTPException(
+                    422,
+                    f"a midia {clip.media_id!r} e som: ela vai numa camada "
+                    "de audio",
+                )
 
 
 def _validar_montagem(data: dict) -> MontageDraft:

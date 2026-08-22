@@ -2103,3 +2103,323 @@ def test_editar_e_apagar_predefinicao(isolated):
 
     assert api().delete(f"/api/presets/{p['id']}").status_code == 204
     assert api().get("/api/presets").json()["items"] == []
+
+
+# ── musica na regua (Fase 9) ────────────────────────────────────────────────
+
+
+def _com_musica_na_regua(**kw):
+    from owcore.models import Timeline
+
+    blocos = kw.pop("blocos", [
+        {"at_s": 0.0, "duration_s": 1.5, "start_s": 10.0,
+         "source": "media", "media_id": "m1"},
+    ])
+    return Timeline(
+        layers=[
+            {"clips": [{"at_s": 0.0, "duration_s": 4.0, "start_s": 1.0}]},
+            {"kind": "audio", "clips": blocos},
+        ],
+        **kw,
+    )
+
+
+def _midia_de_som(caminho):
+    from owcore.compose import MidiaNoDisco
+
+    return {"m1": MidiaNoDisco(caminho, "audio")}
+
+
+def test_uma_camada_de_audio_nao_desenha_nada(isolated):
+    """Ela toca. Se ela entrasse no empilhamento, o proximo clipe de video
+    apareceria por cima de um `overlay` que nao existe."""
+    from owcore.compose import compor
+
+    c = compor(
+        _com_musica_na_regua(),
+        source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+    )
+
+    assert c.filter_complex.count("overlay=") == 1, "so o clipe de video"
+    assert "[2:a]atrim" in c.filter_complex, "mas o som dela entra"
+
+
+def test_o_bloco_de_musica_e_aparado_e_posicionado(isolated):
+    """E o que a faixa continua nunca soube fazer: entrar no meio do video, com
+    um pedaco escolhido da musica."""
+    from owcore.compose import compor
+
+    c = compor(
+        _com_musica_na_regua(blocos=[
+            {"at_s": 2.5, "duration_s": 1.5, "start_s": 30.0,
+             "source": "media", "media_id": "m1"},
+        ]),
+        source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+    )
+
+    # o pedaco vem de 30s da musica...
+    assert any(
+        e.seek == pytest.approx(30.0) and "m.mp3" in e.caminho
+        for e in c.entradas
+    )
+    # ...dura 1,5s e entra aos 2,5s do video
+    assert "atrim=duration=1.500" in c.filter_complex
+    assert "adelay=2500|2500" in c.filter_complex
+
+
+def test_dois_blocos_de_musica_se_misturam(isolated):
+    """Trocar de faixa no meio do video era o pedido; sao dois blocos."""
+    from owcore.compose import compor
+
+    c = compor(
+        _com_musica_na_regua(blocos=[
+            {"at_s": 0.0, "duration_s": 2.0, "start_s": 0.0,
+             "source": "media", "media_id": "m1"},
+            {"at_s": 2.0, "duration_s": 2.0, "start_s": 60.0,
+             "source": "media", "media_id": "m1", "audio": {"volume": 0.4}},
+        ]),
+        source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+    )
+
+    assert "amix=inputs=3" in c.filter_complex, "o som do jogo e os dois blocos"
+    assert "volume=0.4000" in c.filter_complex
+
+
+def test_o_silencio_e_a_falta_de_bloco(isolated):
+    """Nao ha "bloco de silencio": onde nao ha musica, nao ha musica. E o mesmo
+    que o buraco entre clipes ja faz com a imagem."""
+    from owcore.compose import compor
+
+    c = compor(
+        _com_musica_na_regua(blocos=[
+            {"at_s": 0.0, "duration_s": 1.0, "start_s": 0.0,
+             "source": "media", "media_id": "m1"},
+            {"at_s": 3.0, "duration_s": 1.0, "start_s": 0.0,
+             "source": "media", "media_id": "m1"},
+        ]),
+        source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+    )
+
+    # nada cobre o vao dos 1s aos 3s, e nenhum filtro tenta preenche-lo
+    assert "adelay=3000|3000" in c.filter_complex
+    assert c.duracao_s == pytest.approx(4.0)
+
+
+def test_a_camada_de_audio_muda_e_ignorada(isolated):
+    from owcore.compose import compor
+
+    t = _com_musica_na_regua()
+    t.layers[1].muted = True
+    c = compor(
+        t, source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+    )
+
+    assert "[2:a]" not in c.filter_complex
+
+
+def test_com_so_video_a_camada_de_audio_nem_e_aberta(isolated):
+    """Montar a entrada dela seria pagar por um arquivo que ninguem ia ouvir."""
+    from owcore.compose import compor
+
+    c = compor(
+        _com_musica_na_regua(),
+        source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        so_video=True,
+    )
+
+    assert not any("m.mp3" in e.caminho for e in c.entradas)
+    assert c.mapa_audio is None
+
+
+def test_o_bloco_de_musica_entra_na_janela_de_exportacao(isolated):
+    """Exportar um trecho reposiciona o som junto com a imagem -- senao a
+    musica sairia deslocada do video."""
+    from owcore.compose import compor
+
+    c = compor(
+        _com_musica_na_regua(
+            export={"from_s": 1.0, "to_s": 3.0},
+            blocos=[{"at_s": 0.0, "duration_s": 4.0, "start_s": 10.0,
+                     "source": "media", "media_id": "m1"}],
+        ),
+        source=Path("x.mp4"), width=640, height=360, fps=30,
+        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+    )
+
+    # o bloco comecava aos 0s e ia ate 4s; visto pela janela ele comeca no
+    # primeiro quadro e pega a musica a partir de 11s
+    assert any(e.seek == pytest.approx(11.0) for e in c.entradas)
+    assert "atrim=duration=2.000" in c.filter_complex
+
+
+def test_musica_na_regua_tira_a_montagem_dos_caminhos_curtos(isolated):
+    """Corte-e-emenda nao mistura som que corre por fora dos cortes, e o
+    reaproveitamento da imagem supoe que o som venha depois, por fora."""
+    t = _com_musica_na_regua()
+
+    assert t.musica_na_regua
+    assert not t.de_uma_camada_so
+
+
+def test_camada_de_audio_vazia_ainda_nao_e_musica_na_regua(isolated):
+    """Criar a camada e so abrir espaco; nada mudou ainda no video que sai."""
+    from owcore.models import Timeline
+
+    t = Timeline(layers=[
+        {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
+        {"kind": "audio", "clips": []},
+    ])
+    assert not t.musica_na_regua
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_o_video_sai_com_a_musica_cortada_e_posicionada(
+    isolated, short_sample, tmp_path
+):
+    """De ponta a ponta: o arquivo que sai tem som, dura o que foi pedido, e o
+    trecho sem bloco de musica e mais silencioso que o resto."""
+    from owcore import ffmpeg
+    from owcore.compose import compor
+
+    info = ffmpeg.probe(short_sample)
+    t = _com_musica_na_regua(
+        game_volume=0.0,
+        blocos=[{"at_s": 0.0, "duration_s": 2.0, "start_s": 5.0,
+                 "source": "media", "media_id": "m1"}],
+    )
+    # sem o som do jogo, o que sobra depois dos 2s e silencio de verdade
+    for camada in t.layers:
+        for clip in camada.clips:
+            if clip.source == "recording":
+                clip.audio.mute = True
+
+    c = compor(
+        t, source=short_sample, width=info.width, height=info.height,
+        fps=info.fps, source_duration_s=info.duration_s,
+        midias=_midia_de_som(MUSIC),
+    )
+    saida = tmp_path / "com_musica.mp4"
+    ffmpeg.compose(c, saida)
+
+    saiu = ffmpeg.probe(saida)
+    assert saiu.duration_s == pytest.approx(4.0, abs=0.35)
+    assert saiu.has_audio
+
+    assert _volume_entre(saida, 0.0, 1.8) > _volume_entre(saida, 2.2, 3.8) + 10
+
+
+def _volume_entre(video: Path, inicio: float, fim: float) -> float:
+    """O volume medio de um trecho, em dB. Quanto mais perto de zero, mais alto."""
+    from owcore.config import get_settings
+
+    saida = subprocess.run(
+        # `-v info` de proposito: o `volumedetect` escreve o resultado como
+        # informacao, e com `-v error` ele nao diria nada
+        [get_settings().ffmpeg, "-v", "info", "-ss", f"{inicio:.3f}",
+         "-t", f"{fim - inicio:.3f}", "-i", str(video),
+         "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True,
+    ).stderr
+    for linha in saida.splitlines():
+        if "mean_volume" in linha:
+            return float(linha.split(":")[1].strip().split()[0])
+    return -91.0
+
+
+# ── o que o servidor recusa ─────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_musica_numa_camada_de_video_e_recusada(isolated, short_sample):
+    """Ela faria o ffmpeg tentar redimensionar um fluxo de audio, e o render
+    inteiro morreria com uma mensagem que nao explica nada."""
+    job_id = run_analysis(short_sample)
+    track_id = subir_musica(job_id)
+
+    resp = api().post(
+        f"/api/jobs/{job_id}/renders",
+        data={"timelines": json.dumps([{
+            "layers": [{"clips": [
+                {"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0},
+                {"at_s": 3.0, "duration_s": 2.0, "start_s": 0.0,
+                 "source": "media", "media_id": track_id},
+            ]}],
+        }])},
+    )
+    assert resp.status_code == 422
+    assert "camada de audio" in resp.json()["detail"]
+
+
+def test_imagem_numa_camada_de_audio_e_recusada(isolated, short_sample, tmp_path):
+    """Pior que um erro: ela sairia em silencio, sem erro nenhum, e o usuario
+    procuraria o problema na mixagem."""
+    job_id = run_analysis(short_sample)
+    png = png_de_teste(tmp_path / "selo.png")
+    media_id = subir_media(job_id, "selo.png", png.read_bytes())
+
+    resp = api().post(
+        f"/api/jobs/{job_id}/renders",
+        data={"timelines": json.dumps([{
+            "layers": [
+                {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
+                {"kind": "audio", "clips": [
+                    {"at_s": 0.0, "duration_s": 2.0, "start_s": 0.0,
+                     "source": "media", "media_id": media_id},
+                ]},
+            ],
+        }])},
+    )
+    assert resp.status_code == 422
+    assert "so aceita musica" in resp.json()["detail"]
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_a_faixa_continua_continua_valendo(isolated, short_sample):
+    """Os dois jeitos convivem: `track_id` e a trilha por baixo de tudo, e e o
+    unico que reaproveita a imagem ja montada."""
+    job_id = run_analysis(short_sample)
+    track_id = subir_musica(job_id)
+
+    render_id = montar(job_id, [{
+        "title": "trilha de sempre", "track_id": track_id,
+        "layers": [{"clips": [
+            {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
+            {"at_s": 2.0, "duration_s": 1.5, "start_s": 6.0,
+             "transform": {"scale": 0.6}},
+        ]}],
+    }])
+    run_render()
+
+    clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
+    assert clip["video_url"]
+    assert clip["meta"]["reused"] is False, "primeira vez monta"
+
+
+@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
+def test_com_bloco_de_musica_nao_se_reaproveita_a_imagem(isolated, short_sample):
+    """O som passa a ser montado dentro do mesmo grafo que a imagem, entao nao
+    ha uma imagem sem som para guardar."""
+    job_id = run_analysis(short_sample)
+    track_id = subir_musica(job_id)
+
+    render_id = montar(job_id, [{
+        "title": "com bloco", "track_id": track_id,
+        "layers": [
+            {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
+            {"kind": "audio", "clips": [
+                {"at_s": 0.0, "duration_s": 2.0, "start_s": 5.0,
+                 "source": "media", "media_id": track_id},
+            ]},
+        ],
+    }])
+    run_render()
+
+    clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
+    assert clip["video_url"], clip.get("meta")
+    assert clip["meta"]["reused"] is False

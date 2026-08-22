@@ -233,6 +233,16 @@ Para isso existe a linha do tempo, e nela o sistema não decide nada:
 > vazio no começo é uma escolha visível na régua e contada no resumo;
 > retimar a música às escondidas não é.
 
+**Dois jeitos de ter música, e um vira o outro.** A faixa contínua acima é o
+caminho de um clique: escolhe-se uma música, ela toca por baixo de tudo e não se
+corta. Quando isso não basta — trocar de faixa no meio, deixar um trecho em
+silêncio, pôr o refrão só na virada — a música vai para uma **camada de som**,
+onde vira bloco: corta, anda e se apara como qualquer outro, e "Cortar na régua"
+converte a faixa contínua num bloco que cobre o vídeo, sem mudar o que se ouve.
+Uma camada de som não desenha nada, e o servidor recusa conteúdo trocado de
+camada. O ímã, com blocos, segue a grade da música que está tocando sob a cabeça
+de leitura: duas faixas num vídeo são dois andamentos.
+
 Esticar e aparar não reenquadram o conteúdo: o começo do corte só se move quando
 é a borda esquerda que anda, e na mesma medida que ela. Se a imagem se
 reenquadrasse a cada pixel do arrasto, ela escorregaria debaixo do dedo. O

@@ -707,6 +707,15 @@ class TimelineClip(BaseModel):
         )
 
 
+class LayerKind(StrEnum):
+    """Uma camada desenha ou toca -- nao as duas coisas."""
+
+    VIDEO = "video"
+    #: so som. Os clipes dela apontam para audio da biblioteca, e nada do que
+    #: esta nela aparece na tela
+    AUDIO = "audio"
+
+
 class Layer(BaseModel):
     """Uma camada da linha do tempo.
 
@@ -714,9 +723,11 @@ class Layer(BaseModel):
     o usuario enviou -- dois `Track` no mesmo modelo seriam uma armadilha.
 
     A ordem na lista e a ordem de empilhamento: a primeira e o fundo, a ultima
-    fica por cima.
+    fica por cima. Uma camada de audio nao entra nesse empilhamento: ela nao
+    desenha nada, so toca.
     """
 
+    kind: LayerKind = LayerKind.VIDEO
     name: str = ""
     muted: bool = False
     hidden: bool = False
@@ -734,6 +745,10 @@ class Layer(BaseModel):
                 )
         self.clips = ordenados
         return self
+
+    @property
+    def e_audio(self) -> bool:
+        return self.kind is LayerKind.AUDIO
 
     @property
     def duration_s(self) -> float:
@@ -924,14 +939,29 @@ class Timeline(BaseModel):
 
         Uma saida fora do padrao -- outra proporcao, um trecho, uma marca
         d'agua -- so existe no grafo de filtros, entao ela sozinha ja tira a
-        montagem deste caminho.
+        montagem deste caminho. O mesmo vale para uma camada de audio: emendar
+        cortes nao sabe misturar som que corre por fora deles.
         """
         if not self.export.padrao:
+            return False
+        if any(l.e_audio for l in self.layers):
             return False
         visiveis = [l for l in self.layers if not l.hidden]
         if len(visiveis) != 1:
             return False
         return all(c.simples for c in visiveis[0].clips)
+
+    @property
+    def musica_na_regua(self) -> bool:
+        """A montagem tem som posto a mao na linha do tempo?
+
+        Distingue os dois jeitos de ter musica. `track_id` e uma faixa continua
+        por baixo de tudo -- e o caso comum, e o unico que da para montar por
+        fora do grafo (e, por isso, o unico que reaproveita a imagem ja
+        montada). Blocos de musica sao pedacos posicionados, e esses so existem
+        no grafo de filtros.
+        """
+        return any(l.e_audio and l.clips for l in self.layers)
 
     @property
     def cuts(self) -> list[TimelineCut]:

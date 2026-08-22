@@ -418,8 +418,13 @@ def _render_composicao(
     # o vídeo inteiro de novo: monta-se o áudio por cima do que já existe.
     #
     # Com o som do jogo na mistura isso não vale: o áudio precisa dos mesmos
-    # cortes que a imagem, e não há o que economizar.
-    so_a_trilha = item.music is not None and spec.game_volume <= 0
+    # cortes que a imagem, e não há o que economizar. Nem com blocos de música
+    # na régua: ali o som é montado dentro do mesmo grafo que a imagem.
+    so_a_trilha = (
+        item.music is not None
+        and spec.game_volume <= 0
+        and not spec.musica_na_regua
+    )
 
     comp = compor(
         spec,

@@ -144,6 +144,31 @@ termina; o vídeo é montado para caber nesse trecho:
 O início é encaixado na primeira batida a partir do ponto pedido, para o
 primeiro corte cair no tempo em vez de entrar no meio de um compasso.
 
+### Mais de uma música, e música que se corta
+
+Na montagem à mão a música começa como uma **faixa contínua**: você escolhe uma,
+diz de que ponto dela o vídeo começa, e ela toca por baixo de tudo. É um clique,
+e para a maioria dos vídeos é o que se quer.
+
+Quando não é, a música vai para a **régua**. Ali ela vira bloco: corta, anda e se
+apara como qualquer corte de vídeo — e é isso que deixa fazer o que a faixa
+contínua nunca deixou:
+
+- **trocar de música no meio do vídeo**, uma faixa por trecho;
+- **deixar um pedaço em silêncio**, para o tiro e o grito da jogada aparecerem
+  sozinhos;
+- **pôr o refrão só na virada**, e não do começo ao fim.
+
+"Cortar na régua" converte a faixa que já está tocando num bloco que cobre o
+vídeo inteiro, começando no mesmo ponto da música: o mesmo som de antes, agora
+com pontas para pegar. E o ímã continua funcionando — com mais de uma faixa, ele
+gruda na batida **da música que está tocando ali**, que é a única grade que faz
+sentido naquele ponto.
+
+O preço, dito na cara: uma montagem com música na régua não reaproveita a imagem
+já montada ao reexportar (veja abaixo) — o som passa a ser montado junto com a
+imagem, e não por cima dela.
+
 ### Várias montagens da mesma partida
 
 Uma partida rende mais de um vídeo. O corte de 30 s para o Shorts e a montagem
@@ -188,7 +213,9 @@ gameplay a ação está no meio —, ou **caber**, que mostra o quadro inteiro e
 deixa barras, para quando o que importa está nos cantos.
 
 Reexportar a mesma montagem **trocando só a música** não recorta tudo de novo:
-o que se vê já está pronto, e a trilha nova entra por cima.
+o que se vê já está pronto, e a trilha nova entra por cima. Isso vale para a
+faixa contínua; com blocos de música na régua o som é montado junto com a
+imagem, e a reexportação refaz o vídeo.
 
 ### Levando os cortes para editar por fora
 
