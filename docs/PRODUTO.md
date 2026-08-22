@@ -192,6 +192,13 @@ ponto de partida, não um molde do qual não se sai.
 O tamanho pode ser em segundos ou em **batidas**. Em batidas é melhor: sobrevive
 a uma música de outro andamento.
 
+### Escrevendo na tela
+
+O texto entra na régua como qualquer bloco e aparece **no monitor**, do tamanho
+e no lugar em que vai sair. É lá que se escolhe onde ele fica: arraste a frase
+pelo quadro. Tamanho, cor e contorno ficam no painel do bloco — o contorno não é
+enfeite, é o que faz texto branco sobreviver a uma cena clara.
+
 ### Escolhendo o formato de saída
 
 Uma montagem não tem formato: ela tem cortes, camadas e efeitos. O formato é a

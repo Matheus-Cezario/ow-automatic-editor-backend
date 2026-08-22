@@ -15,8 +15,12 @@ from .models import TimelineClip
 #:
 #: * `\` — a própria barra, senão ela come o próximo caractere;
 #: * `:` — separa uma opção da outra dentro do filtro;
-#: * `'` — delimita o valor de uma opção;
-#: * `%` — abre uma expansão (`%{pts}` e parentes).
+#: * `'` — delimita o valor de uma opção.
+#:
+#: `%` **não** entra aqui, e a razão custou caro: escapado com barra, o
+#: `drawtext` reclama "Stray %" em nível de aviso e **não desenha nada** —
+#: o texto sumia do vídeo inteiro, sem erro nenhum. Quem resolve o `%` é o
+#: `expansion=none` na cadeia, que desliga o `%{...}` de vez.
 #:
 #: Quebra de linha vira espaço: o `drawtext` aceita várias linhas, mas o
 #: filtergraph é uma linha só, e uma quebra crua ali parte o grafo em dois.
@@ -24,7 +28,6 @@ _TROCAS: tuple[tuple[str, str], ...] = (
     ("\\", "\\\\"),
     (":", "\\:"),
     ("'", "\\'"),
-    ("%", "\\%"),
     ("\n", " "),
     ("\r", " "),
 )
@@ -52,6 +55,9 @@ def cadeia(clip: TimelineClip, height: int) -> str:
     partes = [
         f"fontfile='{escapar(fonte)}'",
         f"text='{escapar(clip.text)}'",
+        # sem expansão nenhuma: o texto do usuário é texto, e um `%` solto nele
+        # faria o drawtext desistir de desenhar a frase inteira
+        "expansion=none",
         f"fontsize={corpo}",
         f"fontcolor={estilo.color}",
         # o texto anda pelo quadro com o mesmo x/y de qualquer clipe: o centro

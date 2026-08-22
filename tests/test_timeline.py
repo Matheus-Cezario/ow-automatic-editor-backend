@@ -1413,15 +1413,33 @@ def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
 
 
 def test_o_texto_escapa_o_que_quebraria_o_grafo(isolated):
-    """Dois pontos, aspas e porcentagem aparecem em texto de verdade -- e cada
-    um deles, solto, parte o filtergraph em dois."""
+    """Dois pontos e aspas aparecem em texto de verdade -- e cada um deles,
+    solto, parte o filtergraph em dois."""
     from owcore.textfx import escapar
 
-    assert escapar("TRIPLE KILL: 50%") == r"TRIPLE KILL\: 50\%"
+    assert escapar("TRIPLE KILL: 50") == r"TRIPLE KILL\: 50"
     assert escapar("o 'x'") == r"o \'x\'"
     assert escapar("a\\b") == r"a\\b"
     # uma quebra crua partiria o grafo: o filtergraph e uma linha so
     assert "\n" not in escapar("duas\nlinhas")
+
+
+def test_a_porcentagem_passa_inteira_e_a_expansao_fica_desligada(isolated):
+    """Escapar o `%` com barra faz o drawtext reclamar "Stray %" em nivel de
+    aviso e **nao desenhar nada** -- o texto sumia do video sem erro nenhum.
+
+    Quem resolve e `expansion=none`: sem expansao, `%` e so um caractere.
+    """
+    from owcore.models import TimelineClip
+    from owcore.textfx import cadeia, escapar
+
+    assert escapar("50%") == "50%"
+    c = cadeia(
+        TimelineClip(at_s=0, duration_s=1, source="text", text="50% de vida"),
+        height=720,
+    )
+    assert "expansion=none" in c
+    assert "50% de vida" in c
 
 
 def test_o_tamanho_do_texto_e_fracao_da_altura(isolated):
@@ -1453,10 +1471,11 @@ def test_o_texto_entra_numa_tela_transparente(isolated):
     ])])
     c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
-    assert any("color=c=black@0.0" in e.caminho for e in c.entradas)
-    g = c.filter_complex
-    # o alfa tem de existir antes de o texto ser escrito
-    assert g.index("format=rgba") < g.index("drawtext")
+    # o alfa tem de vir da **fonte**: pedido depois, na cadeia, o `color` ja
+    # negociou yuv420p com o `drawtext` e desenhou preto opaco -- e o alfa
+    # acrescentado ali nasce em 1, tapando a camada de baixo
+    tela = next(e for e in c.entradas if "color=c=black@0.0" in e.caminho)
+    assert tela.caminho.endswith(",format=rgba")
     # e um texto nao tem som que corra junto
     assert c.mapa_audio is None
 
@@ -1481,9 +1500,23 @@ def test_o_texto_aparece_no_video_e_some_sem_deixar_caixa(
         Timeline(layers=[Layer(clips=[base])]), short_sample, tmp_path / "sem.mp4"
     )
 
-    # com o texto na tela, os quadros sao bem diferentes
-    assert abs(quadro_cru(com, 0.8) - quadro_cru(sem, 0.8)).mean() > 10
-    # depois dele, identicos: a tela do texto e transparente, nao preta
+    import numpy as np
+
+    def metades(video, t):
+        q = quadro_cru(video, t).reshape(45, 80, 3)
+        return q[:20, :, :], q[25:, :, :]
+
+    cima_com, baixo_com = metades(com, 0.8)
+    cima_sem, baixo_sem = metades(sem, 0.8)
+
+    # o texto ocupa a metade de cima (`y=-0.5`): ali os quadros mudam
+    assert np.abs(cima_com - cima_sem).mean() > 5
+    # e a de baixo fica **igual** -- a tela do texto e transparente, e o video
+    # continua aparecendo por baixo dela. Sem esta metade, uma tela preta por
+    # cima de tudo passava no teste: ela tambem "muda o quadro"
+    assert np.abs(baixo_com - baixo_sem).mean() < 1
+
+    # depois do texto, identicos: ele nao deixa caixa nenhuma para tras
     assert abs(quadro_cru(com, 1.9) - quadro_cru(sem, 1.9)).mean() < 5
 
 

@@ -108,7 +108,13 @@ def _posicao(clip: TimelineClip) -> tuple[str, str]:
     `x` e `y` do transform são deslocamentos do centro normalizados pela metade
     do quadro, então a mesma montagem vale em qualquer resolução: `W` e `H` são
     a tela, `w` e `h` o clipe já escalado.
+
+    **Texto é a exceção**: a tela dele já tem o tamanho do quadro e o `drawtext`
+    já pôs a frase no lugar dentro dela. Deslocar a tela também moveria o texto
+    duas vezes — com `y=-0.5` ele saía por cima da borda e sumia.
     """
+    if clip.source is ClipSource.TEXT:
+        return "0", "0"
     x = f"(W-w)/2+({clip.transform.x:.4f})*(W/2)"
     y = f"(H-h)/2+({clip.transform.y:.4f})*(H/2)"
     return x, y
@@ -208,8 +214,8 @@ def _cadeia_de_video(
         passos.append(f"setpts=PTS/{clip.speed:.4f}")
 
     if clip.source is ClipSource.TEXT:
-        # a tela é transparente, então o alfa tem de existir antes do texto
-        passos.append("format=rgba")
+        # a tela já vem em rgba da própria fonte (veja `_entrada_do_clipe`): o
+        # texto é escrito direto nela
         passos.append(textfx.cadeia(clip, height))
 
     if clip.zoom:
@@ -396,13 +402,19 @@ def _entrada_do_clipe(
         )
 
     if clip.source is ClipSource.TEXT:
-        # uma tela transparente do tamanho do quadro, onde o texto é escrito.
-        # Ela é um clipe como qualquer outro daí em diante -- move, some, anda
-        # em camada. O `format=rgba` vem na cadeia de vídeo, junto do resto.
+        # Uma tela transparente do tamanho do quadro, onde o texto e escrito.
+        # Ela e um clipe como qualquer outro dai em diante -- move, some, anda
+        # em camada.
+        #
+        # O `format=rgba` vai **dentro da fonte**, e nao na cadeia de video. A
+        # diferenca nao e cosmetica: sem ele ali, o `color` negocia yuv420p com
+        # o `drawtext`, desenha preto opaco, e o `format=rgba` seguinte so
+        # acrescenta um alfa que ja nasceu 1. O resultado e uma tela preta por
+        # cima de tudo -- o texto aparecia, e o video sumia debaixo dele.
         return (
             Entrada(
                 caminho=f"color=c=black@0.0:s={int(width)}x{int(height)}"
-                f":r={fps:.3f}",
+                f":r={fps:.3f},format=rgba",
                 duracao=clip.duration_s,
                 lavfi=True,
             ),
