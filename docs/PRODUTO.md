@@ -192,6 +192,21 @@ ponto de partida, não um molde do qual não se sai.
 O tamanho pode ser em segundos ou em **batidas**. Em batidas é melhor: sobrevive
 a uma música de outro andamento.
 
+### Encaixando a jogada na batida
+
+Um corte é um trecho; a jogada — a eliminação, o dardo, a pedrada — é um
+instante dentro dele, e é ela que precisa cair na batida. O corte começa antes,
+para dar embalo, então alinhar pela borda deixa o impacto atrasado.
+
+Na régua, cada bloco mostra **onde a jogada acontece**. Ponha a cabeça de
+leitura na batida, escolha o bloco e mande alinhar (botão no painel do bloco, ou
+a tecla **M**): a jogada vai para debaixo da linha, e a marca acende para
+confirmar. Se os blocos vizinhos não deixarem esse andar, o trecho é que desliza
+dentro do bloco — o vídeo continua com a mesma duração, e a tela diz o que fez.
+
+Arrastando com o ímã ligado, a jogada também gruda na batida: ela disputa com as
+duas bordas do bloco, e vence quem estiver mais perto.
+
 ### Escrevendo na tela
 
 O texto entra na régua como qualquer bloco e aparece **no monitor**, do tamanho
