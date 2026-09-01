@@ -1,5 +1,5 @@
-"""Configuração central. Tudo vem de variáveis de ambiente com defaults que
-funcionam sem nenhuma infra instalada (modo `local`)."""
+"""Central configuration. Everything comes from environment variables, with
+defaults that work with no infrastructure installed at all (`local` mode)."""
 
 from __future__ import annotations
 
@@ -10,19 +10,19 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-#: Raiz do projeto -- de onde saem os defaults de `data/`, `config/` e
-#: `templates/`. Em dev, `owcore` e instalado em modo editavel e o caminho do
-#: arquivo aponta para dentro do repositorio. Dentro da imagem Docker o pacote
-#: vive em `site-packages`, e ai esse calculo nao vale nada -- por isso
-#: `OW_ROOT` manda quando esta definido (o Dockerfile define).
+#: Project root -- where the defaults for `data/`, `config/` and `templates/`
+#: come from. In dev, `owcore` is installed in editable mode and the file path
+#: points inside the repository. Inside the Docker image the package lives in
+#: `site-packages`, where that calculation is worthless -- which is why
+#: `OW_ROOT` wins when it is set (the Dockerfile sets it).
 REPO_ROOT = Path(os.environ.get("OW_ROOT") or Path(__file__).resolve().parents[3])
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OW_", env_file=".env", extra="ignore")
 
-    # ── modo de execução ────────────────────────────────────────────────────
-    # "local": fila em disco + storage em pasta + SQLite. Nenhum servidor.
+    # -- execution mode -----------------------------------------------------
+    # "local": on-disk queue + folder storage + SQLite. No server at all.
     # "docker": Redis Streams + MinIO + Postgres.
     mode: Literal["local", "docker"] = "local"
 
@@ -30,35 +30,61 @@ class Settings(BaseSettings):
     profiles_dir: Path = REPO_ROOT / "config" / "profiles"
     templates_dir: Path = REPO_ROOT / "templates"
 
-    #: App Flutter compilado. O frontend e um projeto irmao do backend, entao o
-    #: padrao aponta para fora daqui; no container ele e montado em outro lugar
-    #: e esta variavel e quem diz onde. Se a pasta nao tiver um `index.html`, o
-    #: gateway simplesmente serve so a API.
+    #: The compiled Flutter app. The frontend is a sibling project of the
+    #: backend, so the default points outside here; in the container it is
+    #: mounted elsewhere and this variable is what says where. If the folder
+    #: has no `index.html`, the gateway simply serves the API alone.
     web_dir: Path = REPO_ROOT.parent / "frontend" / "build" / "web"
 
-    # ── banco ───────────────────────────────────────────────────────────────
-    database_url: str = ""  # vazio => derivado do modo
+    # -- database -----------------------------------------------------------
+    database_url: str = ""  # empty => derived from the mode
+    #: Connections each process keeps open.
+    #:
+    #: SQLAlchemy's default (5 + 10 overflow) is sized for a web server. A
+    #: worker here is single-threaded: it never uses more than one connection,
+    #: and the others sat open holding a Postgres backend each -- a few MB per
+    #: backend, times ten services. The gateway, on the other hand, does serve
+    #: several requests at once and raises its own value via an environment
+    #: variable.
+    db_pool_size: int = 2
+    db_max_overflow: int = 3
 
-    # ── barramento ──────────────────────────────────────────────────────────
+    # -- message bus --------------------------------------------------------
     redis_url: str = "redis://localhost:6379/0"
+    #: Cap on messages kept per stream.
+    #:
+    #: Redis Streams do **not** delete what was delivered: `XACK` only removes
+    #: the message from the group's pending list, and the entry goes on
+    #: occupying Redis memory forever. Without this cap, Redis RAM grows with
+    #: the number of matches already processed and never comes back.
+    #:
+    #: The trim is approximate (`~`), which is the cheap one: Redis trims at
+    #: the node boundary, a little above the number asked for. Ten thousand
+    #: messages is thousands of matches of slack -- the queue moves in seconds,
+    #: and no consumer falls that far behind.
+    stream_maxlen: int = 10_000
+    #: How long a message already consumed by everyone stays in the on-disk
+    #: queue before being swept (local mode). The slack protects a group coming
+    #: up for the first time after the message was published.
+    bus_retention_s: float = 3600.0
 
-    # ── storage ─────────────────────────────────────────────────────────────
+    # -- storage ------------------------------------------------------------
     s3_endpoint: str = "http://localhost:9000"
     s3_bucket: str = "ow-editor"
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
 
-    # ── binários externos ───────────────────────────────────────────────────
+    # -- external binaries --------------------------------------------------
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
-    #: fonte do `drawtext`. Vazio procura uma no sistema -- veja `owcore.fonts`
+    #: `drawtext` font. Empty looks for one on the system -- see `owcore.fonts`
     font: str = ""
 
-    # ── comportamento ───────────────────────────────────────────────────────
+    # -- behaviour ----------------------------------------------------------
     profile: str = "ow2_default"
     log_level: str = "INFO"
-    # Segundos que o editor espera por detectores que nunca responderam antes
-    # de renderizar com o que tem.
+    # Seconds the pipeline waits for detectors that never answered before
+    # closing the analysis with what it has.
     detector_timeout_s: float = 900.0
 
     @property

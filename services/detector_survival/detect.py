@@ -1,31 +1,31 @@
-"""Deteccao de sobrevivencia: vida baixa, interrupcao e fuga.
+"""Survival detection: low health, interruption and escape.
 
-Entrada: uma tira fina do canto inferior esquerdo -- so a barra de vida.
+Input: a thin strip of the bottom-left corner -- the health bar alone.
 
-**Como isto era antes, e por que mudou.** A primeira versao inferia vida baixa
-pela vinheta vermelha nas bordas da tela. Medido em 19 minutos de gameplay
-real, esse sinal aparecia em **32% dos quadros** e rendia 122 "fugas" -- porque
-aquela vinheta e o indicador de *dano recebido*, que pisca o tempo todo numa
-partida, e nao o aviso de vida baixa. A morte era inferida pela queda de
-saturacao da killcam, e encontrou **zero** mortes: a killcam do OW2 nao e
-dessaturada.
+**How this used to work, and why it changed.** The first version inferred low
+health from the red vignette at the screen edges. Measured over 19 minutes of
+real gameplay, that signal appeared in **32% of frames** and produced 122
+"escapes" -- because that vignette is the *damage taken* indicator, which
+flashes constantly in a match, and not the low-health warning. Death was
+inferred from the killcam's drop in saturation, and found **zero** deaths: the
+OW2 killcam is not desaturated.
 
-A versao atual le a barra de vida diretamente. A barra e desenhada como uma
-sequencia de tracinhos verticais claros, e o OW2 normaliza a largura dela --
-entao a fracao preenchida e a fracao de vida, seja o heroi de 200 ou de 700 de
-vida. A leitura nao usa brilho (o cenario atras da HUD pode ser claro): usa a
-**alternancia** clara/escura dos tracinhos, que so existe na parte preenchida.
-Contra valores lidos na tela, o erro ficou em ate 0.05 (0.56 -> 0.55,
+The current version reads the health bar directly. The bar is drawn as a run of
+bright vertical ticks, and OW2 normalises its width -- so the filled fraction is
+the health fraction, whether the hero has 200 or 700 health. The reading does
+not use brightness (the scenery behind the HUD can be bright): it uses the
+bright/dark **alternation** of the ticks, which only exists in the filled part.
+Against values read off the screen, the error stayed within 0.05 (0.56 -> 0.55,
 0.53 -> 0.49, 0.95 -> 0.92).
 
-**Sobre `DEATH`.** Ao morrer no OW2 voce passa a espectar um companheiro, e a
-vida *dele* aparece na HUD -- por isso a assinatura da morte e a vida ir a zero
-e voltar cheia no quadro seguinte, e nao a barra ficar zerada. A barra sumir de
-vez (menu, selecao de heroi, troca de round) e tratada igual, de proposito:
-para as regras os dois casos significam a mesma coisa -- a sequencia de acao do
-jogador foi interrompida, entao a rajada nao vale como "sozinho contra todos" e
-a fuga nao vale como sobrevivencia. Por isso o evento nao promete ser "morte"
-no sentido estrito, e o `meta` diz o que disparou.
+**About `DEATH`.** When you die in OW2 you start spectating a teammate, and
+*their* health appears on the HUD -- which is why the signature of death is
+health going to zero and coming back full on the next frame, rather than the bar
+staying at zero. The bar disappearing entirely (menu, hero select, round change)
+is treated the same, on purpose: for the rules both cases mean the same thing --
+the player's run of action was interrupted, so a streak does not count as a solo
+wipe and an escape does not count as survival. That is why the event does not
+promise to be "death" in the strict sense, and `meta` says what triggered it.
 """
 
 from __future__ import annotations
@@ -42,30 +42,32 @@ from owcore.vision import find_pulses, iter_frames
 
 log = logging.getLogger(__name__)
 
-#: o perfil horizontal da barra e reamostrado para este tamanho antes da
-#: analise, para que os limiares valham em qualquer resolucao de gravacao
+#: the bar's horizontal profile is resampled to this size before analysis, so
+#: the thresholds hold at any recording resolution
 PROFILE_SAMPLES = 256
 
 
 def read_health_fraction(
     bgr: np.ndarray, *, energy_floor: float, tick_threshold: float
 ) -> float | None:
-    """Fracao preenchida da barra de vida, ou None se a barra nao esta na tela.
+    """Filled fraction of the health bar, or None if the bar is off screen.
 
-    Mede a alternancia clara/escura dos tracinhos ao longo da tira: onde a
-    barra esta preenchida o perfil horizontal oscila, e onde esta vazia ele e
-    liso. Assim um fundo claro atras da HUD nao vira "vida cheia".
+    It measures the bright/dark alternation of the ticks along the strip: where
+    the bar is filled the horizontal profile oscillates, and where it is empty
+    the profile is flat. That way a bright background behind the HUD does not
+    become "full health".
     """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     profile = gray.mean(axis=0)
     if profile.size < 16:
         return None
 
-    # As janelas abaixo sao contadas em amostras, entao dependeriam da largura
-    # da tira -- e a tira sai com a largura nativa do video, que vai de ~100px
-    # em 360p a ~300px em 1080p. Reamostrar o perfil para um tamanho fixo torna
-    # a leitura igual em qualquer resolucao, sem precisar ampliar o video (o que
-    # so engordaria o recorte sem acrescentar informacao).
+    # The windows below are counted in samples, so they would depend on the
+    # strip's width -- and the strip comes out at the video's native width,
+    # which runs from ~100px at 360p to ~300px at 1080p. Resampling the profile
+    # to a fixed size makes the reading identical at any resolution, without
+    # having to upscale the video (which would only fatten the crop without
+    # adding information).
     profile = np.interp(
         np.linspace(0, profile.size - 1, PROFILE_SAMPLES),
         np.arange(profile.size),
@@ -75,26 +77,26 @@ def read_health_fraction(
     gradient = np.abs(np.diff(profile))
     energy = np.convolve(gradient, np.ones(5) / 5, mode="same")
     if float(energy.max()) < energy_floor:
-        return None  # sem barra na tela
+        return None  # no bar on screen
 
     normalized = energy / energy.max()
     hot = (normalized > tick_threshold).astype(np.float32)
 
-    # Nao basta achar a coluna mais a direita com gradiente alto: a *borda* do
-    # trilho vazio tambem e um degrau forte, e uma barra zerada seria lida como
-    # cheia. O que caracteriza a parte preenchida e haver varios tracinhos
-    # seguidos -- ou seja, densidade de alternancia numa vizinhanca, e nao um
-    # degrau isolado.
+    # Finding the rightmost column with a high gradient is not enough: the
+    # *edge* of the empty track is also a strong step, and an empty bar would be
+    # read as full. What characterises the filled part is several ticks in a row
+    # -- that is, a density of alternation over a neighbourhood, not an isolated
+    # step.
     window = max(5, normalized.size // 10)
     density = np.convolve(hot, np.ones(window) / window, mode="same")
     filled = np.flatnonzero(density > 0.25)
     if filled.size == 0:
-        return 0.0  # barra na tela, porem vazia
+        return 0.0  # bar on screen, but empty
     return float(filled.max() + 1) / float(normalized.size)
 
 
 def _median3(series: list[float | None]) -> list[float | None]:
-    """Mediana movel de 3, tratando None (barra ausente) como categoria propria."""
+    """Rolling median of 3, treating None (bar absent) as its own category."""
     out: list[float | None] = []
     for i in range(len(series)):
         window = series[max(0, i - 1) : i + 2]
@@ -138,18 +140,19 @@ def detect_survival(health_video: Path, profile: Profile) -> list[DetectionEvent
     death_frac = float(death_cfg.get("dead_hp_frac", 0.06))
     events: list[DetectionEvent] = []
 
-    # As duas leituras usam series diferentes de proposito. A morte e um evento
-    # *transitorio* -- as vezes um unico quadro com a vida zerada --, entao ela
-    # tem de sair da serie crua; suavizar aqui apagaria exatamente o que se quer
-    # ver. Vida baixa e o oposto: dura segundos, e uma mediana de 3 tira o ruido
-    # de leitura sem encurtar episodio nenhum.
+    # The two readings use different series on purpose. Death is a *transient*
+    # event -- sometimes a single frame with zeroed health -- so it has to come
+    # out of the raw series; smoothing here would erase exactly what we want to
+    # see. Low health is the opposite: it lasts seconds, and a median of 3
+    # removes reading noise without shortening any episode.
     smooth = _median3(health)
 
-    # ── interrupcoes ────────────────────────────────────────────────────────
-    # A vida cair a zero e voltar ao topo no quadro seguinte e a assinatura da
-    # morte: ao morrer voce passa a espectar um companheiro, com a vida *dele*
-    # na tela. Nenhuma cura sobe assim. A barra sumir de vez (menu, troca de
-    # round) conta igual, porque significa a mesma coisa para as regras.
+    # -- interruptions -------------------------------------------------------
+    # Health dropping to zero and returning to the top on the next frame is the
+    # signature of death: when you die you start spectating a teammate, with
+    # *their* health on screen. No heal climbs like that. The bar disappearing
+    # entirely (menu, round change) counts the same, because it means the same
+    # thing for the rules.
     down = [1.0 if (h is None or h <= death_frac) else 0.0 for h in health]
     absent_pulses = find_pulses(
         times,
@@ -166,12 +169,12 @@ def detect_survival(health_video: Path, profile: Profile) -> list[DetectionEvent
                 kind=EventKind.DEATH,
                 t=round(p.start, 3),
                 confidence=0.7,
-                meta={"reason": "vida_zerada_ou_hud_ausente",
+                meta={"reason": "zero_health_or_hud_absent",
                       "duration_s": round(p.duration, 2)},
             )
         )
 
-    # ── vida baixa: so onde a barra existe e ainda ha vida ──────────────────
+    # -- low health: only where the bar exists and there is health left -------
     danger = [
         0.0
         if (h is None or h <= death_frac or h >= low_frac)

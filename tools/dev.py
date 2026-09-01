@@ -31,6 +31,7 @@ SERVICES: dict[str, list[str]] = {
     "detector-survival": [sys.executable, str(ROOT / "services" / "detector_survival" / "main.py")],
     "detector-ults": [sys.executable, str(ROOT / "services" / "detector_ults" / "main.py")],
     "detector-banner": [sys.executable, str(ROOT / "services" / "detector_banner" / "main.py")],
+    "detector-killfeed": [sys.executable, str(ROOT / "services" / "detector_killfeed" / "main.py")],
     "planner": [sys.executable, str(ROOT / "services" / "planner" / "main.py")],
     "thumbs": [sys.executable, str(ROOT / "services" / "thumbs" / "main.py")],
     "beats": [sys.executable, str(ROOT / "services" / "beats" / "main.py")],

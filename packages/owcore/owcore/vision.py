@@ -1,8 +1,8 @@
-"""Utilidades de visão computacional compartilhadas pelos detectores.
+"""Computer-vision utilities shared by the detectors.
 
-Nenhuma delas conhece Overwatch: são primitivas (razão de pixels numa faixa
-HSV, casamento de template, detecção de pulsos numa série temporal) que os
-detectores combinam segundo o profile.
+None of them knows anything about Overwatch: they are primitives (ratio of
+pixels within an HSV range, template matching, pulse detection over a time
+series) that the detectors combine according to the profile.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
-# ──────────────────────────── leitura de frames ─────────────────────────────
+# ---------------------------- frame reading --------------------------------
 
 
 @dataclass(slots=True)
@@ -29,8 +29,8 @@ class Frame:
 
 
 def iter_frames(path: Path, fps_hint: float | None = None) -> Iterator[Frame]:
-    """Percorre um vídeo já recortado. Os recortes são gerados com o filtro
-    ``fps``, ou seja, CFR — então ``t = index / fps``."""
+    """Walks an already-cropped video. The crops are generated with the
+    ``fps`` filter, i.e. CFR -- so ``t = index / fps``."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"não consegui abrir {path}")
@@ -49,11 +49,11 @@ def iter_frames(path: Path, fps_hint: float | None = None) -> Iterator[Frame]:
         cap.release()
 
 
-# ──────────────────────────── métricas por frame ────────────────────────────
+# --------------------------- per-frame metrics -----------------------------
 
 
 def hsv_ratio(bgr: np.ndarray, ranges: Sequence[dict]) -> float:
-    """Fração de pixels dentro de qualquer uma das faixas HSV dadas."""
+    """Fraction of pixels inside any of the given HSV ranges."""
     if not ranges:
         return 0.0
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -71,7 +71,7 @@ def mean_saturation(bgr: np.ndarray) -> float:
 
 
 def color_mask(bgr: np.ndarray, ranges: Sequence[dict]) -> np.ndarray:
-    """Máscara binária dos pixels dentro de qualquer uma das faixas HSV."""
+    """Binary mask of the pixels inside any of the HSV ranges."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for r in ranges:
@@ -83,13 +83,13 @@ def color_mask(bgr: np.ndarray, ranges: Sequence[dict]) -> np.ndarray:
 
 @dataclass(slots=True)
 class Banner:
-    """Uma faixa horizontal da HUD -- os avisos do rodapé do OW2."""
+    """A horizontal HUD banner -- the OW2 footer notices."""
 
     x: int
     y: int
     w: int
     h: int
-    #: altura da faixa como fração da ROI
+    #: banner height as a fraction of the ROI
     height_frac: float
     offset_x: float
 
@@ -104,28 +104,28 @@ def find_banners(
     max_offset: float,
     min_fill: float,
 ) -> list[Banner]:
-    """Todas as faixas de aviso do recorte, de cima para baixo.
+    """Every notice banner in the crop, top to bottom.
 
-    O céu, a água e superfícies claras do cenário caem nas mesmas faixas de cor
-    da HUD, e cobrem áreas bem maiores. O que caracteriza a faixa é a **forma**:
-    um retângulo cheio, largo e **baixo**, centrado na horizontal. O limite de
-    altura é o filtro que descarta cenário -- uma ROI tomada pelo céu vira um
-    blob que ocupa a altura inteira.
+    Sky, water and bright scenery fall into the same colour ranges as the HUD,
+    and cover much larger areas. What characterises the banner is its **shape**:
+    a filled rectangle, wide and **short**, horizontally centred. The height
+    limit is the filter that discards scenery -- a ROI taken over by the sky
+    becomes a blob occupying the full height.
 
-    O texto branco parte a máscara em pedaços, então ela é fechada com um
-    elemento largo antes de medir: o que interessa é o retângulo, não as letras.
+    White text breaks the mask into pieces, so it is closed with a wide element
+    before measuring: what matters is the rectangle, not the letters.
 
-    **Uma máscara por cor, nunca a união.** Uma faixa tem uma cor só, e as cores
-    da HUD mudam de gravação para gravação -- há partidas com o aviso em ciano e
-    partidas com ele em verde. Somando as cores numa máscara única, o cenário de
-    uma cor cola na faixa da outra durante o fechamento horizontal e o retângulo
-    deixa de existir: medido numa gravação de Sigma (faixa verde, cenário
-    azulado), a máscara somada perdia 5 das 23 pedradas; separada por cor, achou
-    as 23.
+    **One mask per colour, never the union.** A banner has a single colour, and
+    the HUD colours change from recording to recording -- some matches show the
+    notice in cyan and some in green. Summing the colours into a single mask,
+    the scenery of one colour sticks to the banner of the other during the
+    horizontal closing and the rectangle stops existing: measured on a Sigma
+    recording (green banner, bluish scenery), the summed mask lost 5 of the 23
+    rock throws; split by colour, it found all 23.
 
-    Devolve **todas** as candidatas porque o OW2 empilha avisos -- num mesmo
-    quadro pode haver "ORB OF HARMONY" em cima e "STUNNED BY ACCRETION" embaixo.
-    Ficar só com a maior perderia os casos empilhados.
+    Returns **all** the candidates because OW2 stacks notices -- a single frame
+    may hold "ORB OF HARMONY" on top and "STUNNED BY ACCRETION" below. Keeping
+    only the largest would lose the stacked cases.
     """
     h_roi, w_roi = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -133,7 +133,7 @@ def find_banners(
     lo_h, hi_h = height_range
     lo_w, hi_w = width_range
 
-    achadas: list[Banner] = []
+    found: list[Banner] = []
     for r in ranges:
         lo = np.array(r["lo"], dtype=np.uint8)
         hi = np.array(r["hi"], dtype=np.uint8)
@@ -155,14 +155,14 @@ def find_banners(
             off_x = (centroids[k][0] - w_roi / 2) / (w_roi / 2)
             if abs(off_x) > max_offset:
                 continue
-            achadas.append(
+            found.append(
                 Banner(
                     x=int(x), y=int(y), w=int(w), h=int(h),
                     height_frac=float(hf), offset_x=float(off_x),
                 )
             )
-    achadas.sort(key=lambda b: b.y)
-    return achadas
+    found.sort(key=lambda b: b.y)
+    return found
 
 
 def find_banner(
@@ -175,33 +175,33 @@ def find_banner(
     max_offset: float,
     min_fill: float,
 ) -> Banner | None:
-    """A maior faixa do recorte, ou None. Conveniência sobre `find_banners`."""
-    achadas = find_banners(
+    """The largest banner in the crop, or None. Convenience over `find_banners`."""
+    found = find_banners(
         bgr, ranges,
         height_range=height_range, width_range=width_range,
         min_aspect=min_aspect, max_offset=max_offset, min_fill=min_fill,
     )
-    return max(achadas, key=lambda b: b.w * b.h, default=None)
+    return max(found, key=lambda b: b.w * b.h, default=None)
 
 
 @dataclass(slots=True)
 class Blob:
-    """Um candidato a ícone da HUD dentro da ROI."""
+    """A candidate HUD icon inside the ROI."""
 
     area_frac: float
-    offset_x: float  # -1..1 em relação ao centro da ROI
+    offset_x: float  # -1..1 relative to the ROI centre
     offset_y: float
     aspect: float
-    #: fração da área do blob que são buracos internos (as órbitas da caveira);
-    #: 0 numa mancha sólida
+    #: fraction of the blob's area that is internal holes (the skull's eye
+    #: sockets); 0 on a solid patch
     hole_ratio: float
 
 
 def _hole_ratio(component: np.ndarray) -> float:
-    """Quanto do blob, já preenchido, era buraco interno.
+    """How much of the blob, once filled, was an internal hole.
 
-    Preenche a partir de fora com flood fill: o que sobrar preenchido e não
-    estava no blob original é buraco.
+    Fills from the outside with a flood fill: whatever ends up filled and was
+    not in the original blob is a hole.
     """
     padded = cv2.copyMakeBorder(component, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
     flooded = padded.copy()
@@ -222,22 +222,22 @@ def find_icon(
     max_offset: float,
     aspect_range: tuple[float, float],
 ) -> Blob | None:
-    """Procura um *ícone* da HUD centrado na ROI.
+    """Looks for a HUD *icon* centred in the ROI.
 
-    Medir só "quanto da região está vermelha" não funciona em partida real: o
-    cenário do jogo, os contornos de inimigos e o indicador direcional de dano
-    pintam a mesma faixa de cor o tempo todo. Um ícone de HUD se distingue por
-    três coisas, e nenhuma delas é a cor:
+    Measuring only "how much of the region is red" does not work on a real
+    match: the game scenery, enemy outlines and the directional damage
+    indicator paint the same colour range all the time. A HUD icon is
+    distinguished by three things, and none of them is colour:
 
-    * é um blob **compacto e de proporção quase quadrada** -- o indicador de
-      dano é um arco largo e achatado;
+    * it is a **compact blob with a near-square aspect** -- the damage
+      indicator is a wide, flattened arc;
     * nasce **centrado na mira** -- o indicador de dano fica num raio acima dela;
-    * tem um **tamanho característico**. Este último era o filtro que faltava:
-      com o mínimo em 0.4% da região, qualquer respingo vermelho de 20 pixels
-      passava, e era isso que fazia "todo vermelho virar eliminação". A caveira
+    * it has a **characteristic size**. That last one was the missing filter:
+      with the minimum at 0.4% of the region, any 20-pixel red splash got
+      through, and that is what made "all red become a kill". The skull
       ocupa de 5% a 14% da ROI; respingos ficam abaixo de 2.5%.
 
-    Devolve None quando nada na ROI se parece com um ícone.
+    Returns None when nothing in the ROI looks like an icon.
     """
     mask = color_mask(bgr, ranges)
     if not mask.any():
@@ -276,7 +276,7 @@ def find_icon(
 
 
 def border_mask(shape: tuple[int, int], frac: float) -> np.ndarray:
-    """Máscara booleana da moldura externa (a vinheta de vida baixa fica ali)."""
+    """Boolean mask of the outer frame (the low-health vignette lives there)."""
     h, w = shape
     m = np.zeros((h, w), dtype=bool)
     bh = max(1, int(h * frac))
@@ -302,7 +302,7 @@ def hsv_ratio_masked(bgr: np.ndarray, ranges: Sequence[dict], mask: np.ndarray) 
 
 
 class TemplateBank:
-    """Coleção de templates em escala de cinza carregada de um diretório."""
+    """A collection of greyscale templates loaded from a directory."""
 
     def __init__(self, templates: dict[str, np.ndarray]):
         self.templates = templates
@@ -363,7 +363,7 @@ class TemplateBank:
         return best_name, best_score
 
 
-# ─────────────────────── detecção de pulsos numa série ──────────────────────
+# ------------------- pulse detection over a time series --------------------
 
 
 @dataclass(slots=True)
@@ -387,7 +387,7 @@ def find_pulses(
     min_gap: float = 0.0,
 ) -> list[Pulse]:
     """Histerese de Schmitt: sobe acima de ``rise``, só termina abaixo de
-    ``fall``. Isso evita contar um ícone piscando como várias ocorrências."""
+    ``fall``. That avoids counting a flickering icon as several occurrences."""
     pulses: list[Pulse] = []
     active = False
     start = 0.0
@@ -415,3 +415,150 @@ def find_pulses(
         else:
             merged.append(p)
     return merged
+
+
+# --------------------- glyphs: the mark inside an icon ---------------------
+#
+# O casamento de template de `TemplateBank` desliza o molde pela imagem em
+# several scales. It works when you do not know *where* the icon is -- but
+# when you do (the ultimate button, the killfeed box), it is expensive and
+# fragile: the game icon shows up sometimes black on a white disc, sometimes
+# white on a dark box, at sizes that change with the recording's resolution.
+#
+# Para esse caso vale mais recortar a **marca** — os pixels que formam o
+# drawing, without background -- fit it into a square and always compare at
+# the same size. Position, scale and polarity then stop mattering, and the
+# comparison becomes an inner product: the whole bank fits in one matrix.
+
+#: lado do glifo normalizado, em pixels. 56 separa bem as ~270 habilidades do
+#: jogo e ainda deixa o banco inteiro numa matriz de poucos megabytes.
+GLYPH_SIDE = 56
+
+
+def normalized_glyph(mask: np.ndarray) -> np.ndarray | None:
+    """Crops the mark out of a binary mask, centres it and normalises its size.
+
+    The square is built from the **longest** side of the crop, so the drawing's
+    aspect is preserved: a tall, narrow icon does not become a wide, short one.
+    Returns None when there is not enough mark to compare.
+
+    The mark is taken **whole**, fragments and all. Discarding small pieces
+    looks like cheap cleanup -- it would deal with three pixels of a
+    neighbouring element that fall into the window -- but half the game's icons
+    are made of loose parts (dots, sparks, separate arrows), and cutting them
+    changes the box from one frame to the next: on a real recording that turned
+    one kill into four. Making sure only the mark enters the window is the job
+    of whoever crops it.
+    """
+    if mask.dtype != np.uint8:
+        mask = mask.astype(np.uint8)
+    if int(np.count_nonzero(mask)) < 20:
+        return None
+    ys, xs = np.nonzero(mask)
+    crop = (mask[ys.min(): ys.max() + 1, xs.min(): xs.max() + 1] > 0).astype(np.uint8)
+    side = max(crop.shape)
+    square = np.zeros((side, side), dtype=np.uint8)
+    oy, ox = (side - crop.shape[0]) // 2, (side - crop.shape[1]) // 2
+    square[oy: oy + crop.shape[0], ox: ox + crop.shape[1]] = crop * 255
+    return cv2.resize(square, (GLYPH_SIDE, GLYPH_SIDE), interpolation=cv2.INTER_AREA)
+
+
+def glyph_on_dark(bgr: np.ndarray, *, max_sat: int = 90, min_val: int = 170) -> np.ndarray | None:
+    """The bright mark of an icon drawn over a dark background.
+
+    É assim que o killfeed mostra a habilidade que matou: desenho branco numa
+    caixinha cinza.
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    return normalized_glyph((hsv[:, :, 1] < max_sat) & (hsv[:, :, 2] > min_val))
+
+
+def glyph_in_disc(
+    bgr: np.ndarray,
+    *,
+    min_disc_frac: float = 0.20,
+    max_dark: int = 130,
+    max_sat: int = 70,
+    min_val: int = 185,
+) -> np.ndarray | None:
+    """A marca escura desenhada dentro de um disco branco.
+
+    It is the shape the game uses for *ultimates*: in the footer button and in
+    the killfeed box, an ultimate comes as a white disc with the drawing in
+    black.
+
+    The disc is found first so its rim does not enter the mark -- and whatever
+    falls outside the circle is erased, otherwise the disc's own outline would
+    become part of the drawing.
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    white = ((hsv[:, :, 1] < max_sat) & (hsv[:, :, 2] > min_val)).astype(np.uint8)
+    if white.mean() < min_disc_frac:
+        return None
+    white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    count, _labels, stats, _cent = cv2.connectedComponentsWithStats(white, 8)
+    if count < 2:
+        return None
+    k = 1 + int(np.argmax(stats[1:, 4]))
+    x, y, w, h = (int(v) for v in stats[k, :4])
+    if min(w, h) < 8:
+        return None
+    gray = cv2.cvtColor(bgr[y: y + h, x: x + w], cv2.COLOR_BGR2GRAY)
+    yy, xx = np.mgrid[0:h, 0:w]
+    r = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2)
+    return normalized_glyph((gray < max_dark) & (r < 0.88))
+
+
+class IconBank:
+    """Ícones de habilidade do jogo, prontos para comparar com um glifo.
+
+    Each file is a black mark on a white background, and its name -- hero
+    folder plus ability name -- becomes the event's label. The templates sit in
+    a matrix already centred and normalised, so comparing a glyph with the bank
+    is **one** matrix-vector product, not 270 template matches.
+    """
+
+    def __init__(self, keys: list[str], matrix: np.ndarray):
+        self.keys = keys
+        self.matrix = matrix
+
+    def __bool__(self) -> bool:
+        return bool(self.keys)
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    @staticmethod
+    def _vector(glyph: np.ndarray) -> np.ndarray:
+        v = glyph.astype(np.float32).ravel()
+        v -= v.mean()
+        norm = float(np.linalg.norm(v))
+        return v / norm if norm else v
+
+    @classmethod
+    def from_dir(cls, path: Path) -> "IconBank":
+        """Reads `<path>/<hero>/<ability>.png`. A missing folder gives an empty bank."""
+        path = Path(path)
+        keys: list[str] = []
+        vectors: list[np.ndarray] = []
+        if path.exists():
+            for f in sorted(path.rglob("*.png")):
+                img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    log.warning("ícone ilegível, ignorando: %s", f)
+                    continue
+                glyph = normalized_glyph(img < 128)
+                if glyph is None:
+                    log.warning("ícone sem marca legível, ignorando: %s", f)
+                    continue
+                keys.append(f"{f.parent.name}/{f.stem}")
+                vectors.append(cls._vector(glyph))
+        return cls(keys, np.stack(vectors) if vectors else np.zeros((0, GLYPH_SIDE ** 2), np.float32))
+
+    def best_match(self, glyph: np.ndarray) -> tuple[str | None, float]:
+        """Best (key, correlation) in the bank for this glyph. -1..1."""
+        if not self.keys:
+            return None, 0.0
+        scores = self.matrix @ self._vector(glyph)
+        k = int(np.argmax(scores))
+        return self.keys[k], float(scores[k])

@@ -1,7 +1,8 @@
-"""API do sistema: upload, acompanhamento e entrega dos videos.
+"""The system's API: upload, progress tracking and video delivery.
 
-E o unico servico exposto ao mundo. Ele nao processa nada -- grava o arquivo,
-cria o job e publica no barramento; o resto acontece nos workers.
+It is the only service exposed to the world. It processes nothing -- it stores
+the file, creates the job and publishes on the bus; the rest happens in the
+workers.
 """
 
 from __future__ import annotations
@@ -29,11 +30,9 @@ from owcore.db import init_db, session
 from owcore.models import (
     STREAM_JOBS,
     STREAM_MEDIA,
-    STREAM_RENDER,
+    STREAM_RENDER_READY,
     STREAM_THUMBS,
     Clip,
-    ClipOptions,
-    HighlightKind,
     Job,
     JobCreated,
     JobParams,
@@ -45,12 +44,10 @@ from owcore.models import (
     MontageDraft,
     MontageVersion,
     Preset,
-    Proposal,
     Render,
     RenderRequested,
-    Receita,
+    Recipe,
     RenderStatus,
-    Selection,
     ThumbsRequested,
     Timeline,
     TrackStatus,
@@ -61,22 +58,13 @@ from owcore.models import (
 from owcore.ffmpeg import probe
 from owcore.storage import get_storage
 
-#: propostas cujo video e montado em cortes -- so nelas a musica faz sentido.
-#: Um trecho corrido da partida sai sempre com o audio original.
-MONTAGE_KINDS = {
-    HighlightKind.BEAT_MONTAGE,
-    HighlightKind.ULT_MONTAGE,
-    HighlightKind.SLEEP_MONTAGE,
-    HighlightKind.STUN_MONTAGE,
-}
-
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 CHUNK = 1024 * 256
 
-#: A gravacao original tambem e servida ao app: e ela que o preview da tela de
-#: montagem mostra, buscando o instante de cada bloco.
+#: The original recording is served to the app too: it is what the editing
+#: screen's preview shows, seeking to each block's instant.
 VIDEO_MIME = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
@@ -88,8 +76,9 @@ VIDEO_MIME = {
     ".ts": "video/mp2t",
 }
 
-#: O player do app pede a musica por HTTP; sem o tipo certo alguns navegadores
-#: se recusam a tocar (e sem tocar nao ha como posicionar corte nenhum).
+#: The app's player asks for the music over HTTP; without the right type some
+#: browsers refuse to play it (and without playing there is no way to place a
+#: cut).
 IMAGE_MIME = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -140,26 +129,54 @@ def _safe_suffix(filename: str | None, allowed: set[str], default: str) -> str:
     return ext if ext in allowed else default
 
 
-def _lista_json(bruto: Any, campo: str) -> list:
-    """Le um campo multipart que carrega uma lista JSON em texto."""
-    if bruto is None or bruto == "":
+def _store_upload(key: str, upload: UploadFile, expected_bytes: int) -> str:
+    """Grava o upload conferindo se ele chegou inteiro.
+
+    Um upload truncado nao se parece com erro nenhum: o multipart fecha
+    direito, o `Content-Length` bate com o que de fato chegou, e o que sobra e
+    meia gravacao guardada como se estivesse inteira. O estrago so aparecia
+    fases depois, no preprocessador, como um `ffprobe saiu com 1` -- longe da
+    tela de envio e sem dizer o que fazer.
+
+    Conferir aqui custa um `stat` e devolve o problema onde ele nasceu, com a
+    unica acao que resolve: enviar de novo.
+
+    `expected_bytes` zero desliga a conferencia -- e um cliente antigo, que
+    nao manda o tamanho.
+    """
+    storage = get_storage()
+    stored = storage.put_stream(key, upload.file)
+    got = storage.size(stored)
+    if expected_bytes and got != expected_bytes:
+        storage.delete(stored)
+        raise HTTPException(
+            400,
+            f"o arquivo chegou incompleto: {got} de {expected_bytes} bytes. "
+            "Envie de novo.",
+        )
+    return stored
+
+
+def _json_list(raw: Any, field: str) -> list:
+    """Reads a multipart field carrying a JSON list as text."""
+    if raw is None or raw == "":
         return []
-    if not isinstance(bruto, str):
-        raise HTTPException(422, f"'{campo}' tem de ser um JSON em texto")
+    if not isinstance(raw, str):
+        raise HTTPException(422, f"'{field}' tem de ser um JSON em texto")
     try:
-        valor = json.loads(bruto)
+        valor = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise HTTPException(422, f"'{campo}' nao e JSON valido: {exc}") from exc
+        raise HTTPException(422, f"'{field}' nao e JSON valido: {exc}") from exc
     if not isinstance(valor, list):
-        raise HTTPException(422, f"'{campo}' tem de ser uma lista")
+        raise HTTPException(422, f"'{field}' tem de ser uma lista")
     return valor
 
 
 def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
-    tem_cortes = any(
+    has_cuts = any(
         (c.meta or {}).get("segments_zip_key") for c in job.clips
     )
-    sem_video = sum(1 for c in job.clips if not c.key)
+    without_video = sum(1 for c in job.clips if not c.key)
     data = {
         "id": job.id,
         "status": job.status,
@@ -168,39 +185,34 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         "error": job.error,
         "video_name": job.video_name,
         "duration_s": round(job.duration_s, 2),
-        # `or 0` porque uma partida analisada antes desta coluna existir a le
-        # como NULL ate o backfill passar por ela
+        # `or 0` because a match analysed before this column existed reads it
+        # as NULL until the backfill passes over it
         "fps": round(job.fps or 0.0, 3),
         "width": job.width or 0,
         "height": job.height or 0,
         "params": job.params,
-        "created_at": job.created_at.isoformat(),
-        "updated_at": job.updated_at.isoformat(),
-        "n_proposals": len(job.proposals),
+        "created_at": _iso(job.created_at),
+        "updated_at": _iso(job.updated_at),
         "n_renders": len(job.renders),
-        # a listagem nao traz os pedidos inteiros, mas o app precisa saber se
-        # vale continuar consultando
+        # the listing does not carry the whole requests, but the app needs to
+        # know whether it is worth going on polling
         "has_active_render": any(
             r.status in (RenderStatus.PENDING, RenderStatus.RENDERING)
             for r in job.renders
         ),
         "n_clips": len(job.clips),
-        # a gravacao em si: o preview da montagem busca dentro dela
+        # a gravacao em si: o preview da montage busca dentro dela
         "video_url": f"/api/jobs/{job.id}/video",
-        # a copia reduzida, quando existir. Jobs analisados antes dela virem ao
-        # mundo respondem `null`, e o app cai na gravacao original
+        # the reduced copy, when it exists. Jobs analysed before it came into
+        # the world answer `null`, and the app falls back to the recording
         "proxy_url": f"/api/jobs/{job.id}/proxy" if job.proxy_key else None,
-        # o pacote da partida inteira: nao exige abrir video nenhum
+        # the whole match's package: it requires opening no video at all
         "zip_url": f"/api/jobs/{job.id}/cortes.zip" if job.clips else None,
-        "has_cuts": tem_cortes,
-        #: clipes em que a montagem falhou mas os cortes sobreviveram
-        "clips_only_cuts": sem_video,
+        "has_cuts": has_cuts,
+        #: clips whose assembly failed but whose cuts survived
+        "clips_only_cuts": without_video,
     }
     if full:
-        data["proposals"] = [
-            _proposal_dict(p)
-            for p in sorted(job.proposals, key=lambda p: (-p.score, p.start_s))
-        ]
         data["renders"] = [
             _render_dict(r, job.clips)
             for r in sorted(job.renders, key=lambda r: r.created_at, reverse=True)
@@ -224,43 +236,24 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
             for r in job.reports
         ]
         data["clips"] = [_clip_dict(c) for c in sorted(job.clips, key=lambda c: -c.score)]
-        biblioteca = sorted(job.media, key=lambda m: m.created_at)
-        data["media"] = [_media_dict(m) for m in biblioteca]
-        # `tracks` continua sendo so as musicas: e o que o seletor de trilha usa
-        data["tracks"] = [_media_dict(m) for m in biblioteca if m.is_audio]
-        # as montagens voltam com o job: e assim que a tela se reconstroi
-        # depois de um F5, e e a lista que o seletor mostra
-        montagens = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
-        data["montages"] = [_montagem_dict(m, full=True) for m in montagens]
-        # `draft` continua sendo a mais recente, para um app anterior a Fase 8
-        data["draft"] = (montagens[0].data if montagens else job.draft) or {}
-        # a onda do audio da partida, para a regua do editor. So no detalhe: sao
-        # alguns milhares de numeros, e a listagem nao tem o que fazer com eles
+        library = sorted(job.media, key=lambda m: m.created_at)
+        data["media"] = [_media_dict(m) for m in library]
+        # `tracks` is still only the music: it is what the track picker uses
+        data["tracks"] = [_media_dict(m) for m in library if m.is_audio]
+        # the montages come back with the job: that is how the screen rebuilds
+        # itself after an F5, and it is the list the picker shows
+        montages = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
+        data["montages"] = [_montage_dict(m, full=True) for m in montages]
+        # `draft` is still the most recent one, for an app older than Phase 8
+        data["draft"] = (montages[0].data if montages else job.draft) or {}
+        # the match audio's waveform, for the editor's ruler. Detail view only:
+        # it is a few thousand numbers, and the listing has no use for them
         data["waveform"] = job.waveform or []
     return data
 
 
-def _proposal_dict(p: Proposal) -> dict[str, Any]:
-    """Um video que o sistema *pode* gerar. `accepts_music` diz se faz sentido
-    oferecer uma trilha: montagens sao cortadas no ritmo, trechos corridos saem
-    com o audio da partida."""
-    return {
-        "id": p.id,
-        "job_id": p.job_id,
-        "kind": p.kind,
-        "title": p.title,
-        "start_s": round(p.start_s, 2),
-        "end_s": round(p.end_s, 2),
-        "score": round(p.score, 2),
-        "n_moments": len(p.moments or []),
-        "moments": [round(float(t), 2) for t in (p.moments or [])],
-        "accepts_music": p.kind in MONTAGE_KINDS,
-        "meta": p.meta,
-    }
-
-
-def _render_dict(r: Render, todos_clipes: list[Clip]) -> dict[str, Any]:
-    clipes = [c for c in todos_clipes if c.render_id == r.id]
+def _render_dict(r: Render, all_clips: list[Clip]) -> dict[str, Any]:
+    clips_of_render = [c for c in all_clips if c.render_id == r.id]
     return {
         "id": r.id,
         "job_id": r.job_id,
@@ -268,16 +261,8 @@ def _render_dict(r: Render, todos_clipes: list[Clip]) -> dict[str, Any]:
         "stage": r.stage,
         "progress": round(r.progress, 3),
         "error": r.error,
-        "created_at": r.created_at.isoformat(),
-        "updated_at": r.updated_at.isoformat(),
-        "selections": [
-            {
-                "proposal_id": sel.get("proposal_id"),
-                "music_name": sel.get("music_name"),
-                "options": sel.get("options", {}),
-            }
-            for sel in (r.selections or [])
-        ],
+        "created_at": _iso(r.created_at),
+        "updated_at": _iso(r.updated_at),
         "timelines": [
             {
                 "title": tl.get("title") or "",
@@ -290,7 +275,7 @@ def _render_dict(r: Render, todos_clipes: list[Clip]) -> dict[str, Any]:
             }
             for tl in (r.timelines or [])
         ],
-        "clips": [_clip_dict(c) for c in sorted(clipes, key=lambda c: -c.score)],
+        "clips": [_clip_dict(c) for c in sorted(clips_of_render, key=lambda c: -c.score)],
     }
 
 
@@ -299,14 +284,13 @@ def _clip_dict(c: Clip) -> dict[str, Any]:
         "id": c.id,
         "job_id": c.job_id,
         "render_id": c.render_id,
-        "proposal_id": c.proposal_id,
         "kind": c.kind,
         "title": c.title,
         "start_s": round(c.start_s, 2),
         "end_s": round(c.end_s, 2),
         "score": round(c.score, 2),
         "meta": c.meta,
-        # sem chave: a montagem falhou e so os cortes existem
+        # no key: the assembly failed and only the cuts exist
         "video_url": f"/api/clips/{c.id}/video" if c.key else None,
         "thumb_url": f"/api/clips/{c.id}/thumb" if c.meta.get("thumb_key") else None,
         "segments_zip_url": (
@@ -321,10 +305,10 @@ _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 
 
 def _serve_blob(key: str, request: Request, media_type: str) -> Response:
-    """Entrega um blob com suporte a Range, para o player poder buscar."""
+    """Serves a blob with Range support, so the player can seek."""
     storage = get_storage()
     if not storage.exists(key):
-        raise HTTPException(404, "arquivo nao encontrado")
+        raise HTTPException(404, "upload nao encontrado")
     total = storage.size(key)
 
     range_header = request.headers.get("range")
@@ -386,6 +370,7 @@ def health() -> dict[str, Any]:
 def create_job(
     video: UploadFile = File(..., description="gravacao da partida"),
     params: str = Form("{}", description="JobParams em JSON"),
+    size: int = Form(0, description="tamanho do arquivo, para conferir o envio"),
 ) -> dict[str, Any]:
     """Primeira fase: so a gravacao.
 
@@ -399,10 +384,9 @@ def create_job(
         raise HTTPException(422, f"parametros invalidos: {exc}") from exc
 
     job_id = new_id()
-    storage = get_storage()
 
     video_ext = _safe_suffix(video.filename, VIDEO_EXTS, ".mp4")
-    video_key = storage.put_stream(f"{job_id}/source{video_ext}", video.file)
+    video_key = _store_upload(f"{job_id}/source{video_ext}", video, size)
 
     with session() as s:
         job = Job(
@@ -421,30 +405,23 @@ def create_job(
 
 @app.post("/api/jobs/{job_id}/renders", status_code=201)
 async def create_render(job_id: str, request: Request) -> dict[str, Any]:
-    """Segunda fase: gerar os videos escolhidos.
+    """Segunda fase: gerar os videos que o usuario montou.
 
-    Recebe um multipart com o campo `selections` (JSON) e, opcionalmente, um
-    arquivo de musica por escolha, no campo `music_<proposal_id>` -- e assim que
-    cada video ganha a sua trilha. Escolha sem musica vira video com o **audio
-    original** da partida.
+    Recebe um multipart com o field `timelines` (JSON): cada montage com os
+    seus blocos ja posicionados e, se tiver trilha, apontando para uma musica
+    ja enviada a este job pela library.
 
-    O campo `timelines` (JSON) traz os videos que o usuario montou a mao: cada
-    um com os seus blocos ja posicionados e, se quiser trilha, o `track_id` de
-    uma musica ja enviada a este job. Os dois campos convivem no mesmo pedido --
-    da para gerar uma proposta pronta e uma montagem manual de uma vez.
+    Ja houve um segundo field, `selections`, com as propostas que o sistema
+    oferecia prontas. Nao ha mais propostas: o que vira video sai do editor.
 
-    Pode ser chamado quantas vezes se quiser sobre o mesmo job: as propostas
-    continuam la, e usar um momento num video nao o consome para os outros.
+    Pode ser chamado quantas vezes se quiser sobre o mesmo job -- usar um
+    momento num video nao o consome para os outros.
     """
     form = await request.form()
-    cru = _lista_json(form.get("selections"), "selections")
-    cru_timelines = _lista_json(form.get("timelines"), "timelines")
-    if not cru and not cru_timelines:
-        raise HTTPException(
-            422, "escolha pelo menos um video ou monte uma linha do tempo"
-        )
+    raw_timelines = _json_list(form.get("timelines"), "timelines")
+    if not raw_timelines:
+        raise HTTPException(422, "monte pelo menos uma linha do tempo")
 
-    storage = get_storage()
     render_id = new_id()
 
     with session() as s:
@@ -455,71 +432,35 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
             raise HTTPException(
                 409, f"a analise deste job ainda nao terminou (status: {job.status})"
             )
-        validos = {p.id: p for p in job.proposals}
-        # a montagem aponta para uma musica; a biblioteca guarda mais que isso
-        musicas = {m.id: m.status for m in job.media if m.is_audio}
-        biblioteca = {m.id for m in job.media}
+        # a montage points at music; the library holds more than that
+        music_ids = {m.id: m.status for m in job.media if m.is_audio}
+        library = {m.id for m in job.media}
 
-    escolhas: list[Selection] = []
-    vistos: set[str] = set()
-    for item in cru:
-        if not isinstance(item, dict):
-            raise HTTPException(422, "cada escolha tem de ser um objeto")
-        pid = str(item.get("proposal_id") or "")
-        if pid not in validos:
-            raise HTTPException(422, f"proposta desconhecida: {pid!r}")
-        if pid in vistos:
-            raise HTTPException(422, f"proposta escolhida duas vezes: {pid!r}")
-        vistos.add(pid)
-        try:
-            opcoes = ClipOptions(**(item.get("options") or {}))
-        except ValidationError as exc:
-            raise HTTPException(422, f"opcoes invalidas em {pid}: {exc}") from exc
-        escolhas.append(Selection(proposal_id=pid, options=opcoes))
-
-    # a musica vem num campo por escolha; guarda-se uma copia por pedido para
-    # que apagar um pedido nao leve embora a trilha de outro
-    for sel in escolhas:
-        arquivo = form.get(f"music_{sel.proposal_id}")
-        if arquivo is None or not getattr(arquivo, "filename", ""):
-            continue
-        if validos[sel.proposal_id].kind not in MONTAGE_KINDS:
-            raise HTTPException(
-                422,
-                f"a proposta {sel.proposal_id} e um trecho corrido da partida e "
-                "sai com o audio original; ela nao aceita trilha",
-            )
-        ext = _safe_suffix(arquivo.filename, AUDIO_EXTS, ".mp3")
-        sel.music_key = storage.put_stream(
-            f"{job_id}/music/{render_id}_{sel.proposal_id}{ext}", arquivo.file
-        )
-        sel.music_name = arquivo.filename
-
-    montagens: list[Timeline] = []
-    for item in cru_timelines:
+    montages: list[Timeline] = []
+    for item in raw_timelines:
         if not isinstance(item, dict):
             raise HTTPException(422, "cada linha do tempo tem de ser um objeto")
         try:
             spec = Timeline(**item)
         except ValidationError as exc:
             raise HTTPException(422, f"linha do tempo invalida: {exc}") from exc
-        # um clipe que aponta para midia de outro job nao entra: a montagem
-        # sairia sem ele, e sem aviso
+        # a clip pointing at another job's media does not go in: the montage
+        # would come out without it, and with no warning
         for clip in spec.clips:
-            if clip.media_id and clip.media_id not in biblioteca:
+            if clip.media_id and clip.media_id not in library:
                 raise HTTPException(
                     422,
                     f"midia desconhecida neste job: {clip.media_id!r}",
                 )
-        _conferir_as_camadas(spec, musicas)
-        # a marca d'agua vem da mesma biblioteca, e recusa-la aqui e melhor do
-        # que deixar a renderizacao inteira falhar la na frente por causa dela
-        if spec.export.watermark_id and spec.export.watermark_id not in biblioteca:
+        _check_layers(spec, music_ids)
+        # the watermark comes from the same library, and refusing it here is
+        # better than letting the whole render fail later because of it
+        if spec.export.watermark_id and spec.export.watermark_id not in library:
             raise HTTPException(
                 422,
                 f"marca desconhecida neste job: {spec.export.watermark_id!r}",
             )
-        montagens.append(spec)
+        montages.append(spec)
 
     with session() as s:
         s.add(
@@ -528,12 +469,15 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                 job_id=job_id,
                 status=RenderStatus.PENDING,
                 stage="na fila",
-                selections=[sel.model_dump() for sel in escolhas],
-                timelines=[m.model_dump() for m in montagens],
+                timelines=[m.model_dump() for m in montages],
             )
         )
 
-    get_bus().publish(STREAM_RENDER, RenderRequested(render_id=render_id).model_dump())
+    # straight to the editor: there is no rhythm stage in between any more.
+    # This montage's music came up through the library, already analysed.
+    get_bus().publish(
+        STREAM_RENDER_READY, RenderRequested(render_id=render_id).model_dump()
+    )
     return {"id": render_id, "job_id": job_id, "status": RenderStatus.PENDING}
 
 
@@ -548,8 +492,8 @@ def get_render(render_id: str) -> dict[str, Any]:
 
 @app.delete("/api/renders/{render_id}", status_code=204)
 def delete_render(render_id: str) -> Response:
-    """Apaga um pedido e os videos dele. As propostas ficam: da para pedir de
-    novo, com outra musica."""
+    """Deletes a request and its videos. The montage stays saved: it can be
+    requested again, with different music."""
     with session() as s:
         pedido = s.get(Render, render_id)
         if pedido is None:
@@ -558,23 +502,23 @@ def delete_render(render_id: str) -> Response:
     return Response(status_code=204)
 
 
-# ── musicas do job: sobem antes de existir video ────────────────────────────
+# ── music_ids do job: sobem antes de existir video ────────────────────────────
 #
-# Na montagem manual a musica vem primeiro. Nao da para posicionar um corte
-# "na virada do refrao" sem ouvir o refrao, e nao da para grudar um corte na
-# batida sem saber onde as batidas estao. Entao ela sobe, o sistema ouve, e o
-# app recebe duracao, BPM, batidas e forma de onda para desenhar a regua.
+# In the montage the music comes first. You cannot place a cut "on the turn of
+# the chorus" without hearing the chorus, and you cannot snap a cut to the beat
+# without knowing where the beats are. So it is uploaded, the system listens,
+# and the app receives duration, BPM, beats and waveform to draw the ruler.
 #
-# A musica e do **job**, e nao de um pedido: a mesma trilha serve a quantas
-# montagens o usuario quiser fazer daquela partida, sem subir de novo.
+# The music belongs to the **job**, not to a request: the same track serves as
+# many montages of that match as the user wants, with no re-upload.
 
 
 def _media_dict(m: Media) -> dict[str, Any]:
-    """Um item da biblioteca de midia da partida.
+    """Um item da library de midia da partida.
 
     Audio vai completo -- batidas e forma de onda inclusive --, porque e com
-    isso que a tela de montagem desenha a musica e gruda os cortes na batida.
-    Video e imagem vao com dimensoes e os enderecos da miniatura e do proxy.
+    isso que a tela de montage desenha a musica e gruda os cortes na batida.
+    Video e imagem vao com dimensions e os enderecos da miniatura e do proxy.
     """
     dados = {
         "id": m.id,
@@ -587,14 +531,14 @@ def _media_dict(m: Media) -> dict[str, Any]:
         "file_url": f"/api/media/{m.id}/file",
         "thumb_url": f"/api/media/{m.id}/thumb" if m.thumb_key else None,
         "proxy_url": f"/api/media/{m.id}/proxy" if m.proxy_key else None,
-        "created_at": m.created_at.isoformat(),
+        "created_at": _iso(m.created_at),
     }
     if m.is_audio:
         dados |= {
             "bpm": round(m.bpm, 2),
             "beats": m.beats or [],
             "peaks": m.peaks or [],
-            # o app ainda pede a musica por aqui
+            # the app still asks for the music through here
             "audio_url": f"/api/media/{m.id}/file",
         }
     else:
@@ -602,16 +546,18 @@ def _media_dict(m: Media) -> dict[str, Any]:
     return dados
 
 
-def _guardar_media(job_id: str, arquivo: UploadFile, kind: MediaKind) -> str:
-    """Grava o arquivo e manda analisa-lo. Devolve o id."""
+def _guardar_media(
+    job_id: str, upload: UploadFile, kind: MediaKind, expected_bytes: int = 0
+) -> str:
+    """Grava o upload e manda analisa-lo. Devolve o id."""
     media_id = new_id()
-    padrao = {
+    defaults = {
         MediaKind.AUDIO: (AUDIO_EXTS, ".mp3"),
         MediaKind.VIDEO: (VIDEO_EXTS, ".mp4"),
         MediaKind.IMAGE: (IMAGE_EXTS, ".png"),
     }[kind]
-    ext = _safe_suffix(arquivo.filename, *padrao)
-    key = get_storage().put_stream(f"{job_id}/media/{media_id}{ext}", arquivo.file)
+    ext = _safe_suffix(upload.filename, *defaults)
+    key = _store_upload(f"{job_id}/media/{media_id}{ext}", upload, expected_bytes)
 
     with session() as s:
         s.add(
@@ -620,7 +566,7 @@ def _guardar_media(job_id: str, arquivo: UploadFile, kind: MediaKind) -> str:
                 job_id=job_id,
                 kind=kind,
                 status=TrackStatus.PENDING,
-                name=arquivo.filename or "arquivo",
+                name=upload.filename or "upload",
                 key=key,
             )
         )
@@ -629,10 +575,10 @@ def _guardar_media(job_id: str, arquivo: UploadFile, kind: MediaKind) -> str:
 
 
 def _tipo_de(filename: str | None) -> MediaKind | None:
-    """De que tipo e o arquivo, pela extensao.
+    """What kind the file is, from its extension.
 
     Pela extensao e nao pelo `content-type` porque o navegador mente com
-    frequencia -- manda `application/octet-stream` para tudo quando o arquivo
+    frequencia -- manda `application/octet-stream` para tudo quando o upload
     veio de um lugar que ele nao conhece.
     """
     ext = Path(filename or "").suffix.lower()
@@ -649,10 +595,11 @@ def _tipo_de(filename: str | None) -> MediaKind | None:
 def add_media(
     job_id: str,
     file: UploadFile = File(..., description="video, imagem ou audio"),
+    size: int = Form(0, description="tamanho do arquivo, para conferir o envio"),
 ) -> dict[str, Any]:
-    """Traz um arquivo para a biblioteca da partida.
+    """Brings a file into the match's library.
 
-    Responde na hora, com o item ainda `pending`: a analise (dimensoes,
+    Responde na hora, com o item ainda `pending`: a analise (dimensions,
     miniatura, proxy; batidas quando for audio) roda no worker, e o app
     acompanha por `GET /api/media/{id}`.
     """
@@ -667,7 +614,7 @@ def add_media(
             f"nao sei o que fazer com {file.filename!r}: aceito video, imagem "
             "e audio",
         )
-    media_id = _guardar_media(job_id, file, kind)
+    media_id = _guardar_media(job_id, file, kind, size)
     return {"id": media_id, "job_id": job_id, "kind": kind,
             "status": TrackStatus.PENDING}
 
@@ -683,8 +630,8 @@ def get_media(media_id: str) -> dict[str, Any]:
 
 @app.delete("/api/media/{media_id}", status_code=204)
 def delete_media(media_id: str) -> Response:
-    """Tira o item da biblioteca. Os videos ja gerados com ele ficam: o mp4
-    final ja tem o que precisava dentro."""
+    """Removes the item from the library. Videos already generated with it
+    stay: the final mp4 already has what it needed inside."""
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
@@ -695,7 +642,7 @@ def delete_media(media_id: str) -> Response:
 
 @app.get("/api/media/{media_id}/file")
 def media_file(media_id: str, request: Request) -> Response:
-    """O arquivo em si, com `Range`."""
+    """The file itself, with `Range`."""
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
@@ -728,7 +675,7 @@ def media_thumb(media_id: str, request: Request) -> Response:
 
 @app.get("/api/media/{media_id}/proxy")
 def media_proxy(media_id: str, request: Request) -> Response:
-    """A copia reduzida do video importado -- o que o monitor abre."""
+    """The reduced copy of the imported video -- what the monitor opens."""
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
@@ -739,7 +686,7 @@ def media_proxy(media_id: str, request: Request) -> Response:
     return _serve_blob(key, request, "video/mp4")
 
 
-# ── as rotas de musica, agora cascas sobre a biblioteca ─────────────────────
+# ── as rotas de musica, agora cascas sobre a library ─────────────────────
 #
 # Elas continuam existindo porque o app as usa e porque "a musica do job" e um
 # nome util. Por baixo e tudo `Media` de tipo audio.
@@ -749,12 +696,13 @@ def media_proxy(media_id: str, request: Request) -> Response:
 def add_track(
     job_id: str,
     audio: UploadFile = File(..., description="musica para montar em cima"),
+    size: int = Form(0, description="tamanho do arquivo, para conferir o envio"),
 ) -> dict[str, Any]:
-    """Envia uma musica e manda o sistema ouvi-la."""
+    """Uploads a track and has the system listen to it."""
     with session() as s:
         if s.get(Job, job_id) is None:
             raise HTTPException(404, "job nao encontrado")
-    media_id = _guardar_media(job_id, audio, MediaKind.AUDIO)
+    media_id = _guardar_media(job_id, audio, MediaKind.AUDIO, size)
     return {"id": media_id, "job_id": job_id, "status": TrackStatus.PENDING}
 
 
@@ -783,17 +731,32 @@ def list_jobs(limit: int = 50, offset: int = 0) -> dict[str, Any]:
         return {"jobs": [_job_dict(j) for j in jobs]}
 
 
+#: while the analysis is not finished, the preprocessor is still going to
+#: write the recording's fields -- there is nothing to patch up
+_ANALISANDO = frozenset(
+    {JobStatus.PENDING, JobStatus.PREPROCESSING, JobStatus.DETECTING}
+)
+
+
 def _remendar_o_tamanho(job: Job) -> None:
-    """Descobre o tamanho de uma gravacao analisada antes desta coluna existir.
+    """Finds the size of a recording analysed before this column existed.
 
     O reconciliador de esquema poe a coluna, mas nao tem como saber o que ela
-    deveria valer -- so o arquivo sabe. Uma partida antiga abriria o editor sem
+    deveria valer -- so o upload sabe. Uma partida antiga abriria o editor sem
     poder dizer se um 9:16 corta o quadro dela. Custa um `ffprobe`, uma vez na
-    vida de cada job. O ffmpeg le o arquivo onde ele esta -- por `Range`, se
+    vida de cada job. O ffmpeg le o upload onde ele esta -- por `Range`, se
     estiver no S3 --, entao medir uma gravacao de dois gigas custa o cabecalho
     dela, e nao os dois gigas.
+
+    Nao vale a pena enquanto a analise esta rodando, e por dois motivos. Um:
+    uma partida *sendo analisada agora* nao e uma partida antiga -- o
+    preprocessador vai gravar o tamanho de verdade em segundos. Dois: o
+    cabecalho e barato, mas le-lo pela rede enquanto o preprocessador baixa o
+    mesmo upload disputa a mesma banda, e a tela consulta de dois em dois
+    segundos. Medido: uma consulta que responde em 0,5s passou de 30s nessa
+    janela, o que a tela mostra como "nao consegui falar com o servidor".
     """
-    if job.width or not job.video_key:
+    if job.width or not job.video_key or job.status in _ANALISANDO:
         return
     try:
         info = probe(get_storage().url(job.video_key))
@@ -818,9 +781,9 @@ def get_job(job_id: str) -> dict[str, Any]:
 
 @app.get("/api/jobs/{job_id}/video")
 def job_video(job_id: str, request: Request) -> Response:
-    """A gravacao original, com `Range`.
+    """The original recording, with `Range`.
 
-    E o que o preview da tela de montagem toca: em vez de renderizar o video a
+    E o que o preview da tela de montage toca: em vez de renderizar o video a
     cada ajuste -- o que custaria uma volta inteira pelo ffmpeg por arrasto --,
     o app abre a propria gravacao e busca o instante do bloco sob a cabeca de
     leitura. O corte de verdade continua acontecendo no servidor; isto aqui e
@@ -837,14 +800,14 @@ def job_video(job_id: str, request: Request) -> Response:
 
 @app.put("/api/jobs/{job_id}/draft")
 def save_draft(job_id: str, draft: dict = Body(...)) -> dict[str, Any]:
-    """Guarda a montagem em andamento. **Legado da V1.**
+    """Guarda a montage em andamento. **Legado da V1.**
 
-    Desde a Fase 8 uma partida tem varias montagens nomeadas, e o app salva pelo
+    Desde a Fase 8 uma partida tem varias montages nomeadas, e o app salva pelo
     id de uma delas. Esta rota escreve na mais recente -- e cria a primeira, se
     nao houver nenhuma --, para que um app anterior continue funcionando em vez
     de perder o trabalho em silencio.
     """
-    rascunho = _validar_montagem(draft)
+    rascunho = _validate_montage(draft)
 
     with session() as s:
         job = s.get(Job, job_id)
@@ -861,7 +824,7 @@ def save_draft(job_id: str, draft: dict = Body(...)) -> dict[str, Any]:
 
 @app.delete("/api/jobs/{job_id}/draft", status_code=204)
 def delete_draft(job_id: str) -> Response:
-    """Joga as montagens desta partida fora e comeca do zero. **Legado da V1.**"""
+    """Joga as montages desta partida fora e comeca do zero. **Legado da V1.**"""
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
@@ -874,13 +837,13 @@ def delete_draft(job_id: str) -> Response:
 
 @app.get("/api/jobs/{job_id}/proxy")
 def job_proxy(job_id: str, request: Request) -> Response:
-    """A copia reduzida da gravacao, com `Range`.
+    """The reduced copy of the recording, with `Range`.
 
     E o que o monitor do editor abre. A gravacao original tem centenas de
     megabytes, e buscar dentro dela dezenas de vezes por segundo enquanto se
     arrasta chegou a derrubar o elemento de video do navegador. Esta copia sai
     da mesma decodificacao dos recortes -- custa quase nada -- e o corte final
-    continua vindo do arquivo original.
+    continua vindo do upload original.
     """
     with session() as s:
         job = s.get(Job, job_id)
@@ -896,7 +859,7 @@ def job_proxy(job_id: str, request: Request) -> Response:
 
 @app.get("/api/jobs/{job_id}/frame")
 def job_frame(job_id: str, t: float, request: Request) -> Response:
-    """Um quadro da partida no instante `t`, para a barra lateral do editor.
+    """A frame of the match at instant `t`, for the editor's sidebar.
 
     So entrega o que ja existe: quem extrai e o servico `thumbs`. Um 404 aqui
     quer dizer "ainda nao foi extraida", e o app mostra o lugar dela em vez de
@@ -913,7 +876,7 @@ def job_frame(job_id: str, t: float, request: Request) -> Response:
 
 @app.post("/api/jobs/{job_id}/frames", status_code=202)
 def request_frames(job_id: str) -> dict[str, Any]:
-    """Manda extrair as miniaturas que faltam.
+    """Requests extraction of the missing thumbnails.
 
     Jobs novos ja saem com elas -- o planejador pede assim que a analise
     termina. Isto aqui e para os antigos, e para o caso de alguma ter falhado:
@@ -964,10 +927,10 @@ def clip_thumb(clip_id: str, request: Request) -> Response:
 
 @app.get("/api/jobs/{job_id}/cortes.zip")
 def job_zip(job_id: str, request: Request) -> Response:
-    """Tudo o que a partida gerou, num arquivo so.
+    """Everything the match generated, in a single file.
 
     Montado na hora a partir do que ja esta no storage -- os videos finais e os
-    cortes avulsos de cada montagem --, em vez de guardar um terceiro pacote
+    cortes avulsos de cada montage --, em vez de guardar um terceiro package
     com os mesmos bytes. Como o zip so empacota (os mp4 ja estao comprimidos),
     o custo e basicamente o de copiar.
     """
@@ -978,60 +941,82 @@ def job_zip(job_id: str, request: Request) -> Response:
             raise HTTPException(404, "job nao encontrado")
         if not job.clips:
             raise HTTPException(404, "esta partida ainda nao tem videos")
-        nome_base = Path(job.video_name or "partida").stem
-        # um job rende varios pedidos ao longo do tempo; o pacote traz todos,
-        # cada um na sua pasta, para o mesmo tipo de video gerado duas vezes
-        # com musicas diferentes nao se sobrescrever
-        ordem = {r.id: n for n, r in enumerate(
+        base_name = Path(job.video_name or "partida").stem
+        # um job rende varios pedidos ao longo do tempo; o package traz todos,
+        # each in its own folder, so the same kind of video generated twice
+        # with different music does not overwrite itself
+        order = {r.id: n for n, r in enumerate(
             sorted(job.renders, key=lambda r: r.created_at), start=1
         )}
-        itens = [
-            (i, ordem.get(c.render_id, 0), c.kind, c.key,
+        items = [
+            (i, order.get(c.render_id, 0), c.kind, c.key,
              (c.meta or {}).get("segments_zip_key"))
             for i, c in enumerate(
-                sorted(job.clips, key=lambda c: (ordem.get(c.render_id, 0), -c.score)),
+                sorted(job.clips, key=lambda c: (order.get(c.render_id, 0), -c.score)),
                 start=1,
             )
         ]
 
     tmp = Path(tempfile.mkdtemp(prefix="owzip-"))
-    pacote = tmp / "pacote.zip"
+    package = tmp / "package.zip"
     try:
-        with zipfile.ZipFile(pacote, "w", zipfile.ZIP_STORED) as zf:
-            for i, n_pedido, kind, video_key, cortes_key in itens:
-                pasta = f"pedido_{n_pedido:02d}" if n_pedido else "videos"
+        with zipfile.ZipFile(package, "w", zipfile.ZIP_STORED) as zf:
+            for i, n_pedido, kind, video_key, cortes_key in items:
+                folder = f"pedido_{n_pedido:02d}" if n_pedido else "videos"
                 if video_key and storage.exists(video_key):
                     local = storage.get_file(video_key, tmp / f"v{i}.mp4")
-                    zf.write(local, f"{pasta}/videos/{i:02d}_{kind}.mp4")
+                    zf.write(local, f"{folder}/videos/{i:02d}_{kind}.mp4")
                     local.unlink(missing_ok=True)
                 if not cortes_key or not storage.exists(cortes_key):
                     continue
                 local = storage.get_file(cortes_key, tmp / f"c{i}.zip")
                 with zipfile.ZipFile(local) as origem:
-                    for nome in origem.namelist():
-                        zf.writestr(f"{pasta}/cortes/{i:02d}_{kind}/{nome}",
-                                    origem.read(nome))
+                    for info in origem.infolist():
+                        destino = f"{folder}/cortes/{i:02d}_{kind}/{info.filename}"
+                        # copia chunk a chunk: `origem.read(nome)` punha um
+                        # a whole cut in memory at a time
+                        with origem.open(info) as entrada,                                 zf.open(destino, "w") as saida:
+                            shutil.copyfileobj(entrada, saida, CHUNK)
                 local.unlink(missing_ok=True)
-
-        dados = pacote.read_bytes()
-    finally:
+        total = package.stat().st_size
+    except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
+        raise
 
-    return Response(
-        content=dados,
+    def send_chunks() -> Iterator[bytes]:
+        """Delivers the package in chunks and only then deletes the temp dir.
+
+        O `read_bytes()` que estava aqui punha o package **inteiro** na memoria
+        do gateway -- uma partida com alguns pedidos sao centenas de MB, por
+        requisicao simultanea, e o processo que serve a API e o mesmo que serve
+        o app. Streaming mantem o custo em um chunk de cada vez, e o upload
+        temporario ja estava em disco de qualquer forma.
+        """
+        try:
+            with open(package, "rb") as fh:
+                while True:
+                    chunk = fh.read(CHUNK)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    return StreamingResponse(
+        send_chunks(),
         media_type="application/zip",
         headers={
-            "content-disposition": f'attachment; filename="{nome_base}_cortes.zip"',
-            "content-length": str(len(dados)),
+            "content-disposition": f'attachment; filename="{base_name}_cortes.zip"',
+            "content-length": str(total),
         },
     )
 
 
 @app.get("/api/clips/{clip_id}/cortes.zip")
 def clip_segments_zip(clip_id: str, request: Request) -> Response:
-    """Os cortes individuais da montagem, num zip.
+    """Os cortes individuais da montage, num zip.
 
-    Serve para reeditar por fora: cada arquivo e um trecho, nomeado pelo
+    Serve para reeditar por fora: cada upload e um trecho, nomeado pelo
     instante de onde saiu na gravacao original.
     """
     with session() as s:
@@ -1049,37 +1034,48 @@ def clip_segments_zip(clip_id: str, request: Request) -> Response:
 
 @app.get("/api/profile")
 def profile() -> dict[str, Any]:
-    """Expoe o profile da HUD para a tela de calibracao do app."""
+    """Exposes the HUD profile for the app's calibration screen."""
     from owcore.profiles import load_profile
 
     return load_profile(get_settings().profile).data
 
 
-# ── montagens nomeadas ──────────────────────────────────────────────────────
+# ── montages nomeadas ──────────────────────────────────────────────────────
 
 
 def _hora(t: datetime | None) -> datetime:
-    """A hora de um registro, sempre com fuso.
+    """A record's timestamp, always with a timezone.
 
     O SQLite guarda `datetime` sem fuso, entao uma linha lida do banco volta
     ingenua enquanto uma criada nesta mesma requisicao ainda esta com o fuso que
     `utcnow()` deu. Ordenar as duas juntas estoura -- e e exatamente o que
-    acontece ao listar as montagens logo depois de criar uma.
+    acontece ao listar as montages logo depois de criar uma.
     """
     if t is None:
         return utcnow()
     return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
 
 
-def _montagem_dict(m: MontageModel, *, full: bool = False) -> dict[str, Any]:
+def _iso(t: datetime | None) -> str:
+    """The timestamp as text, **with the timezone written out**.
+
+    Sem o sufixo de fuso, quem le do outro lado trata a data como hora local --
+    e o Dart faz exatamente isso. Como o que sai daqui e UTC, o app mostrava
+    todo horario adiantado pelo fuso do usuario, e qualquer conta de "quanto
+    falta" a partir de `created_at` dava tempo negativo.
+    """
+    return _hora(t).isoformat()
+
+
+def _montage_dict(m: MontageModel, *, full: bool = False) -> dict[str, Any]:
     d: dict[str, Any] = {
         "id": m.id,
         "job_id": m.job_id,
         "name": m.name,
-        "created_at": m.created_at.isoformat(),
-        "updated_at": m.updated_at.isoformat(),
+        "created_at": _iso(m.created_at),
+        "updated_at": _iso(m.updated_at),
         "n_versions": len(m.versions),
-        **m.resumo,
+        **m.summary,
     }
     if full:
         d["data"] = m.data or {}
@@ -1087,7 +1083,7 @@ def _montagem_dict(m: MontageModel, *, full: bool = False) -> dict[str, Any]:
 
 
 def _adotar_o_rascunho_antigo(s: Any, job: Job) -> None:
-    """Traz a montagem unica do job para a lista de montagens nomeadas.
+    """Brings the job's single montage into the list of named montages.
 
     Ate a Fase 8 havia uma so, numa coluna do proprio job. Fazer isto na
     leitura, e nao numa migracao de banco, e a mesma escolha do resto do
@@ -1096,18 +1092,18 @@ def _adotar_o_rascunho_antigo(s: Any, job: Job) -> None:
     """
     if not job.draft or job.montages:
         return
-    # pela relacao, e nao por `s.add`: assim `job.montages` ja a enxerga nesta
-    # mesma requisicao, que e onde ela precisa aparecer
+    # through the relationship, not through `s.add`: that way `job.montages`
+    # already sees it within this same request, which is where it must appear
     job.montages.append(
         MontageModel(name=job.draft.get("title") or "Montagem 1", data=job.draft)
     )
-    # a coluna some para nao haver duas verdades sobre a mesma montagem
+    # the column is cleared so there are not two truths about the same montage
     job.draft = {}
     s.flush()
 
 
 def _nome_livre(existentes: Sequence[Any], base: str) -> str:
-    """Um nome que ainda nao esta na lista.
+    """A name that is not on the list yet.
 
     Nomes repetidos numa lista de escolher e o mesmo que nome nenhum.
     """
@@ -1121,15 +1117,15 @@ def _nome_livre(existentes: Sequence[Any], base: str) -> str:
     return f"{base} {new_id()[:4]}"
 
 
-def _pegar_montagem(s: Any, job_id: str, montage_id: str) -> MontageModel:
+def _get_montage(s: Any, job_id: str, montage_id: str) -> MontageModel:
     m = s.get(MontageModel, montage_id)
     if m is None or m.job_id != job_id:
         raise HTTPException(404, "montagem nao encontrada nesta partida")
     return m
 
 
-def _conferir_as_camadas(spec: Any, sons: dict[str, str]) -> None:
-    """Uma camada desenha ou toca -- e o conteudo tem de ser do tipo dela.
+def _check_layers(spec: Any, sounds: dict[str, str]) -> None:
+    """A layer either draws or plays -- and its content must match its kind.
 
     Uma musica numa camada de video faria o ffmpeg tentar redimensionar um fluxo
     de audio, e o render inteiro morreria com uma mensagem que nao explica nada.
@@ -1138,29 +1134,29 @@ def _conferir_as_camadas(spec: Any, sons: dict[str, str]) -> None:
     """
     for camada in spec.layers:
         for clip in camada.clips:
-            e_som = bool(clip.media_id) and clip.media_id in sons
-            if camada.e_audio and not e_som:
+            e_som = bool(clip.media_id) and clip.media_id in sounds
+            if camada.is_audio and not e_som:
                 raise HTTPException(
                     422,
                     "uma camada de audio so aceita musica da biblioteca",
                 )
-            if not camada.e_audio and e_som:
+            if not camada.is_audio and e_som:
                 raise HTTPException(
                     422,
                     f"a midia {clip.media_id!r} e som: ela vai numa camada "
                     "de audio",
                 )
-            # sem a analise pronta nao ha batida nem duracao; e tambem sinal de
-            # que o app mandou antes da hora
-            if e_som and sons[clip.media_id] != TrackStatus.READY:
+            # without the analysis finished there is neither beat nor
+            # duration; it is also a sign the app sent it too early
+            if e_som and sounds[clip.media_id] != TrackStatus.READY:
                 raise HTTPException(
                     409,
                     f"a musica {clip.media_id} ainda nao foi analisada "
-                    f"(status: {sons[clip.media_id]})",
+                    f"(status: {sounds[clip.media_id]})",
                 )
 
 
-def _validar_montagem(data: dict) -> MontageDraft:
+def _validate_montage(data: dict) -> MontageDraft:
     try:
         return MontageDraft(**(data or {}))
     except ValidationError as exc:
@@ -1169,28 +1165,28 @@ def _validar_montagem(data: dict) -> MontageDraft:
 
 @app.get("/api/jobs/{job_id}/montages")
 def list_montages(job_id: str) -> dict[str, Any]:
-    """As montagens desta partida, da mais recente para a mais antiga."""
+    """This match's montages, most recent first."""
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
             raise HTTPException(404, "job nao encontrado")
         _adotar_o_rascunho_antigo(s, job)
-        montagens = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
+        montages = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
         return {
             "job_id": job_id,
-            "items": [_montagem_dict(m, full=True) for m in montagens],
+            "items": [_montage_dict(m, full=True) for m in montages],
         }
 
 
 @app.post("/api/jobs/{job_id}/montages", status_code=201)
 def create_montage(job_id: str, corpo: dict = Body(default={})) -> dict[str, Any]:
-    """Comeca uma montagem nova, vazia ou a partir de um conteudo dado.
+    """Starts a new montage, empty or from given content.
 
     Sao trabalhos diferentes sobre o mesmo material -- o corte de 30 s para o
-    Shorts e a montagem longa --, e ate aqui era preciso escolher um.
+    Shorts e a montage longa --, e ate aqui era preciso escolher um.
     """
     dados = corpo.get("data") or {}
-    _validar_montagem(dados)
+    _validate_montage(dados)
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
@@ -1204,22 +1200,22 @@ def create_montage(job_id: str, corpo: dict = Body(default={})) -> dict[str, Any
         )
         s.add(m)
         s.flush()
-        return _montagem_dict(m, full=True)
+        return _montage_dict(m, full=True)
 
 
 @app.put("/api/jobs/{job_id}/montages/{montage_id}")
 def save_montage(
     job_id: str, montage_id: str, corpo: dict = Body(...)
 ) -> dict[str, Any]:
-    """Guarda a montagem. E o que o app chama sozinho enquanto se edita.
+    """Stores the montage. It is what the app calls by itself while editing.
 
     Um corte invalido e recusado aqui: guardar lixo agora seria devolver lixo na
     proxima abertura.
     """
     with session() as s:
-        m = _pegar_montagem(s, job_id, montage_id)
+        m = _get_montage(s, job_id, montage_id)
         if "data" in corpo:
-            rascunho = _validar_montagem(corpo["data"])
+            rascunho = _validate_montage(corpo["data"])
             m.data = rascunho.model_dump()
         if "name" in corpo:
             nome = str(corpo["name"] or "").strip()
@@ -1228,18 +1224,18 @@ def save_montage(
             outras = [o for o in m.job.montages if o.id != m.id]
             m.name = _nome_livre(outras, nome)
         s.flush()
-        return _montagem_dict(m)
+        return _montage_dict(m)
 
 
 @app.post("/api/jobs/{job_id}/montages/{montage_id}/duplicate", status_code=201)
 def duplicate_montage(job_id: str, montage_id: str) -> dict[str, Any]:
-    """Uma copia, para experimentar sem arriscar a que ja esta boa.
+    """A copy, to experiment without risking the one that is already good.
 
-    A copia nao leva o historico da original: as fotos dizem por onde *aquela*
-    montagem passou, e a copia ainda nao passou por lugar nenhum.
+    A copia nao leva o historico da original: as snapshots dizem por onde *aquela*
+    montage passou, e a copia ainda nao passou por lugar nenhum.
     """
     with session() as s:
-        original = _pegar_montagem(s, job_id, montage_id)
+        original = _get_montage(s, job_id, montage_id)
         copia = MontageModel(
             job_id=job_id,
             name=_nome_livre(original.job.montages, f"{original.name} (copia)"),
@@ -1247,32 +1243,32 @@ def duplicate_montage(job_id: str, montage_id: str) -> dict[str, Any]:
         )
         s.add(copia)
         s.flush()
-        return _montagem_dict(copia, full=True)
+        return _montage_dict(copia, full=True)
 
 
 @app.delete("/api/jobs/{job_id}/montages/{montage_id}", status_code=204)
 def delete_montage(job_id: str, montage_id: str) -> Response:
     with session() as s:
-        s.delete(_pegar_montagem(s, job_id, montage_id))
+        s.delete(_get_montage(s, job_id, montage_id))
     return Response(status_code=204)
 
 
 # ── historico de versoes ────────────────────────────────────────────────────
 
-#: quantas fotos cada montagem guarda. Passou disso, a mais velha sai.
+#: how many snapshots each montage keeps. Past that, the oldest goes.
 #:
-#: Nao e o desfazer -- esse vive no app. Sao marcos, e vinte marcos ja e mais
-#: historia do que alguem percorre numa lista.
+#: This is not undo -- that lives in the app. These are markers, and twenty
+#: markers is already more history than anyone scrolls through in a list.
 MAX_VERSOES = 20
 
 
-def _versao_dict(v: MontageVersion, *, full: bool = False) -> dict[str, Any]:
+def _version_dict(v: MontageVersion, *, full: bool = False) -> dict[str, Any]:
     d: dict[str, Any] = {
         "id": v.id,
         "montage_id": v.montage_id,
         "label": v.label,
-        "created_at": v.created_at.isoformat(),
-        **MontageModel(data=v.data).resumo,
+        "created_at": _iso(v.created_at),
+        **MontageModel(data=v.data).summary,
     }
     if full:
         d["data"] = v.data or {}
@@ -1280,10 +1276,10 @@ def _versao_dict(v: MontageVersion, *, full: bool = False) -> dict[str, Any]:
 
 
 def _guardar_foto(m: MontageModel, label: str) -> MontageVersion | None:
-    """Tira uma foto da montagem como ela esta agora.
+    """Takes a snapshot of the montage as it stands now.
 
-    Recusa a foto identica a ultima: gerar o mesmo video duas vezes seguidas
-    nao produziu versao nenhuma, e uma lista de estados iguais nao ajuda
+    Recusa a snapshot identica a ultima: gerar o mesmo video duas vezes seguidas
+    nao produziu version nenhuma, e uma lista de estados iguais nao ajuda
     ninguem a achar o "estava bom ontem".
     """
     if not m.data:
@@ -1292,55 +1288,56 @@ def _guardar_foto(m: MontageModel, label: str) -> MontageVersion | None:
     if ultima is not None and ultima.data == m.data:
         return None
 
-    # a hora vem daqui, e nao do `default` da coluna: sem ela a foto recem-feita
-    # entra na lista com `created_at` nulo e nao da nem para ordenar
-    foto = MontageVersion(label=label, data=dict(m.data), created_at=utcnow())
-    m.versions.append(foto)
+    # the timestamp comes from here, and not from the column's `default`:
+    # without it the fresh snapshot joins the list with a null `created_at` and
+    # cannot even be sorted
+    snapshot = MontageVersion(label=label, data=dict(m.data), created_at=utcnow())
+    m.versions.append(snapshot)
     velhas = sorted(m.versions, key=lambda v: _hora(v.created_at), reverse=True)
     for v in velhas[MAX_VERSOES:]:
         m.versions.remove(v)
-    return foto
+    return snapshot
 
 
 @app.get("/api/jobs/{job_id}/montages/{montage_id}/versions")
 def list_versions(job_id: str, montage_id: str) -> dict[str, Any]:
-    """As fotos desta montagem, da mais recente para a mais antiga."""
+    """This montage's snapshots, most recent first."""
     with session() as s:
-        m = _pegar_montagem(s, job_id, montage_id)
-        fotos = sorted(m.versions, key=lambda v: _hora(v.created_at), reverse=True)
-        return {"montage_id": montage_id, "items": [_versao_dict(v) for v in fotos]}
+        m = _get_montage(s, job_id, montage_id)
+        snapshots = sorted(m.versions, key=lambda v: _hora(v.created_at), reverse=True)
+        return {"montage_id": montage_id, "items": [_version_dict(v) for v in snapshots]}
 
 
 @app.post("/api/jobs/{job_id}/montages/{montage_id}/versions", status_code=201)
 def create_version(
     job_id: str, montage_id: str, corpo: dict = Body(default={})
 ) -> dict[str, Any]:
-    """Marca a montagem como ela esta: o "estava bom assim"."""
+    """Marks the montage as it stands: the "it was good like this"."""
     with session() as s:
-        m = _pegar_montagem(s, job_id, montage_id)
-        foto = _guardar_foto(m, str(corpo.get("label") or "marcada a mao"))
-        if foto is None:
+        m = _get_montage(s, job_id, montage_id)
+        snapshot = _guardar_foto(m, str(corpo.get("label") or "marcada a mao"))
+        if snapshot is None:
             raise HTTPException(409, "nao ha nada de novo para marcar")
         s.flush()
-        return _versao_dict(foto, full=True)
+        return _version_dict(snapshot, full=True)
 
 
 @app.post("/api/jobs/{job_id}/montages/{montage_id}/versions/{version_id}/restore")
 def restore_version(job_id: str, montage_id: str, version_id: str) -> dict[str, Any]:
-    """Volta a montagem para uma foto.
+    """Rolls the montage back to a snapshot.
 
-    O estado de agora vira foto antes -- restaurar nunca apaga trabalho, so
+    O estado de agora vira snapshot antes -- restaurar nunca apaga trabalho, so
     troca o que esta na frente.
     """
     with session() as s:
-        m = _pegar_montagem(s, job_id, montage_id)
-        foto = s.get(MontageVersion, version_id)
-        if foto is None or foto.montage_id != montage_id:
+        m = _get_montage(s, job_id, montage_id)
+        snapshot = s.get(MontageVersion, version_id)
+        if snapshot is None or snapshot.montage_id != montage_id:
             raise HTTPException(404, "versao nao encontrada nesta montagem")
         _guardar_foto(m, "antes de restaurar")
-        m.data = dict(foto.data or {})
+        m.data = dict(snapshot.data or {})
         s.flush()
-        return _montagem_dict(m, full=True)
+        return _montage_dict(m, full=True)
 
 
 @app.delete(
@@ -1348,11 +1345,11 @@ def restore_version(job_id: str, montage_id: str, version_id: str) -> dict[str, 
 )
 def delete_version(job_id: str, montage_id: str, version_id: str) -> Response:
     with session() as s:
-        m = _pegar_montagem(s, job_id, montage_id)
-        foto = s.get(MontageVersion, version_id)
-        if foto is None or foto.montage_id != montage_id:
+        m = _get_montage(s, job_id, montage_id)
+        snapshot = s.get(MontageVersion, version_id)
+        if snapshot is None or snapshot.montage_id != montage_id:
             raise HTTPException(404, "versao nao encontrada nesta montagem")
-        m.versions.remove(foto)
+        m.versions.remove(snapshot)
     return Response(status_code=204)
 
 
@@ -1364,25 +1361,25 @@ def _preset_dict(p: Preset) -> dict[str, Any]:
         "id": p.id,
         "name": p.name,
         "data": p.data or {},
-        "created_at": p.created_at.isoformat(),
-        "updated_at": p.updated_at.isoformat(),
+        "created_at": _iso(p.created_at),
+        "updated_at": _iso(p.updated_at),
     }
 
 
-def _validar_receita(data: dict) -> Receita:
+def _validate_recipe(data: dict) -> Recipe:
     try:
-        return Receita(**(data or {}))
+        return Recipe(**(data or {}))
     except ValidationError as exc:
         raise HTTPException(422, f"receita invalida: {exc}") from exc
 
 
 @app.get("/api/presets")
 def list_presets() -> dict[str, Any]:
-    """As predefinicoes. Nao pertencem a partida nenhuma -- e para atravessar de
-    uma para outra que elas existem."""
+    """The presets. They belong to no match -- crossing from one to another is
+    why they exist."""
     with session() as s:
-        itens = s.execute(select(Preset).order_by(Preset.created_at)).scalars().all()
-        return {"items": [_preset_dict(p) for p in itens]}
+        items = s.execute(select(Preset).order_by(Preset.created_at)).scalars().all()
+        return {"items": [_preset_dict(p) for p in items]}
 
 
 @app.post("/api/presets", status_code=201)
@@ -1390,7 +1387,7 @@ def create_preset(corpo: dict = Body(...)) -> dict[str, Any]:
     nome = str(corpo.get("name") or "").strip()
     if not nome:
         raise HTTPException(422, "uma predefinicao sem nome nao da para achar")
-    receita = _validar_receita(corpo.get("data") or {})
+    receita = _validate_recipe(corpo.get("data") or {})
     with session() as s:
         existentes = s.execute(select(Preset)).scalars().all()
         p = Preset(
@@ -1408,7 +1405,7 @@ def update_preset(preset_id: str, corpo: dict = Body(...)) -> dict[str, Any]:
         if p is None:
             raise HTTPException(404, "predefinicao nao encontrada")
         if "data" in corpo:
-            p.data = _validar_receita(corpo["data"]).model_dump(mode="json")
+            p.data = _validate_recipe(corpo["data"]).model_dump(mode="json")
         if "name" in corpo:
             nome = str(corpo["name"] or "").strip()
             if not nome:
@@ -1431,14 +1428,14 @@ def delete_preset(preset_id: str) -> Response:
     return Response(status_code=204)
 
 
-# ── app Flutter compilado, quando existir (deploy de origem unica) ──────────
+# -- the compiled Flutter app, when present (single-origin deploy) ----------
 #
-# Com o app servido pelo proprio gateway, o Flutter chama a API em caminho
-# relativo e a mesma build funciona em qualquer host, sem recompilar nem
+# With the app served by the gateway itself, Flutter calls the API on a
+# relative path and the same build works on any host, with no recompiling and
 # configurar CORS. Se ninguem rodou `flutter build web`, o mount simplesmente
-# nao acontece e a API segue disponivel sozinha. A checagem e pelo
-# `index.html`, e nao pelo diretorio: no Docker o bind mount cria a pasta
-# vazia mesmo quando ninguem compilou o app, e montar StaticFiles nela
+# does not happen and the API stays available on its own. The check is on
+# `index.html`, and not on the directory: in Docker the bind mount creates the
+# folder empty even when nobody compiled the app, and mounting StaticFiles on
 # transformaria a raiz do site em 404.
 
 _web = Path(get_settings().web_dir)

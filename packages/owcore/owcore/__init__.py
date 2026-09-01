@@ -1,3 +1,3 @@
-"""Núcleo compartilhado do OW Editor."""
+"""OW Editor shared core."""
 
 __version__ = "0.1.0"

@@ -1,4 +1,4 @@
-"""Carrega o profile da HUD (posições, cores, limiares)."""
+"""Loads the HUD profile (positions, colours, thresholds)."""
 
 from __future__ import annotations
 

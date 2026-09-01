@@ -1,8 +1,8 @@
-"""Microsservico detector dos avisos do rodape.
+"""Detector microservice for the footer notices.
 
-Um detector por *regiao da tela*, nao por habilidade: a faixa do rodape e uma
-so, e cada habilidade se distingue pelo icone. Acrescentar uma habilidade nova
-e acrescentar um molde ao profile -- nao um microsservico.
+One detector per *screen region*, not per ability: the footer strip is a single
+one, and each ability is told apart by its icon. Adding a new ability means
+adding a template to the profile -- not a microservice.
 """
 
 from __future__ import annotations

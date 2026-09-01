@@ -1,4 +1,4 @@
-"""Operações de estado do job compartilhadas pelos serviços."""
+"""Job state operations shared across the services."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def save_events(job_id: str, detector: str, events: Sequence[DetectionEvent]) ->
 def record_report(
     job_id: str, detector: str, n_events: int, error: str | None = None
 ) -> None:
-    """Idempotente: reprocessar a mesma mensagem não duplica o relatório."""
+    """Idempotent: reprocessing the same message does not duplicate the report."""
     with session() as s:
         existing = s.scalar(
             select(DetectorReport).where(
@@ -105,27 +105,28 @@ def all_detectors_done(job_id: str, expected: Sequence[str] = DETECTORS) -> bool
 
 
 def expected_detectors(job_id: str) -> tuple[str, ...]:
-    """Quem precisa reportar antes de o sistema montar a lista de propostas.
+    """Who has to report before the analysis is considered finished.
 
-    O ritmo da música não entra aqui: ele deixou de ser parte da análise. A
-    música só aparece quando o usuário escolhe o que gerar, e aí cada vídeo tem
-    a sua.
+    The music's rhythm is not part of this: it is not part of analysing the
+    match. Music comes in through the library, when the user brings it to the
+    editor.
     """
     return DETECTORS
 
 
 def claim_for_planning(job_id: str) -> bool:
-    """Transicao atomica detecting -> ready.
+    """Atomic detecting -> ready transition.
 
-    Os detectores terminam quase juntos e todos avisam o planejador; sem essa
-    reivindicacao dois processos montariam a lista de propostas em dobro. O
-    UPDATE condicional resolve no banco, igual no SQLite e no Postgres.
+    The detectors finish almost together and all of them notify; without this
+    claim two processes would close the analysis twice over -- and write the
+    crossed events twice. The conditional UPDATE settles it in the database,
+    the same way in SQLite and in Postgres.
     """
     with session() as s:
         result = s.execute(
             update(Job)
             .where(Job.id == job_id, Job.status == JobStatus.DETECTING)
-            .values(status=JobStatus.READY, stage="escolha o que gerar", progress=1.0)
+            .values(status=JobStatus.READY, stage="analise concluida", progress=1.0)
         )
         return bool(result.rowcount)
 
@@ -159,7 +160,7 @@ def fail_render(render_id: str, message: str) -> None:
 
 
 def stale_detecting_jobs(older_than_s: float) -> list[str]:
-    """Jobs presos em deteccao -- algum detector morreu no meio do caminho."""
+    """Jobs stuck in detection -- some detector died halfway through."""
     from datetime import timedelta
 
     from .models import utcnow

@@ -1,8 +1,8 @@
-"""Base dos microsservicos detectores.
+"""Base for the detector microservices.
 
-Todos eles fazem a mesma coreografia -- pegar so as suas ROIs, rodar a
-deteccao, gravar os eventos e avisar o editor -- entao ela mora aqui e cada
-detector implementa apenas o `detect`.
+They all perform the same choreography -- take only their own ROIs, run the
+detection, store the events and notify the editor -- so it lives here and each
+detector implements just `detect`.
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ from .worker import Worker
 
 class DetectorWorker(Worker):
     stream = STREAM_ROI
-    #: nome com que o preprocessor enderecou este detector
+    #: the name the preprocessor addressed this detector by
     detector: str
 
     def accepts(self, payload: dict[str, Any]) -> bool:
         return payload.get("detector") == self.detector
 
-    # ── contrato do detector concreto ───────────────────────────────────────
+    # -- contract of the concrete detector ----------------------------------
 
     def detect(
         self,
@@ -47,7 +47,7 @@ class DetectorWorker(Worker):
     ) -> list[DetectionEvent]:
         raise NotImplementedError
 
-    # ── coreografia comum ───────────────────────────────────────────────────
+    # -- shared choreography ------------------------------------------------
 
     def handle(self, payload: dict[str, Any]) -> None:
         msg = RoiReady(**payload)
@@ -70,7 +70,7 @@ class DetectorWorker(Worker):
         )
 
     def _fetch(self, artifacts: list[Artifact], work: Path) -> dict[str, Path]:
-        """Baixa os artefatos e indexa por nome de ROI (ou pelo tipo, no audio)."""
+        """Downloads the artifacts, indexed by ROI name (or by kind, for audio)."""
         out: dict[str, Path] = {}
         for a in artifacts:
             label = a.meta.get("roi") or a.kind
@@ -78,8 +78,8 @@ class DetectorWorker(Worker):
         return out
 
     def on_error(self, payload: dict[str, Any], exc: Exception) -> None:
-        """Um detector que falha nao pode travar o job: ele registra o erro e
-        libera o editor, que monta com os eventos que os outros acharam."""
+        """A detector that fails must not stall the job: it records the error
+        and releases the editor, which builds with what the others found."""
         job_id = payload.get("job_id")
         if not job_id:
             return

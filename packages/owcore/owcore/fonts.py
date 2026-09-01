@@ -1,8 +1,8 @@
-"""Onde está a fonte que o `drawtext` vai usar.
+"""Where to find the font that `drawtext` will use.
 
-O ffmpeg não tem fonte embutida: sem um arquivo `.ttf` no caminho, todo texto
-falha na hora de renderizar. Este módulo acha uma, e falha alto quando não acha
--- descobrir isso no meio de um render seria pior do que na configuração.
+ffmpeg ships no built-in font: without a `.ttf` on disk, every text clip fails
+at render time. This module finds one, and fails loudly when it cannot --
+discovering that halfway through a render would be worse than at setup.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from pathlib import Path
 
 from .config import get_settings
 
-#: Onde procurar, em ordem. A DejaVu vem junto com o ffmpeg na imagem Docker; as
-#: outras cobrem quem roda o sistema fora dela.
-CANDIDATAS = (
+#: Where to look, in order. DejaVu ships with ffmpeg in the Docker image; the
+#: others cover people running the system outside it.
+CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -27,27 +27,27 @@ CANDIDATAS = (
 
 
 @lru_cache
-def padrao() -> str:
-    """O caminho da fonte a usar quando ninguém escolheu uma.
+def default_font() -> str:
+    """The font path to use when nobody picked one.
 
-    `OW_FONT` manda quando definida. Sem ela, vale a primeira das candidatas que
-    existir no disco.
+    `OW_FONT` wins when set. Without it, the first candidate that exists on
+    disk is used.
     """
-    escolhida = get_settings().font
-    if escolhida:
-        return escolhida
-    for caminho in CANDIDATAS:
-        if Path(caminho).is_file():
-            return caminho
+    chosen = get_settings().font
+    if chosen:
+        return chosen
+    for path in CANDIDATES:
+        if Path(path).is_file():
+            return path
     raise FileNotFoundError(
         "nenhuma fonte encontrada para o texto; aponte uma em OW_FONT"
     )
 
 
-def existe() -> bool:
-    """Dá para escrever texto nesta máquina?"""
+def available() -> bool:
+    """Can this machine draw text at all?"""
     try:
-        padrao()
+        default_font()
     except FileNotFoundError:
         return False
     return True

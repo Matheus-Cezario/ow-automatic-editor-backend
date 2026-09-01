@@ -22,7 +22,6 @@ from owcore.db import session
 from owcore.models import (
     MIN_CUT_S,
     STREAM_THUMBS,
-    STREAM_RENDER,
     STREAM_RENDER_READY,
     STREAM_MEDIA,
     Job,
@@ -151,9 +150,6 @@ def montar(job_id: str, timelines: list[dict]) -> str:
 
 
 def run_render() -> None:
-    beats = service_module("beats", "main").BeatsService()
-    for payload in drain(STREAM_RENDER, "beats"):
-        beats.handle(payload)
     editor = service_module("editor", "main").Editor()
     for payload in drain(STREAM_RENDER_READY, "editor"):
         editor.handle(payload)
@@ -672,12 +668,15 @@ def test_partida_antiga_e_medida_ao_abrir_o_editor(isolated, short_sample):
     arquivo sabe. Sem isso o editor abriria sem poder dizer se um 9:16 corta o
     quadro dela."""
     from owcore import ffmpeg
-    from owcore.models import Job
+    from owcore.models import Job, JobStatus
     from owcore.storage import get_storage
 
     key = get_storage().put_file("antigo/video.mp4", short_sample)
     with session() as s:
-        s.add(Job(id="antigo0000000002", video_key=key, video_name="v.mp4"))
+        # `ready` porque e o que uma partida antiga e: ela ja foi analisada, so
+        # que por uma versao que nao tinha esta coluna
+        s.add(Job(id="antigo0000000002", video_key=key, video_name="v.mp4",
+                  status=JobStatus.READY))
 
     esperado = ffmpeg.probe(short_sample)
     detail = api().get("/api/jobs/antigo0000000002").json()
@@ -687,6 +686,26 @@ def test_partida_antiga_e_medida_ao_abrir_o_editor(isolated, short_sample):
     # e a medida fica guardada: o proximo GET nao paga outro ffprobe
     with session() as s:
         assert s.get(Job, "antigo0000000002").width == esperado.width
+
+
+def test_partida_sendo_analisada_nao_paga_ffprobe(isolated, short_sample):
+    """Enquanto a analise roda, o preprocessador vai gravar o tamanho de
+    verdade em segundos -- nao ha o que remendar. E ler o cabecalho pela rede
+    justamente enquanto ele baixa o mesmo arquivo disputa a mesma banda: medido,
+    uma consulta de 0,5s passou de 30s nessa janela, e a tela, que consulta de
+    dois em dois segundos, mostra isso como servidor fora do ar."""
+    from owcore.models import Job, JobStatus
+    from owcore.storage import get_storage
+
+    key = get_storage().put_file("andando/video.mp4", short_sample)
+    with session() as s:
+        s.add(Job(id="andando000000001", video_key=key, video_name="v.mp4",
+                  status=JobStatus.PREPROCESSING))
+
+    detail = api().get("/api/jobs/andando000000001").json()
+    assert detail["width"] == 0, "mediu uma gravacao que ainda esta sendo lida"
+    with session() as s:
+        assert s.get(Job, "andando000000001").width in (0, None)
 
 
 def test_medir_uma_gravacao_sumida_nao_derruba_a_tela(isolated):
@@ -749,7 +768,7 @@ def test_o_formato_da_v1_continua_entrando_e_sai_em_camadas(isolated):
     assert velha.duration_s == pytest.approx(4.0)
     # e continua sabendo se apresentar como V1, para o caminho antigo
     assert [c.duration_s for c in velha.cuts] == [2.0, 1.0]
-    assert velha.de_uma_camada_so
+    assert velha.single_layer
 
 
 def test_camada_ou_transformacao_tira_a_montagem_do_caminho_antigo(isolated):
@@ -761,7 +780,7 @@ def test_camada_ou_transformacao_tira_a_montagem_do_caminho_antigo(isolated):
     from owcore.models import Layer, Timeline, TimelineClip
 
     simples = Timeline(layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=1)])])
-    assert simples.de_uma_camada_so
+    assert simples.single_layer
 
     duas = Timeline(
         layers=[
@@ -769,7 +788,7 @@ def test_camada_ou_transformacao_tira_a_montagem_do_caminho_antigo(isolated):
             Layer(clips=[TimelineClip(at_s=0, duration_s=1)]),
         ]
     )
-    assert not duas.de_uma_camada_so
+    assert not duas.single_layer
 
     com_zoom = Timeline(
         layers=[
@@ -778,7 +797,7 @@ def test_camada_ou_transformacao_tira_a_montagem_do_caminho_antigo(isolated):
             ])
         ]
     )
-    assert not com_zoom.de_uma_camada_so
+    assert not com_zoom.single_layer
 
     # camada escondida nao conta: sobra uma so, e ela e simples
     com_escondida = Timeline(
@@ -787,7 +806,7 @@ def test_camada_ou_transformacao_tira_a_montagem_do_caminho_antigo(isolated):
             Layer(hidden=True, clips=[TimelineClip(at_s=0, duration_s=1)]),
         ]
     )
-    assert com_escondida.de_uma_camada_so
+    assert com_escondida.single_layer
 
 
 def test_duas_camadas_viram_um_video_com_a_de_cima_por_cima(
@@ -848,12 +867,12 @@ def test_uma_saida_fora_do_padrao_tira_a_montagem_do_caminho_antigo(isolated):
             layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=2, start_s=1)])],
         )
 
-    assert montagem().de_uma_camada_so, "sem pedido nenhum, o caminho antigo"
-    assert not montagem(width=1080, height=1920).de_uma_camada_so
-    assert not montagem(from_s=1.0).de_uma_camada_so
-    assert not montagem(watermark_id="m1").de_uma_camada_so
-    assert not montagem(crf=30).de_uma_camada_so
-    assert not montagem(fps=24).de_uma_camada_so
+    assert montagem().single_layer, "sem pedido nenhum, o caminho antigo"
+    assert not montagem(width=1080, height=1920).single_layer
+    assert not montagem(from_s=1.0).single_layer
+    assert not montagem(watermark_id="m1").single_layer
+    assert not montagem(crf=30).single_layer
+    assert not montagem(fps=24).single_layer
 
 
 def test_montagem_de_uma_camada_so_continua_pelo_caminho_antigo(
@@ -879,48 +898,48 @@ def test_montagem_de_uma_camada_so_continua_pelo_caminho_antigo(
 
 def test_clipe_fora_da_gravacao_vira_fundo_sem_mover_os_outros(isolated):
     """A mesma promessa da V1, agora no grafo."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=2, start_s=59),   # so 1s existe
         TimelineClip(at_s=4, duration_s=1, start_s=1),
     ])])
-    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
                source_duration_s=60)
 
     # o primeiro entra aparado em 1s, e o segundo continua entrando aos 4s
     assert "trim=duration=1.000" in c.filter_complex
     assert "between(t,4.000,5.000)" in c.filter_complex
-    assert c.duracao_s == pytest.approx(5.0)
+    assert c.duration_s == pytest.approx(5.0)
 
 
 def test_fonte_que_ainda_nao_da_para_montar_e_recusada(isolated):
     """Ignorar em silencio seria pior do que nao aceitar."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=1, source="color", fill="black"),
     ])])
     with pytest.raises(ValueError, match="ainda nao e montavel"):
-        compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+        compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
 
 def test_camada_muda_entra_sem_som(isolated):
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[
         Layer(clips=[TimelineClip(at_s=0, duration_s=1, start_s=1)]),
         Layer(muted=True, clips=[TimelineClip(at_s=0, duration_s=1, start_s=5)]),
     ])
-    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
     # dois videos, um audio so
     assert c.filter_complex.count("overlay=") == 2
     assert "amix" not in c.filter_complex
-    assert c.mapa_audio == "[aout]"
+    assert c.audio_map == "[aout]"
 
 
 # ── a biblioteca de midia (Fase 4) ──────────────────────────────────────────
@@ -1084,8 +1103,8 @@ def test_velocidade_muda_quanto_da_fonte_o_clipe_come(isolated):
     lento = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=0.5)
     rapido = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=2.0)
 
-    assert lento.fonte_consumida_s == pytest.approx(1.0)
-    assert rapido.fonte_consumida_s == pytest.approx(4.0)
+    assert lento.source_consumed_s == pytest.approx(1.0)
+    assert rapido.source_consumed_s == pytest.approx(4.0)
     # e onde ele termina na gravacao muda junto
     assert lento.end_s == pytest.approx(11.0)
     assert rapido.end_s == pytest.approx(14.0)
@@ -1095,13 +1114,13 @@ def test_velocidade_muda_quanto_da_fonte_o_clipe_come(isolated):
 
 def test_o_grafo_acelera_imagem_e_som_juntos(isolated):
     """Descompasso entre imagem e som e pior do que nao ter som."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=2, start_s=10, speed=0.4),
     ])])
-    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
     # 2s de video a 0.4x comem 0.8s de gravacao
     assert "trim=duration=0.800" in g
@@ -1112,14 +1131,14 @@ def test_o_grafo_acelera_imagem_e_som_juntos(isolated):
 
 def test_a_ordem_dos_filtros_poe_o_fade_no_relogio_do_video(isolated):
     """Um fade de meio segundo dura meio segundo no video, nao na fonte."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=2, start_s=1, speed=2.0,
                      fade={"in_s": 0.5, "out_s": 0.5}),
     ])])
-    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
     # a velocidade vem antes do fade: ela muda o relogio do clipe
     assert g.index("setpts=PTS/2.0000") < g.index("fade=t=in")
@@ -1128,14 +1147,14 @@ def test_a_ordem_dos_filtros_poe_o_fade_no_relogio_do_video(isolated):
 
 
 def test_cor_e_aplicada_e_o_neutro_nao_polui_o_grafo(isolated):
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     def grafo(**kw):
         t = Timeline(layers=[Layer(clips=[
             TimelineClip(at_s=0, duration_s=1, start_s=1, **kw),
         ])])
-        return compor(t, source=Path("x.mp4"), width=640, height=360,
+        return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
                       fps=30).filter_complex
 
     assert "eq=" not in grafo()
@@ -1144,36 +1163,36 @@ def test_cor_e_aplicada_e_o_neutro_nao_polui_o_grafo(isolated):
 
 def test_a_musica_deixa_o_jogo_aparecer_por_baixo(isolated):
     """Com `game_volume` em 0 ela substitui, como na V1; acima disso, mistura."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
     def grafo(**kw):
-        return compor(
+        return compose_graph(
             _com_musica_na_regua(**kw),
             source=Path("x.mp4"), width=640, height=360, fps=30,
-            source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+            source_duration_s=600, library=_audio_library(Path("m.mp3")),
         ).filter_complex
 
     # o padrao continua sendo o da V1: a musica manda sozinha
-    assert "[jogo]" not in grafo()
+    assert "[game]" not in grafo()
     misturado = grafo(game_volume=0.5, music_volume=0.8)
-    assert "volume=0.8000[musica]" in misturado
-    assert "volume=0.5000[jogo]" in misturado
-    assert "[musica][jogo]amix" in misturado
+    assert "volume=0.8000[music]" in misturado
+    assert "volume=0.5000[game]" in misturado
+    assert "[music][game]amix" in misturado
 
 
 def test_sem_musica_nenhuma_o_som_dos_cortes_vale_por_si(isolated):
     """Nem `music_volume` nem `game_volume` tem o que fazer aqui: nao ha duas
     coisas a equilibrar."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(game_volume=0.5, layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=1, start_s=1),
     ])])
-    g = compor(t, source=Path("x.mp4"), width=640, height=360,
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360,
                fps=30).filter_complex
 
-    assert "[jogo]" not in g
+    assert "[game]" not in g
     assert "volume=0.5000" not in g
     assert "[a1]anull[aout]" in g
 
@@ -1185,7 +1204,7 @@ def test_efeito_tira_a_montagem_do_caminho_de_corte_e_emenda(isolated):
     def so_uma_camada(**kw):
         return Timeline(layers=[Layer(clips=[
             TimelineClip(at_s=0, duration_s=1, start_s=1, **kw),
-        ])]).de_uma_camada_so
+        ])]).single_layer
 
     assert so_uma_camada()
     assert not so_uma_camada(speed=2.0)
@@ -1264,10 +1283,10 @@ def quadro_cru(video: Path, t: float) -> "np.ndarray":
 
 def compor_e_render(timeline, source: Path, destino: Path) -> Path:
     from owcore import ffmpeg
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
     info = ffmpeg.probe(source)
-    c = compor(timeline, source=source, width=info.width, height=info.height,
+    c = compose_graph(timeline, source=source, width=info.width, height=info.height,
                fps=info.fps, source_duration_s=info.duration_s)
     ffmpeg.compose(c, destino)
     return destino
@@ -1304,13 +1323,13 @@ def test_o_fade_revela_a_camada_de_baixo_em_vez_de_pintar_preto(
 
 
 def test_o_grafo_usa_fade_no_alfa(isolated):
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=2, start_s=1, fade={"in_s": 0.5}),
     ])])
-    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
     assert "fade=t=in:st=0:d=0.500:alpha=1" in g
     # sem rgba o alfa nao existe, e o filtro nao teria onde mexer
@@ -1319,14 +1338,14 @@ def test_o_grafo_usa_fade_no_alfa(isolated):
 
 def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
     """`scale` nao anima no ffmpeg; quem anima e o `crop`, com expressoes em t."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=2, start_s=1,
                      zoom=[{"t": 0, "scale": 1}, {"t": 0.5, "scale": 2}]),
     ])])
-    g = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
     assert "crop=w=" in g
     # a fracao 0.5 do clipe de 2s e o segundo 1
@@ -1337,7 +1356,7 @@ def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
 
 def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
     """Um zoom que fecha no fim continua fechando no fim depois de esticar."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     def grafo(duracao: float) -> str:
@@ -1345,7 +1364,7 @@ def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
             TimelineClip(at_s=0, duration_s=duracao, start_s=1,
                          zoom=[{"t": 0, "scale": 1}, {"t": 1.0, "scale": 2}]),
         ])])
-        return compor(t, source=Path("x.mp4"), width=640, height=360,
+        return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
                       fps=30).filter_complex
 
     assert "lt(t,2.0000)" in grafo(2.0)
@@ -1357,7 +1376,7 @@ def test_congelar_come_um_quadro_so_da_gravacao(isolated):
 
     c = TimelineClip(at_s=0, duration_s=3, start_s=10, freeze=True)
 
-    assert c.fonte_consumida_s < 0.2, "um quadro parado nao come tres segundos"
+    assert c.source_consumed_s < 0.2, "um quadro parado nao come tres segundos"
     assert c.until_s == pytest.approx(3.0), "mas ocupa os tres no video"
 
 
@@ -1375,15 +1394,15 @@ def test_congelar_e_inverter_viram_video(isolated, short_sample, tmp_path):
 
 
 def test_um_quadro_congelado_nao_tem_som_correndo(isolated):
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=2, start_s=1, freeze=True),
     ])])
-    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
-    assert c.mapa_audio is None
+    assert c.audio_map is None
 
 
 def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
@@ -1415,13 +1434,13 @@ def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
 def test_o_texto_escapa_o_que_quebraria_o_grafo(isolated):
     """Dois pontos e aspas aparecem em texto de verdade -- e cada um deles,
     solto, parte o filtergraph em dois."""
-    from owcore.textfx import escapar
+    from owcore.textfx import escape
 
-    assert escapar("TRIPLE KILL: 50") == r"TRIPLE KILL\: 50"
-    assert escapar("o 'x'") == r"o \'x\'"
-    assert escapar("a\\b") == r"a\\b"
+    assert escape("TRIPLE KILL: 50") == r"TRIPLE KILL\: 50"
+    assert escape("o 'x'") == r"o \'x\'"
+    assert escape("a\\b") == r"a\\b"
     # uma quebra crua partiria o grafo: o filtergraph e uma linha so
-    assert "\n" not in escapar("duas\nlinhas")
+    assert "\n" not in escape("duas\nlinhas")
 
 
 def test_a_porcentagem_passa_inteira_e_a_expansao_fica_desligada(isolated):
@@ -1431,10 +1450,10 @@ def test_a_porcentagem_passa_inteira_e_a_expansao_fica_desligada(isolated):
     Quem resolve e `expansion=none`: sem expansao, `%` e so um caractere.
     """
     from owcore.models import TimelineClip
-    from owcore.textfx import cadeia, escapar
+    from owcore.textfx import escape, filter_chain
 
-    assert escapar("50%") == "50%"
-    c = cadeia(
+    assert escape("50%") == "50%"
+    c = filter_chain(
         TimelineClip(at_s=0, duration_s=1, source="text", text="50% de vida"),
         height=720,
     )
@@ -1445,13 +1464,13 @@ def test_a_porcentagem_passa_inteira_e_a_expansao_fica_desligada(isolated):
 def test_o_tamanho_do_texto_e_fracao_da_altura(isolated):
     """A mesma montagem tem de sair igual em 720p e em 4K."""
     from owcore.models import TimelineClip
-    from owcore.textfx import cadeia
+    from owcore.textfx import filter_chain
 
     clip = TimelineClip(at_s=0, duration_s=1, source="text", text="oi",
                         text_style={"size": 0.1})
 
-    assert "fontsize=72" in cadeia(clip, 720)
-    assert "fontsize=216" in cadeia(clip, 2160)
+    assert "fontsize=72" in filter_chain(clip, 720)
+    assert "fontsize=216" in filter_chain(clip, 2160)
 
 
 def test_um_clipe_de_texto_precisa_de_texto(isolated):
@@ -1463,21 +1482,21 @@ def test_um_clipe_de_texto_precisa_de_texto(isolated):
 
 def test_o_texto_entra_numa_tela_transparente(isolated):
     """Se a tela fosse preta, o texto viria dentro de uma caixa."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=1, source="text", text="oi"),
     ])])
-    c = compor(t, source=Path("x.mp4"), width=640, height=360, fps=30)
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
     # o alfa tem de vir da **fonte**: pedido depois, na cadeia, o `color` ja
     # negociou yuv420p com o `drawtext` e desenhou preto opaco -- e o alfa
     # acrescentado ali nasce em 1, tapando a camada de baixo
-    tela = next(e for e in c.entradas if "color=c=black@0.0" in e.caminho)
-    assert tela.caminho.endswith(",format=rgba")
+    tela = next(e for e in c.inputs if "color=c=black@0.0" in e.path)
+    assert tela.path.endswith(",format=rgba")
     # e um texto nao tem som que corra junto
-    assert c.mapa_audio is None
+    assert c.audio_map is None
 
 
 def test_o_texto_aparece_no_video_e_some_sem_deixar_caixa(
@@ -1526,15 +1545,15 @@ def test_texto_e_montado_pelo_grafo_e_nao_pelo_caminho_antigo(isolated):
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=1, source="text", text="oi"),
     ])])
-    assert not t.de_uma_camada_so
+    assert not t.single_layer
 
 
 def test_sem_fonte_o_erro_aparece_na_hora_certa(isolated, monkeypatch):
     """Descobrir que nao ha fonte no meio de um render seria pior."""
     from owcore import fonts
 
-    fonts.padrao.cache_clear()
-    monkeypatch.setattr(fonts, "CANDIDATAS", ())
+    fonts.default_font.cache_clear()
+    monkeypatch.setattr(fonts, "CANDIDATES", ())
     monkeypatch.setenv("OW_FONT", "")
 
     import owcore.config as config
@@ -1542,9 +1561,9 @@ def test_sem_fonte_o_erro_aparece_na_hora_certa(isolated, monkeypatch):
     config.get_settings.cache_clear()
     try:
         with pytest.raises(FileNotFoundError, match="OW_FONT"):
-            fonts.padrao()
+            fonts.default_font()
     finally:
-        fonts.padrao.cache_clear()
+        fonts.default_font.cache_clear()
         config.get_settings.cache_clear()
 
 
@@ -1605,15 +1624,15 @@ def test_cover_preenche_e_contain_deixa_barras(
 def test_exportar_um_trecho_reposiciona_os_clipes(isolated):
     """Nao e cortar o video depois de pronto: os clipes sao reposicionados como
     se a janela fosse o comeco."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
-    c = compor(
+    c = compose_graph(
         _timeline_simples(from_s=1.0, to_s=3.0),
         source=Path("x.mp4"), width=640, height=360, fps=30,
         source_duration_s=600,
     )
 
-    assert c.duracao_s == pytest.approx(2.0)
+    assert c.duration_s == pytest.approx(2.0)
     # dos dois clipes, os dois entram — mas cada um pela metade
     assert c.filter_complex.count("overlay=") == 2
     assert "between(t,0.000,1.000)" in c.filter_complex
@@ -1622,11 +1641,11 @@ def test_exportar_um_trecho_reposiciona_os_clipes(isolated):
 
 def test_um_clipe_que_comeca_antes_da_janela_entra_pelo_meio(isolated):
     """E o ponto de entrada na fonte anda junto, senao a imagem saltaria."""
-    from owcore.compose import _na_janela
+    from owcore.compose import _within_window
     from owcore.models import TimelineClip
 
     clip = TimelineClip(at_s=0, duration_s=4, start_s=10)
-    visto = _na_janela(clip, 1.0, 3.0)
+    visto = _within_window(clip, 1.0, 3.0)
 
     assert visto is not None
     assert visto.at_s == 0.0, "ele passa a comecar no primeiro quadro"
@@ -1635,50 +1654,50 @@ def test_um_clipe_que_comeca_antes_da_janela_entra_pelo_meio(isolated):
 
 
 def test_a_velocidade_conta_no_pulo_da_janela(isolated):
-    from owcore.compose import _na_janela
+    from owcore.compose import _within_window
     from owcore.models import TimelineClip
 
     # a 2x, um segundo de video pulado custa dois de gravacao
     clip = TimelineClip(at_s=0, duration_s=4, start_s=10, speed=2.0)
-    visto = _na_janela(clip, 1.0, 3.0)
+    visto = _within_window(clip, 1.0, 3.0)
 
     assert visto.start_s == pytest.approx(12.0)
 
 
 def test_clipe_fora_da_janela_nao_entra(isolated):
-    from owcore.compose import _na_janela
+    from owcore.compose import _within_window
     from owcore.models import TimelineClip
 
     clip = TimelineClip(at_s=10, duration_s=2, start_s=1)
-    assert _na_janela(clip, 0.0, 5.0) is None
-    assert _na_janela(TimelineClip(at_s=0, duration_s=1, start_s=1), 5.0, 9.0) is None
+    assert _within_window(clip, 0.0, 5.0) is None
+    assert _within_window(TimelineClip(at_s=0, duration_s=1, start_s=1), 5.0, 9.0) is None
 
 
 def test_trecho_vazio_e_recusado(isolated):
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
     with pytest.raises(ValueError, match="vazio"):
-        compor(_timeline_simples(from_s=50, to_s=60), source=Path("x.mp4"),
+        compose_graph(_timeline_simples(from_s=50, to_s=60), source=Path("x.mp4"),
                width=640, height=360, fps=30, source_duration_s=600)
 
 
 def test_a_marca_dagua_vem_por_cima_de_tudo(isolated, short_sample, tmp_path):
     """Marca que alguma camada cobre nao e marca d'agua."""
-    from owcore.compose import MidiaNoDisco, compor
+    from owcore.compose import LibraryFile, compose_graph
     from owcore import ffmpeg
 
     png = png_de_teste(tmp_path / "marca.png", cor="white")
     t = _timeline_simples(watermark_id="m1", watermark_scale=0.3)
     info = ffmpeg.probe(short_sample)
-    c = compor(t, source=short_sample, width=info.width, height=info.height,
+    c = compose_graph(t, source=short_sample, width=info.width, height=info.height,
                fps=info.fps, source_duration_s=info.duration_s,
-               midias={"m1": MidiaNoDisco(png, "image")})
+               library={"m1": LibraryFile(png, "image")})
 
     # a marca e o ultimo overlay antes da saida: o que sai dela vai direto para
     # o corte final, sem nenhuma camada por cima
     filtros = c.filter_complex
-    assert "[marca]overlay" in filtros
-    assert "[marcado]trim=" in filtros
+    assert "[mark]overlay" in filtros
+    assert "[watermarked]trim=" in filtros
 
     com = tmp_path / "com_marca.mp4"
     ffmpeg.compose(c, com)
@@ -1687,10 +1706,10 @@ def test_a_marca_dagua_vem_por_cima_de_tudo(isolated, short_sample, tmp_path):
 
 
 def test_marca_dagua_que_nao_esta_na_biblioteca_e_recusada(isolated):
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
     with pytest.raises(ValueError, match="marca"):
-        compor(_timeline_simples(watermark_id="sumida"), source=Path("x.mp4"),
+        compose_graph(_timeline_simples(watermark_id="sumida"), source=Path("x.mp4"),
                width=640, height=360, fps=30, source_duration_s=600)
 
 
@@ -2031,9 +2050,9 @@ def test_a_predefinicao_atravessa_partidas(isolated, short_sample):
 def test_a_predefinicao_guarda_o_jeito_de_cortar_e_nao_os_cortes(isolated):
     """Uma lista de cortes so vale para aquela partida; um jeito de cortar vale
     para qualquer uma."""
-    from owcore.models import Receita
+    from owcore.models import Recipe
 
-    r = Receita(**{"kinds": ["kill", "sleep"], "lead_s": 1.2, "duration_s": 2.0})
+    r = Recipe(**{"kinds": ["kill", "sleep"], "lead_s": 1.2, "duration_s": 2.0})
     assert not hasattr(r, "clips")
     assert not hasattr(r, "layers")
     assert r.kinds == ["kill", "sleep"]
@@ -2083,21 +2102,21 @@ def _com_musica_na_regua(**kw):
     )
 
 
-def _midia_de_som(caminho):
-    from owcore.compose import MidiaNoDisco
+def _audio_library(path):
+    from owcore.compose import LibraryFile
 
-    return {"m1": MidiaNoDisco(caminho, "audio")}
+    return {"m1": LibraryFile(path, "audio")}
 
 
 def test_uma_camada_de_audio_nao_desenha_nada(isolated):
     """Ela toca. Se ela entrasse no empilhamento, o proximo clipe de video
     apareceria por cima de um `overlay` que nao existe."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
-    c = compor(
+    c = compose_graph(
         _com_musica_na_regua(),
         source=Path("x.mp4"), width=640, height=360, fps=30,
-        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
     assert c.filter_complex.count("overlay=") == 1, "so o clipe de video"
@@ -2107,21 +2126,21 @@ def test_uma_camada_de_audio_nao_desenha_nada(isolated):
 def test_o_bloco_de_musica_e_aparado_e_posicionado(isolated):
     """E o que a faixa continua nunca soube fazer: entrar no meio do video, com
     um pedaco escolhido da musica."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
-    c = compor(
+    c = compose_graph(
         _com_musica_na_regua(blocos=[
             {"at_s": 2.5, "duration_s": 1.5, "start_s": 30.0,
              "source": "media", "media_id": "m1"},
         ]),
         source=Path("x.mp4"), width=640, height=360, fps=30,
-        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
     # o pedaco vem de 30s da musica...
     assert any(
-        e.seek == pytest.approx(30.0) and "m.mp3" in e.caminho
-        for e in c.entradas
+        e.seek == pytest.approx(30.0) and "m.mp3" in e.path
+        for e in c.inputs
     )
     # ...dura 1,5s e entra aos 2,5s do video
     assert "atrim=duration=1.500" in c.filter_complex
@@ -2130,9 +2149,9 @@ def test_o_bloco_de_musica_e_aparado_e_posicionado(isolated):
 
 def test_dois_blocos_de_musica_se_misturam(isolated):
     """Trocar de faixa no meio do video era o pedido; sao dois blocos."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
-    c = compor(
+    c = compose_graph(
         _com_musica_na_regua(blocos=[
             {"at_s": 0.0, "duration_s": 2.0, "start_s": 0.0,
              "source": "media", "media_id": "m1"},
@@ -2140,22 +2159,22 @@ def test_dois_blocos_de_musica_se_misturam(isolated):
              "source": "media", "media_id": "m1", "audio": {"volume": 0.4}},
         ]),
         source=Path("x.mp4"), width=640, height=360, fps=30,
-        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
     # os dois blocos se misturam entre si; o som do jogo fica de fora porque
     # `game_volume` e 0 -- com musica tocando, o padrao e ela mandar sozinha
     assert "amix=inputs=2" in c.filter_complex
-    assert "[musica]" in c.filter_complex
+    assert "[music]" in c.filter_complex
     assert "volume=0.4000" in c.filter_complex
 
 
 def test_o_silencio_e_a_falta_de_bloco(isolated):
     """Nao ha "bloco de silencio": onde nao ha musica, nao ha musica. E o mesmo
     que o buraco entre clipes ja faz com a imagem."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
-    c = compor(
+    c = compose_graph(
         _com_musica_na_regua(blocos=[
             {"at_s": 0.0, "duration_s": 1.0, "start_s": 0.0,
              "source": "media", "media_id": "m1"},
@@ -2163,22 +2182,22 @@ def test_o_silencio_e_a_falta_de_bloco(isolated):
              "source": "media", "media_id": "m1"},
         ]),
         source=Path("x.mp4"), width=640, height=360, fps=30,
-        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
     # nada cobre o vao dos 1s aos 3s, e nenhum filtro tenta preenche-lo
     assert "adelay=3000|3000" in c.filter_complex
-    assert c.duracao_s == pytest.approx(4.0)
+    assert c.duration_s == pytest.approx(4.0)
 
 
 def test_a_camada_de_audio_muda_e_ignorada(isolated):
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
     t = _com_musica_na_regua()
     t.layers[1].muted = True
-    c = compor(
+    c = compose_graph(
         t, source=Path("x.mp4"), width=640, height=360, fps=30,
-        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
     assert "[2:a]" not in c.filter_complex
@@ -2186,37 +2205,37 @@ def test_a_camada_de_audio_muda_e_ignorada(isolated):
 
 def test_com_so_video_a_camada_de_audio_nem_e_aberta(isolated):
     """Montar a entrada dela seria pagar por um arquivo que ninguem ia ouvir."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
-    c = compor(
+    c = compose_graph(
         _com_musica_na_regua(),
         source=Path("x.mp4"), width=640, height=360, fps=30,
-        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
-        so_video=True,
+        source_duration_s=600, library=_audio_library(Path("m.mp3")),
+        video_only=True,
     )
 
-    assert not any("m.mp3" in e.caminho for e in c.entradas)
-    assert c.mapa_audio is None
+    assert not any("m.mp3" in e.path for e in c.inputs)
+    assert c.audio_map is None
 
 
 def test_o_bloco_de_musica_entra_na_janela_de_exportacao(isolated):
     """Exportar um trecho reposiciona o som junto com a imagem -- senao a
     musica sairia deslocada do video."""
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
-    c = compor(
+    c = compose_graph(
         _com_musica_na_regua(
             export={"from_s": 1.0, "to_s": 3.0},
             blocos=[{"at_s": 0.0, "duration_s": 4.0, "start_s": 10.0,
                      "source": "media", "media_id": "m1"}],
         ),
         source=Path("x.mp4"), width=640, height=360, fps=30,
-        source_duration_s=600, midias=_midia_de_som(Path("m.mp3")),
+        source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
     # o bloco comecava aos 0s e ia ate 4s; visto pela janela ele comeca no
     # primeiro quadro e pega a musica a partir de 11s
-    assert any(e.seek == pytest.approx(11.0) for e in c.entradas)
+    assert any(e.seek == pytest.approx(11.0) for e in c.inputs)
     assert "atrim=duration=2.000" in c.filter_complex
 
 
@@ -2225,8 +2244,8 @@ def test_musica_na_regua_tira_a_montagem_do_caminho_curto(isolated):
     reaproveitamento da imagem supoe que o som venha depois, por fora."""
     t = _com_musica_na_regua()
 
-    assert t.tem_musica
-    assert not t.de_uma_camada_so
+    assert t.has_music
+    assert not t.single_layer
 
 
 def test_camada_de_audio_vazia_ainda_nao_e_musica(isolated):
@@ -2237,7 +2256,7 @@ def test_camada_de_audio_vazia_ainda_nao_e_musica(isolated):
         {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
         {"kind": "audio", "clips": []},
     ])
-    assert not t.tem_musica
+    assert not t.has_music
 
 
 @pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
@@ -2247,7 +2266,7 @@ def test_o_video_sai_com_a_musica_cortada_e_posicionada(
     """De ponta a ponta: o arquivo que sai tem som, dura o que foi pedido, e o
     trecho sem bloco de musica e mais silencioso que o resto."""
     from owcore import ffmpeg
-    from owcore.compose import compor
+    from owcore.compose import compose_graph
 
     info = ffmpeg.probe(short_sample)
     t = _com_musica_na_regua(
@@ -2261,10 +2280,10 @@ def test_o_video_sai_com_a_musica_cortada_e_posicionada(
             if clip.source == "recording":
                 clip.audio.mute = True
 
-    c = compor(
+    c = compose_graph(
         t, source=short_sample, width=info.width, height=info.height,
         fps=info.fps, source_duration_s=info.duration_s,
-        midias=_midia_de_som(MUSIC),
+        library=_audio_library(MUSIC),
     )
     saida = tmp_path / "com_musica.mp4"
     ffmpeg.compose(c, saida)
@@ -2358,20 +2377,20 @@ def test_a_faixa_continua_vira_bloco_na_leitura(isolated):
     assert t.track_id is None, "a faixa continua nao sobrevive a leitura"
     assert t.music_start_s == 0.0
     som = t.layers[-1]
-    assert som.e_audio and len(som.clips) == 1
+    assert som.is_audio and len(som.clips) == 1
     bloco = som.clips[0]
     assert bloco.media_id == "m1"
     assert bloco.at_s == 0.0, "a musica entrava com o video"
     assert bloco.duration_s == pytest.approx(5.0), "e cobria o video inteiro"
     assert bloco.start_s == pytest.approx(12.0), "do mesmo ponto da musica"
-    assert t.tem_musica
+    assert t.has_music
 
     # o rascunho salvo na V1 (cortes, sem camadas) chega no mesmo lugar
     d = MontageDraft(
         track_id="m1", music_start_s=3.0,
         cuts=[{"start_s": 10.0, "duration_s": 2.0, "at_s": 0.0}],
     )
-    assert [l.e_audio for l in d.layers] == [False, True]
+    assert [l.is_audio for l in d.layers] == [False, True]
     assert d.layers[0].clips[0].start_s == pytest.approx(10.0)
     assert d.layers[1].clips[0].start_s == pytest.approx(3.0)
 

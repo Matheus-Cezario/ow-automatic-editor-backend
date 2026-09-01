@@ -1,8 +1,8 @@
-"""Laço base de um microsserviço consumidor.
+"""Base loop of a consumer microservice.
 
-Um worker declara o stream que escuta e o grupo ao qual pertence; o laço cuida
-de reconexão, ack, encerramento limpo e de marcar o job como falho quando o
-handler estoura.
+A worker declares the stream it listens to and the group it belongs to; the
+loop takes care of reconnection, acking, clean shutdown, and marking the job as
+failed when the handler blows up.
 """
 
 from __future__ import annotations
@@ -22,9 +22,10 @@ from .logging import setup_logging
 
 
 class Worker(ABC):
-    #: stream que este serviço consome
+    #: the stream this service consumes
     stream: str
-    #: consumer group — um por serviço, para que cada serviço veja toda mensagem
+    #: consumer group -- one per service, so that every service sees every
+    #: message
     group: str
     name: str = "worker"
 
@@ -33,16 +34,16 @@ class Worker(ABC):
         self.consumer = f"{self.name}-{socket.gethostname()}-{os.getpid()}"
         self._running = True
 
-    # ── contrato ────────────────────────────────────────────────────────────
+    # -- contract -----------------------------------------------------------
 
     @abstractmethod
     def handle(self, payload: dict[str, Any]) -> None: ...
 
     def accepts(self, payload: dict[str, Any]) -> bool:
-        """Filtro opcional — usado pelos detectores para pegar só a sua ROI."""
+        """Optional filter -- used by the detectors to take only their own ROI."""
         return True
 
-    # ── laço ────────────────────────────────────────────────────────────────
+    # -- loop ---------------------------------------------------------------
 
     def stop(self, *_a: object) -> None:
         self.log.info("encerrando…")
@@ -54,7 +55,7 @@ class Worker(ABC):
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 signal.signal(sig, self.stop)
-            except (ValueError, OSError):  # sem sinais fora da thread principal
+            except (ValueError, OSError):  # no signals outside the main thread
                 pass
         self.log.info("ouvindo '%s' como grupo '%s'", self.stream, self.group)
         while self._running:
@@ -92,14 +93,14 @@ class Worker(ABC):
             bus.ack(self.stream, self.group, msg.id)
 
     def idle(self) -> None:
-        """Chamado quando nao havia mensagem. O editor usa para resgatar jobs
-        cujo detector morreu e nunca avisou."""
+        """Called when there was no message. The planner uses it to rescue jobs
+        whose detector died and never reported."""
         return None
 
     def on_error(self, payload: dict[str, Any], exc: Exception) -> None:
-        """O que fazer quando o handler estoura. Por padrao o job vira FAILED;
-        os detectores sobrescrevem, porque a falha de um deles nao deve
-        impedir que o editor monte com o que os outros acharam."""
+        """What to do when the handler blows up. By default the job becomes
+        FAILED; the detectors override this, because one of them failing must
+        not stop the editor from working with what the others found."""
         job_id = payload.get("job_id")
         if job_id:
             fail(job_id, f"{self.name}: {exc}")

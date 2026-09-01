@@ -75,31 +75,62 @@ a API em caminho relativo e não precisa de CORS.
 
 ## Duas fases
 
-O sistema não gera nada sozinho. Ele **analisa** e depois **espera**:
+O sistema é um **editor de vídeo com detecção automática de eventos**. Ele não
+gera nada sozinho: **analisa** e depois **espera**:
 
 ```
-1. você envia a gravação          → o sistema separa os momentos importantes
-2. o sistema diz o que dá gerar   → você escolhe quais quer
-3. você dá a música de cada vídeo → os vídeos são gerados
-   ↑______________________________________________|
-   pode repetir quantas vezes quiser: as propostas continuam lá
+1. você envia a gravação      → o sistema assiste e anota o que aconteceu
+2. você abre o editor         → os momentos estão na prateleira, com o quadro
+                                de cada um
+3. você monta e manda gerar   → o vídeo sai exatamente como foi montado
+   ↑__________________________________________|
+   pode repetir quantas vezes quiser: usar um momento não o consome
 ```
 
-Ou, no lugar do passo 2, você monta o vídeo à mão:
+> **O que saiu.** Até a Fase 11 havia um segundo caminho: o sistema aplicava
+> regras sobre os eventos ("três eliminações em 10s viram uma rajada") e
+> oferecia uma lista de vídeos prontos para escolher — bastava dar uma música a
+> cada um. Esse caminho foi descontinuado.
+>
+> Ele resolvia o problema errado. O que um editor de Overwatch não tem não é
+> alguém que corte por ele: é um editor que **saiba o que aconteceu no vídeo**.
+> As regras davam palpites medianos sobre montagem e, ao mesmo tempo,
+> escondiam momentos que o detector tinha achado — headshots e mortes por
+> habilidade viravam proposta e não apareciam na prateleira do editor. O
+> diferencial estava na detecção, e ela agora vai inteira para quem edita.
+
+### A espera do passo 1 tem de parecer trabalho
+
+Analisar 11 minutos de gravação leva ~8 minutos, e três quartos disso é uma
+única coisa: o recorte das regiões da HUD. A barra antiga dava a essa fase a
+faixa de 15% a 25% — ela ficava parada no mesmo número por seis minutos, e
+parada é como qualquer pessoa lê "travou". Foi exatamente essa a queixa que
+apareceu no uso real.
+
+Duas mudanças, e nenhuma delas acelera coisa alguma:
+
+* o ffmpeg passou a ser **perguntado** por onde anda (`-progress`), e o
+  download do vídeo, a contar bytes. A barra agora se move o tempo todo;
+* as fatias da barra passaram a ser proporcionais ao **tempo** de cada fase, e
+  não ao número de fases — download 0–17%, recorte 17–90%, áudio até 94%,
+  detecção o resto. Os números saem de cronometrar uma partida real.
+
+Só com as duas é que a tela pode dizer **quanto falta**, e a conta mais simples
+que existe basta: o que já andou, na velocidade com que andou. Medido numa
+partida de 11 min, ela disse "~6,5 min" e errou por 8 segundos. Enquanto a barra
+mentia sobre o formato do trabalho, nenhuma estimativa se sustentaria.
+
+### A montagem, por dentro
 
 ```
-2'. você traz a música para a biblioteca → o sistema ouve e devolve a onda e as
-    batidas
-3'. você põe a música na régua e cada momento onde quiser, do tamanho que
-    quiser, vendo no monitor o que vai sair — arrastando o bloco e as bordas
-4'. o vídeo sai exatamente assim
+a. você traz a música para a biblioteca → o sistema ouve e devolve a onda e as
+   batidas
+b. você põe a música na régua e cada momento onde quiser, do tamanho que
+   quiser, vendo no monitor o que vai sair — arrastando o bloco e as bordas
+c. o vídeo sai exatamente assim
 ```
 
-Os dois convivem. As propostas são um palpite bom para quando você só quer o
-vídeo pronto; a montagem é para quando você já sabe onde a música vira e quer o
-corte caindo *ali*.
-
-A separação existe porque as duas coisas têm ritmos diferentes. A análise é
+A separação entre as duas fases existe porque as duas coisas têm ritmos diferentes. A análise é
 cara (decodifica o vídeo, roda visão computacional) e o resultado não muda: os
 momentos da partida são os que são. Já a escolha é barata, pessoal e mutável —
 hoje você quer uma montagem com uma música, amanhã a mesma montagem com outra.
@@ -107,9 +138,9 @@ Rodar a análise de novo para trocar de música seria pagar caro por nada.
 
 Disso saem duas consequências que valem dizer em voz alta:
 
-- **cada vídeo tem a sua música.** As opções (trilha, trecho, repetição) são
-  por vídeo, não por partida. Dois vídeos do mesmo pedido podem sair com
-  músicas diferentes;
+- **cada vídeo tem a sua música.** A trilha é um bloco na régua da montagem,
+  não uma propriedade da partida. Duas montagens da mesma gravação saem com
+  músicas diferentes, e a mesma montagem troca de música sem reanalisar nada;
 - **vídeo sem música fica com o áudio original da partida.** Não é silêncio nem
   um padrão qualquer: é o som do jogo, que costuma ser metade da graça de um
   trecho corrido.
@@ -258,28 +289,29 @@ player também há o zip só daquela montagem, para quando você quer apenas ela
 
 ```
 análise (uma vez, automática)
-Flutter ──▶ gateway ──▶ preprocessor ──▶ detectores ──▶ planner ──▶ propostas
-             (API)      (1 decode,        (kills,       (regras)
-                        N recortes)       survival,
+Flutter ──▶ gateway ──▶ preprocessor ──▶ detectores ──▶ planner ──▶ momentos
+             (API)      (1 decode,        (kills,       (fecha e     + `ready`
+                        N recortes)       survival,      cruza)
                                           ults, sleep)
                                                             ⌛ espera você
 
-a música, quando você vai montar à mão
+a biblioteca do editor (música, clipe, imagem)
 Flutter ──▶ gateway ──▶ beats ──▶ onda + batidas de volta para o app
              (API)     (ouve a
                        música)
 
 geração (sob demanda, repetível)
-Flutter ──▶ gateway ──▶ beats ──▶ editor ──▶ clipes
-             (API)     (ritmo de  (cortes,
-                     cada música)  trilha)
+Flutter ──▶ gateway ──▶ editor ──▶ clipes
+             (API)     (cortes,
+                        camadas,
+                        trilha)
 ```
 
 O ponto central: **o vídeo pesado é decodificado uma única vez**. Dessa
 passagem saem recortes minúsculos da HUD, em FPS baixo, um por detector.
 Nenhum detector abre o arquivo original — só o editor volta a ele, e só nos
-segundos que interessam. O ritmo da música saiu da análise e foi para a
-geração: é lá que a música existe. Numa gravação 640×360 a 30 fps, o detector de
+segundos que interessam. O ritmo da música não está na análise: a música existe
+quando o usuário a traz para a biblioteca, e é ouvida ali. Numa gravação 640×360 a 30 fps, o detector de
 eliminações recebe um recorte de 102×64 a 12 fps: **1,1% dos pixels**. Os três
 recortes somados, mais o áudio, dão 21 MB de um vídeo de 100 MB.
 
@@ -332,6 +364,93 @@ Duas coisas que só apareceram ao medir a segunda gravação:
 O detector também achou uma pedrada na gravação da *Ana* — conferida a olho,
 era real: um Sigma aliado acertando uma Accretion.
 
+**Ultimate do jogador, acerto crítico e morte por habilidade** foram calibrados
+primeiro em gravações curtas de 2558×1438, feitas para mostrar exatamente esses
+elementos da HUD, e depois **conferidos em 27 minutos de partida inteira** (16
+min de Ana e 11 min de Sigma). Os dois materiais dizem coisas diferentes, e é a
+partida que manda: veja "O que a partida inteira mostrou" logo abaixo.
+
+| | material | resultado |
+|---|---|---|
+| Ultimate do jogador | 3 clipes curtos + 27 min de partida | 4 usos em 27 min, sem nenhum falso; o ícone do disco nomeou herói e habilidade com 0,81–0,98 de correlação, contra 0,49 do segundo colocado entre 270 ícones |
+| Acerto crítico | 8 s de Ashe, luneta com filtro magenta | achou o X vermelho; numa gravação com eliminações e nenhum headshot, zero falsos |
+| Morte por habilidade | 16 s de Domina + 27 min de partida | 7 de 11 eliminações nos 16 min de Ana, **sem nenhum falso** e todas nomeadas certo; as 4 perdidas tinham o ícone abaixo do limiar |
+
+### O que a partida inteira mostrou
+
+Os clipes curtos aprovaram os dois detectores; a partida inteira reprovou. É a
+diferença mais cara que este projeto mediu, e vale escrita:
+
+| | clipes curtos | partida inteira, antes | depois |
+|---|---|---|---|
+| Ultimate do jogador (Ana + Sigma) | 3/3 | 14 eventos, 4 verdadeiros | 4 eventos, 4 verdadeiros |
+| Morte por habilidade (Ana, 11 reais) | 2/2 | 27 eventos, 11 linhas reais | 7 eventos, 7 verdadeiros |
+
+O que os clipes curtos não continham:
+
+- **ninguém morre neles.** Ao morrer, o OW2 mostra a *kill cam*: um disco claro
+  com o rosto de quem matou, cercado de um anel — no mesmo lugar do botão de
+  ultimate e com a mesma forma. Numa partida de Ana isso virou uma "ultimate do
+  Roadhog"; numa de Sigma, Hanzo e Junkrat. O que separa os dois é o relógio:
+  em 27 minutos, toda faixa curta (0,2–0,6 s) era falsa e toda ultimate de
+  verdade ficou carregada 2,8 s ou mais;
+- **o killfeed tem uma linha só, e isolada.** Numa partida ele empilha várias,
+  elas deslizam quando chega uma nova, e o recorte do ícone falha por 3 a 5
+  segundos seguidos no meio da vida de uma linha. A mesma eliminação saía duas,
+  três, quatro vezes;
+- **quase todo abate é com arma comum**, e o vão entre as placas continua tendo
+  o `>` para casar com alguma coisa. Com o limiar em 0,55, `dva/light_gun` e
+  `baptiste/exo_boots` — arma e passiva, que nem aparecem no killfeed — viravam
+  eliminação. Em 0,65 isso some.
+
+A lição, escrita para a próxima vez: **um clipe gravado para mostrar um elemento
+da HUD mostra esse elemento e mais nada.** Ele não tem morte, não tem killfeed
+cheio, não tem a partida em volta. Serve para achar a região e conferir o
+casamento; não serve para calibrar limiar nenhum.
+
+Três coisas que só apareceram ao medir:
+
+- **decidir headshot por cor não funciona.** A luneta da Ashe tinge a tela
+  inteira de magenta, e aí *tudo* cai na faixa de matiz do vermelho. O que não
+  se move com o filtro é a **dominância** do canal vermelho sobre os outros
+  dois: o marcador dá ~107 e o cenário tingido, ~20. E a forma decide o resto:
+  as quatro diagonais pintadas com as quatro direções retas limpas — a caveira
+  de eliminação, também vermelha e também na mira, preenche as oito;
+- **a linha do killfeed fica segundos na tela**, então a presença dela não
+  marca instante nenhum. O que marca é ela **aparecer**. Contar quantas linhas
+  de cada habilidade há na tela quase resolve, e foi a primeira tentativa — mas
+  não distingue "a mesma linha sumiu e voltou" de "apareceu uma linha nova com
+  a mesma habilidade", e essas duas são exatamente os dois casos que importam.
+  Hoje cada linha é **acompanhada** pelas suas bordas horizontais: as de dentro
+  cercam o ícone e já estão paradas no primeiro quadro; as de fora são o
+  comprimento dos nomes e distinguem uma linha da outra. A altura não entra —
+  quando chega uma eliminação nova a pilha inteira desliza, e uma identidade
+  presa a ela trocaria de linha justamente aí;
+- **descartar pedaços pequenos do desenho parecia limpeza barata** e não é:
+  metade dos ícones do jogo é feita de partes soltas, e cortá-las muda o
+  enquadramento de um quadro para o outro. Numa gravação real isso transformou
+  uma eliminação em quatro.
+
+**Limites conhecidos:**
+
+- um headshot que *mata* pode passar despercebido. A caveira de eliminação
+  nasce ~0,1 s depois do marcador crítico e cobre as mesmas diagonais; a 12 fps
+  nem sempre sobra um quadro entre as duas. A eliminação continua sendo
+  detectada — o que se perde é o rótulo de "na cabeça";
+- **morte por habilidade acha 7 de cada 11**, e essa troca é deliberada: o
+  limiar do ícone está onde a precisão é 100%. Uma prateleira com um momento a
+  menos é melhor que uma que oferece um corte que não é do que diz ser: quem
+  monta confia no rótulo e não volta a conferir a gravação;
+- **duas eliminações do mesmo jogador sobre a mesma vítima, com a mesma
+  habilidade e dentro de ~7 s uma da outra, contam como uma.** As duas linhas
+  são idênticas em tudo que o detector usa para reconhecê-las. Exige a vítima
+  renascer e ser morta de novo no mesmo lugar; é raro, e o preço de errar para
+  o outro lado — repetir uma eliminação — é bem mais caro;
+- **a ultimate exige 2 s carregada.** No campo de treino a carga é instantânea,
+  então um clipe gravado lá pode não render evento. Em partida isso não
+  acontece, e foi justamente por deixar dois clipes de campo de treino mandarem
+  na calibração que 10 falsos passaram antes.
+
 O que estava errado: medir "quanto da região está vermelha" não distingue a
 caveira de eliminação do cenário do jogo nem do indicador direcional de dano.
 A decisão agora usa **forma, posição e tamanho** — a caveira é um blob
@@ -370,7 +489,17 @@ o mp4 e checa que ele tem faixa de áudio.
   — são assets do Overwatch e não vêm no repositório. Sem eles o detector emite
   zero, de propósito. A via alternativa por pico de áudio existe mas vem
   desligada: em partida real ela não distingue fala de ultimate de tiro e
-  explosão, e não há gabarito para calibrá-la honestamente.
+  explosão, e não há gabarito para calibrá-la honestamente. (A ultimate **do
+  jogador** é outra história: essa sai do botão do rodapé e não depende de
+  nenhum asset.)
+- **Nomes de habilidade em inglês.** O rótulo de uma montagem por habilidade sai
+  do arquivo do ícone, que veio da Blizzard: "Orisa: Energy Javelin". Traduzir
+  exigiria uma tabela de 270 linhas para envelhecer a cada herói novo, e o nome
+  original é o que aparece na tela de herói do jogo.
+- **Duas ultimates encadeadas contam como uma.** D.Va e Dmon liberam a segunda
+  ultimate logo depois da primeira; quando as duas caem dentro da mesma janela
+  — no campo de treino, onde a carga é instantânea — só a última vira evento.
+  Em partida, onde recarregar leva dezenas de segundos, as duas saem separadas.
 - **`DEATH` não é exatamente "morte"**. O sinal é a vida zerar ou a HUD sumir, o
   que cobre morte, killcam, troca de round e seleção de herói. Para as regras é
   o que importa (a sequência do jogador foi interrompida), e o app rotula isso

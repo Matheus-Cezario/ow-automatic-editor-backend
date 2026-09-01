@@ -1,15 +1,16 @@
-"""Microsservico das miniaturas dos momentos.
+"""Microservice for the moments' thumbnails.
 
-A barra lateral do editor mostra cada momento da partida com um quadro dele --
-sem imagem, escolher entre trinta eliminacoes e escolher entre trinta relogios.
-Este servico e quem tira esses quadros.
+The editor's sidebar shows each moment of the match with a frame of it --
+without a picture, choosing between thirty kills is choosing between thirty
+clocks. This service is what takes those frames.
 
-Roda **depois** da analise e **fora** dela: escuta o fim do planejamento, mas
-nao segura o job em `ready`. Se as miniaturas demorarem, ou nem sairem, tudo o
-mais continua funcionando -- a barra lateral so fica sem imagem.
+It runs **after** the analysis and **outside** it: it listens for the end of the
+analysis, but does not hold the job back from `ready`. If the thumbnails are
+slow, or never come, everything else keeps working -- the sidebar just has no
+pictures.
 
-Nao guarda nada no banco: a chave de cada quadro sai do instante
-(`frame_key`), entao quem escreve e quem le chegam nela sozinhos.
+It stores nothing in the database: each frame's key derives from the instant
+(`frame_key`), so writer and reader arrive at it on their own.
 """
 
 from __future__ import annotations
@@ -26,12 +27,12 @@ from owcore.models import STREAM_THUMBS, THUMB_KINDS, Job, frame_key
 from owcore.storage import get_storage, local_copy
 from owcore.worker import Worker, run_worker
 
-#: Largura da miniatura. Cabe numa lista lateral em tela cheia e continua
-#: legivel no dobro da densidade de um celular; maior que isso e so byte.
+#: Thumbnail width. It fits a sidebar list at full screen and stays legible at
+#: twice a phone's density; larger than that is just bytes.
 WIDTH = 240
 
-#: Teto de quadros por partida. Uma gravacao longa pode ter centenas de
-#: momentos, e ninguem rola uma lista dessas -- o app mostra os primeiros.
+#: Ceiling of frames per match. A long recording can have hundreds of moments,
+#: and nobody scrolls a list like that -- the app shows the first ones.
 MAX_FRAMES = 300
 
 
@@ -52,21 +53,21 @@ class Thumbs(Worker):
             video_key = job.video_key
 
         kinds = {str(k) for k in THUMB_KINDS}
-        instantes: list[float] = []
-        vistos: set[str] = set()
+        instants: list[float] = []
+        seen: set[str] = set()
         for e in load_events(job_id):
             if str(e.kind) not in kinds:
                 continue
-            chave = frame_key(job_id, e.t)
-            if chave in vistos:
-                continue  # dois detectores no mesmo instante dao o mesmo quadro
-            vistos.add(chave)
-            if not storage.exists(chave):
-                instantes.append(e.t)
-            if len(vistos) >= MAX_FRAMES:
+            key = frame_key(job_id, e.t)
+            if key in seen:
+                continue  # two detectors at the same instant give the same frame
+            seen.add(key)
+            if not storage.exists(key):
+                instants.append(e.t)
+            if len(seen) >= MAX_FRAMES:
                 break
 
-        if not instantes:
+        if not instants:
             self.log.info("job %s: nada a extrair", job_id)
             return
 
@@ -74,30 +75,30 @@ class Thumbs(Worker):
         work.mkdir(parents=True, exist_ok=True)
         source = local_copy(video_key, work)
 
-        feitos = 0
-        for t in instantes:
-            destino = work / f"{t:.2f}.jpg"
+        done = 0
+        for t in instants:
+            dest = work / f"{t:.2f}.jpg"
             try:
-                # `-ss` antes do input: o ffmpeg pula ate o keyframe mais
-                # proximo em vez de decodificar tudo desde o comeco. Um quadro
-                # sai em dezenas de milissegundos, e por isso extrair um por vez
-                # sai mais barato do que uma passagem unica pelo video inteiro.
-                ffmpeg.thumbnail(source, destino, at=t, width=WIDTH)
+                # `-ss` before the input: ffmpeg jumps to the nearest keyframe
+                # instead of decoding everything from the start. One frame comes
+                # out in tens of milliseconds, which is why extracting them one
+                # at a time is cheaper than a single pass over the whole video.
+                ffmpeg.thumbnail(source, dest, at=t, width=WIDTH)
             except ffmpeg.FFmpegError:
-                # um quadro que nao sai nao pode custar os outros: a barra
-                # lateral aguenta um item sem imagem
+                # a frame that fails must not cost the others: the sidebar can
+                # live with one item having no picture
                 self.log.warning("sem miniatura para %.2fs do job %s", t, job_id)
                 continue
-            storage.put_file(frame_key(job_id, t), destino)
-            destino.unlink(missing_ok=True)
-            feitos += 1
+            storage.put_file(frame_key(job_id, t), dest)
+            dest.unlink(missing_ok=True)
+            done += 1
 
         self.log.info("job %s: %d miniatura(s) de %d momento(s)",
-                      job_id, feitos, len(instantes))
+                      job_id, done, len(instants))
 
     def on_error(self, payload: dict[str, Any], exc: Exception) -> None:
-        """Miniatura que falha nao derruba o job: a analise ja terminou e o
-        video continua podendo ser montado, so que sem as imagens."""
+        """A failed thumbnail does not bring the job down: the analysis is over
+        and the video can still be built, just without the pictures."""
         self.log.warning(
             "nao consegui extrair as miniaturas de %s: %s",
             payload.get("job_id"), exc,

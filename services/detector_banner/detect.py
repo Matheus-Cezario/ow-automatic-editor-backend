@@ -1,28 +1,29 @@
-"""Deteccao das habilidades anunciadas na faixa do rodape.
+"""Detection of the abilities announced in the footer banner.
 
-Entrada: uma tira fina do rodape, onde o OW2 empilha os avisos de acao.
+Input: a thin strip of the footer, where OW2 stacks its action notices.
 
-Quando uma habilidade acerta, aparece uma faixa: "PUT <HEROI> (<JOGADOR>) TO
-SLEEP" para o dardo da Ana, "<HEROI> (<JOGADOR>) STUNNED BY ACCRETION" para a
-pedrada do Sigma. So que o rodape mostra uma **familia** de avisos com a mesma
-cara -- mesma cor, mesma forma, mesma posicao: "SAVED BY ...", "ORB OF HARMONY
-FROM ...", "GAINED FROM ...". Cor e geometria acham a faixa, mas nao dizem qual
-e.
+When an ability lands, a banner appears: "PUT <HERO> (<PLAYER>) TO SLEEP" for
+Ana's dart, "<HERO> (<PLAYER>) STUNNED BY ACCRETION" for Sigma's rock. Except
+the footer shows a whole **family** of notices with the same look -- same
+colour, same shape, same position: "SAVED BY ...", "ORB OF HARMONY FROM ...",
+"GAINED FROM ...". Colour and geometry find the banner, but do not say which one
+it is.
 
-Quem diz e o **icone** na ponta esquerda, e e ele que este detector compara --
-nao o texto. O texto muda de idioma; o icone nao. Cada habilidade configurada
-tem o seu molde, e num mesmo quadro so o molde vencedor pontua: uma faixa
-anuncia **uma** habilidade, entao deixar dois moldes marcarem a mesma faixa
-geraria dois eventos para o mesmo acontecimento.
+What says it is the **icon** at the left end, and that is what this detector
+compares -- not the text. Text changes with the language; the icon does not.
+Each configured ability has its own template, and within one frame only the
+winning template scores: a banner announces **one** ability, so letting two
+templates mark the same banner would produce two events for the same happening.
 
-Medido em duas gravacoes reais, com os moldes treinados so na primeira metade
-de cada uma:
+Measured on two real recordings, with the templates trained only on the first
+half of each:
 
-* Ana, 16 min: 11/11 dardos, nenhum falso;
-* Sigma, 11 min: 23/23 pedradas, nenhum falso (12 delas nunca vistas no treino).
+* Ana, 16 min: 11/11 darts, no false positives;
+* Sigma, 11 min: 23/23 rocks, no false positives (12 of them never seen in
+  training).
 
-A pedrada tambem foi encontrada uma vez na gravacao da Ana -- conferida a olho,
-era real: um Sigma aliado acertando uma Accretion.
+The rock was also found once in Ana's recording -- checked by eye, it was real:
+a friendly Sigma landing an Accretion.
 """
 
 from __future__ import annotations
@@ -40,53 +41,54 @@ from owcore.vision import Banner, find_banners, find_pulses, iter_frames
 
 log = logging.getLogger(__name__)
 
-#: lado do molde do icone, em pixels
+#: side of the icon template, in pixels
 ICON_SIZE = 24
-#: a janela recortada da faixa e maior que o molde, para o casamento poder
-#: deslizar. Sem essa folga o recorte tem exatamente o tamanho do molde, o
-#: `matchTemplate` fica com uma unica posicao possivel e um desalinhamento de
-#: um pixel derruba o score de uma habilidade legitima.
+#: the window cropped from the banner is larger than the template, so the
+#: match can slide. Without that slack the crop is exactly the template's size,
+#: `matchTemplate` is left with a single possible position, and a one-pixel
+#: misalignment sinks the score of a legitimate ability.
 ICON_WINDOW_W = 34
 ICON_WINDOW_H = 28
 
-#: habilidades reconhecidas quando o profile nao diz nada (compatibilidade)
-HABILIDADES_PADRAO = [
+#: abilities recognised when the profile says nothing (compatibility)
+DEFAULT_ABILITIES = [
     {"key": "ana_sleep", "icon": "ana_sleep_icon.png", "event": "sleep"},
     {"key": "sigma_accretion", "icon": "sigma_accretion_icon.png", "event": "stun"},
 ]
 
-#: usado quando nem a habilidade nem a secao dizem qual limiar usar
-LIMIAR_PADRAO = 0.90
+#: used when neither the ability nor the section says which threshold to use
+DEFAULT_THRESHOLD = 0.90
 
 
 @dataclass(slots=True)
-class Habilidade:
+class Ability:
     key: str
     event: EventKind
     template: np.ndarray
-    #: cada molde separa a sua habilidade num ponto diferente -- um icone cheio
-    #: e contrastado casa mais alto que um de tracos finos --, entao o limiar e
-    #: por habilidade. Um numero unico obrigaria a escolher entre perder dardos
-    #: e aceitar pedradas falsas.
-    limiar: float
+    #: each template separates its ability at a different point -- a full,
+    #: contrasty icon matches higher than one made of thin strokes -- so the
+    #: threshold is per ability. A single number would force a choice between
+    #: losing darts and accepting false rocks.
+    threshold: float
 
 
 def _icon_of(bgr: np.ndarray, banner: Banner) -> np.ndarray | None:
-    """Recorta a ponta esquerda da faixa, onde mora o icone, normalizada.
+    """Crops the left end of the banner, where the icon lives, normalised.
 
-    O recorte acompanha a faixa (posicao e altura relativas a ela), então vale
-    para qualquer resolucao de gravacao e para textos de qualquer tamanho.
+    The crop follows the banner (position and height relative to it), so it
+    holds at any recording resolution and for text of any size.
 
-    A janela sai maior que o molde, em cima e dos lados, para o casamento poder
-    deslizar: a caixa da faixa varia um ou dois pixels de um quadro para o
-    outro, e sem folga esse desvio bastava para derrubar o score.
+    The window comes out larger than the template, above and to the sides, so
+    the match can slide: the banner's box varies by a pixel or two from one
+    frame to the next, and without slack that drift was enough to sink the
+    score.
     """
-    lado = banner.h
-    folga_x = int(round(lado * (ICON_WINDOW_W / ICON_SIZE - 1) / 2))
-    folga_y = int(round(lado * (ICON_WINDOW_H / ICON_SIZE - 1) / 2))
-    x0 = banner.x + int(lado * 0.18) - folga_x
-    y0 = banner.y - folga_y
-    x1, y1 = x0 + lado + 2 * folga_x, y0 + lado + 2 * folga_y
+    side = banner.h
+    slack_x = int(round(side * (ICON_WINDOW_W / ICON_SIZE - 1) / 2))
+    slack_y = int(round(side * (ICON_WINDOW_H / ICON_SIZE - 1) / 2))
+    x0 = banner.x + int(side * 0.18) - slack_x
+    y0 = banner.y - slack_y
+    x1, y1 = x0 + side + 2 * slack_x, y0 + side + 2 * slack_y
     h_roi, w_roi = bgr.shape[:2]
     x0, y0 = max(0, x0), max(0, y0)
     x1, y1 = min(w_roi, x1), min(h_roi, y1)
@@ -99,31 +101,31 @@ def _icon_of(bgr: np.ndarray, banner: Banner) -> np.ndarray | None:
         ),
         cv2.COLOR_BGR2GRAY,
     )
-    # normalizar o contraste tira a influencia do cenario atras da faixa, e
-    # torna o molde independente da cor da faixa -- a mesma habilidade aparece
-    # em ciano numa gravacao e em verde noutra
+    # normalising the contrast removes the influence of the scenery behind the
+    # banner, and makes the template independent of the banner's colour -- the
+    # same ability appears in cyan in one recording and green in another
     return cv2.normalize(gray.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX)
 
 
-def _carregar(cfg: dict, shapes_dir: Path) -> list[Habilidade]:
-    limiar_secao = float(cfg.get("match_threshold", LIMIAR_PADRAO))
-    out: list[Habilidade] = []
-    for spec in cfg.get("abilities", HABILIDADES_PADRAO):
-        caminho = Path(shapes_dir) / spec["icon"]
-        template = cv2.imread(str(caminho), cv2.IMREAD_GRAYSCALE)
+def _load_abilities(cfg: dict, shapes_dir: Path) -> list[Ability]:
+    section_threshold = float(cfg.get("match_threshold", DEFAULT_THRESHOLD))
+    out: list[Ability] = []
+    for spec in cfg.get("abilities", DEFAULT_ABILITIES):
+        path = Path(shapes_dir) / spec["icon"]
+        template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if template is None:
             log.warning(
                 "molde de '%s' nao encontrado em %s -- sem ele nao da para "
                 "distinguir este aviso dos outros do rodape",
-                spec["key"], caminho,
+                spec["key"], path,
             )
             continue
         out.append(
-            Habilidade(
+            Ability(
                 key=spec["key"],
                 event=EventKind(spec["event"]),
                 template=template,
-                limiar=float(spec.get("match_threshold", limiar_secao)),
+                threshold=float(spec.get("match_threshold", section_threshold)),
             )
         )
     return out
@@ -135,19 +137,19 @@ def detect_abilities(
     cfg = profile.section("banner")
     roi = profile.roi("banner")
 
-    habilidades = _carregar(cfg, shapes_dir)
-    if not habilidades:
-        log.warning("nenhum molde de icone disponivel; nada a detectar")
+    abilities = _load_abilities(cfg, shapes_dir)
+    if not abilities:
+        log.warning("nenhum molde de icon disponivel; nada a detectar")
         return []
 
     ranges = cfg.get("hsv_ranges", [])
 
     times: list[float] = []
-    curvas: dict[str, list[float]] = {h.key: [] for h in habilidades}
+    curves: dict[str, list[float]] = {h.key: [] for h in abilities}
 
     for frame in iter_frames(roi_video, fps_hint=roi.fps):
         times.append(frame.t)
-        melhor = {h.key: 0.0 for h in habilidades}
+        best = {h.key: 0.0 for h in abilities}
         for banner in find_banners(
             frame.bgr,
             ranges,
@@ -157,29 +159,29 @@ def detect_abilities(
             max_offset=float(cfg.get("max_offset", 0.25)),
             min_fill=float(cfg.get("min_fill", 0.55)),
         ):
-            icone = _icon_of(frame.bgr, banner)
-            if icone is None:
+            icon = _icon_of(frame.bgr, banner)
+            if icon is None:
                 continue
-            icone = icone.astype(np.uint8)
+            icon = icon.astype(np.uint8)
             scores = {
                 h.key: float(
-                    cv2.matchTemplate(icone, h.template, cv2.TM_CCOEFF_NORMED).max()
+                    cv2.matchTemplate(icon, h.template, cv2.TM_CCOEFF_NORMED).max()
                 )
-                for h in habilidades
+                for h in abilities
             }
-            # a faixa anuncia UMA habilidade: so o molde vencedor pontua nela
-            vencedor = max(scores, key=scores.__getitem__)
-            melhor[vencedor] = max(melhor[vencedor], scores[vencedor])
-        for key, valor in melhor.items():
-            curvas[key].append(valor)
+            # the banner announces ONE ability: only the winning template scores
+            winner = max(scores, key=scores.__getitem__)
+            best[winner] = max(best[winner], scores[winner])
+        for key, value in best.items():
+            curves[key].append(value)
 
     events: list[DetectionEvent] = []
-    for h in habilidades:
+    for h in abilities:
         pulses = find_pulses(
             times,
-            curvas[h.key],
-            rise=h.limiar,
-            fall=h.limiar * 0.8,
+            curves[h.key],
+            rise=h.threshold,
+            fall=h.threshold * 0.8,
             min_duration=float(cfg.get("min_pulse_s", 0.0)),
             min_gap=float(cfg.get("min_gap_s", 3.0)),
         )

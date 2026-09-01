@@ -35,8 +35,13 @@ data/
 # Ícones de ultimate e de eliminação são material do Overwatch, recortado por
 # quem usa. As pastas ficam no repositório (vazias) para o sistema achar o
 # caminho — daí a exceção para o `.gitkeep`.
+#
+# `abilities/` é a mesma coisa por outro caminho: os ícones oficiais de todas
+# as habilidades, baixados por `tools/fetch_ability_icons.py`. São 270 imagens
+# da Blizzard — material do jogo, não fonte deste repositório.
 templates/kills/*
 templates/ults/*
+templates/abilities/*
 !templates/**/.gitkeep
 
 # ── editores ──────────────────────────────────────────────────────────────

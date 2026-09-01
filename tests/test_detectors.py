@@ -10,7 +10,15 @@ import json
 
 import pytest
 
-from conftest import MUSIC, SAMPLE, TRUTH, ULT_TEMPLATES, needs_sample, service_module
+from conftest import (
+    ABILITY_ICONS,
+    MUSIC,
+    SAMPLE,
+    TRUTH,
+    ULT_TEMPLATES,
+    needs_sample,
+    service_module,
+)
 from owcore.ffmpeg import extract_audio, extract_rois, probe
 from owcore.models import EventKind
 from owcore.profiles import load_profile
@@ -30,7 +38,9 @@ def rois(tmp_path_factory):
     prof = load_profile("ow2_default")
     out = tmp_path_factory.mktemp("rois")
     crops = extract_rois(
-        SAMPLE, prof.rois(["kills", "health", "killfeed", "banner"]), out
+        SAMPLE,
+        prof.rois(["kills", "health", "killfeed", "banner", "ult", "player"]),
+        out,
     )
     crops["audio"] = extract_audio(SAMPLE, out / "audio.wav")
     return crops
@@ -144,7 +154,7 @@ def test_templates_de_ult_acham_as_ultimates(rois, truth):
 @pytest.mark.skipif(not MUSIC.exists(), reason="sem musica de exemplo")
 def test_bpm_da_musica_de_teste(tmp_path):
     detect = service_module("beats")
-    grid = detect.analyze_music(MUSIC, tmp_path)
+    grid = detect.analyze_track(MUSIC, tmp_path).grid
     assert 110 <= grid.bpm <= 130  # a faixa foi gerada a 120 BPM
     assert len(grid.beats) > 50
 
@@ -226,3 +236,239 @@ def test_sem_o_template_o_detector_nao_inventa(rois, tmp_path):
         rois["banner"], load_profile("ow2_default"), tmp_path / "vazio"
     )
     assert ev == []
+
+
+# ── acertos criticos, no mesmo recorte da mira ─────────────────────────────
+
+
+def test_headshots_batem_com_o_gabarito(rois, truth):
+    detect = service_module("detector_kills")
+    ev = detect.detect_headshots(rois["kills"], load_profile("ow2_default"))
+    assert [e.kind for e in ev] == [EventKind.HEADSHOT] * len(ev)
+    assert casam([e.t for e in ev], truth["headshots"])
+
+
+def test_caveira_de_eliminacao_nao_vira_headshot(rois, truth):
+    """A caveira e vermelha e nasce na mesma mira que o marcador critico. O que
+    separa os dois e a forma: o X deixa as quatro direcoes retas limpas, e a
+    caveira preenche as oito. Sem esse segundo teste toda eliminacao viraria
+    headshot tambem."""
+    detect = service_module("detector_kills")
+    detectados = [e.t for e in detect.detect_headshots(
+        rois["kills"], load_profile("ow2_default")
+    )]
+    for k in truth["kills"]:
+        if any(abs(k - h) <= 1.5 for h in truth["headshots"]):
+            continue  # ha um headshot de verdade por perto; nada a provar aqui
+        assert not any(abs(t - k) <= 0.5 for t in detectados), (
+            f"a caveira em {k}s virou headshot"
+        )
+
+
+# ── ultimate do proprio jogador, lida no botao do rodape ───────────────────
+
+
+def ults_do_jogador(rois, icones):
+    detect = service_module("detector_ults")
+    return detect.detect_self_ults(rois["ult"], load_profile("ow2_default"), icones)
+
+
+def test_ultimate_do_jogador_bate_com_o_gabarito(rois, truth):
+    ev = ults_do_jogador(rois, ABILITY_ICONS)
+    assert [e.kind for e in ev] == [EventKind.ULT_USED] * len(ev)
+    assert casam([e.t for e in ev], truth["self_ults"])
+    assert all(e.meta["side"] == "self" for e in ev)
+
+
+def test_o_evento_e_o_instante_em_que_a_ultimate_e_USADA(rois, truth):
+    """O botao fica carregado por varios segundos antes -- e a borda de descida
+    que marca o instante, nao a presenca do disco branco."""
+    ev = ults_do_jogador(rois, ABILITY_ICONS)
+    assert ev, "nenhuma ultimate detectada"
+    for e in ev:
+        assert e.meta["charged_s"] > 1.0, (
+            "o botao carregado durou menos que a janela desenhada: o evento "
+            "provavelmente saiu do lugar errado da faixa"
+        )
+
+
+@pytest.mark.skipif(not ABILITY_ICONS.exists(), reason="sem icones de exemplo")
+def test_o_icone_do_disco_diz_qual_ultimate_era(rois):
+    ev = ults_do_jogador(rois, ABILITY_ICONS)
+    assert ev
+    for e in ev:
+        assert e.meta["hero"] == "sample"
+        assert e.meta["ability"] == "self_ult"
+
+
+def test_o_botao_piscando_nao_vira_ultimate(rois, truth):
+    """Nem tudo que e claro, redondo e centrado naquela janela e o botao: a
+    kill cam desenha um disco com o rosto de quem matou, e clarao de explosao
+    passa por ali. O que os separa e o relogio -- eles duram um punhado de
+    quadros, e uma ultimate fica carregada segundos antes de ser usada."""
+    ev = ults_do_jogador(rois, ABILITY_ICONS)
+    for piscada in truth["ult_flashes"]:
+        assert not any(abs(e.t - piscada) < 1.5 for e in ev)
+    assert casam([e.t for e in ev], truth["self_ults"])
+
+
+def test_sem_icones_a_ultimate_continua_sendo_detectada(rois, truth, tmp_path):
+    """Contrato: os icones dizem *qual* ultimate foi, e nada alem disso. Sem
+    eles o evento continua saindo -- so sem rotulo."""
+    ev = ults_do_jogador(rois, tmp_path / "vazio")
+    assert casam([e.t for e in ev], truth["self_ults"])
+    assert all("hero" not in e.meta for e in ev)
+
+
+# ── eliminacao com habilidade, lida no killfeed ────────────────────────────
+
+
+def mortes_por_habilidade(rois, icones, player=...):
+    detect = service_module("detector_killfeed")
+    return detect.detect_ability_kills(
+        rois["killfeed"],
+        rois["player"] if player is ... else player,
+        load_profile("ow2_default"),
+        icones,
+    )
+
+
+def test_mortes_por_habilidade_batem_com_o_gabarito(rois, truth):
+    ev = mortes_por_habilidade(rois, ABILITY_ICONS)
+    assert [e.kind for e in ev] == [EventKind.ABILITY_KILL] * len(ev)
+    assert casam([e.t for e in ev], truth["ability_kills"])
+    assert all(e.meta["ability"] == "sample/ability_kill" for e in ev)
+
+
+def test_eliminacao_de_colega_de_time_nao_entra(rois, truth):
+    """O killfeed anuncia as dez pessoas da partida, nao so o jogador.
+
+    A cor da placa nao resolve: medido em gravacao real, azul e quem matou e
+    vermelha e quem morreu, dos dois lados. Quem separa e o nome escrito na
+    placa azul -- e no video de exemplo o colega mata com a MESMA habilidade,
+    com um nome do MESMO comprimento, para nao dar para acertar por acaso.
+    """
+    ev = mortes_por_habilidade(rois, ABILITY_ICONS)
+    for t in truth["teammate_kills"]:
+        assert not any(abs(e.t - t) <= TOLERANCIA_S for e in ev), (
+            f"a eliminacao do colega em {t}s entrou como se fosse do jogador"
+        )
+
+
+def test_sem_a_placa_do_jogador_nao_da_para_atribuir(rois):
+    """Sem saber quem e o jogador nao ha eliminacao a reportar: devolver todas
+    seria entregar as dos outros como se fossem dele."""
+    assert mortes_por_habilidade(rois, ABILITY_ICONS, player=None) == []
+
+
+def test_a_linha_do_killfeed_vale_UMA_eliminacao(rois, truth):
+    """A linha fica segundos na tela. Contar quadros acima do limiar daria uma
+    eliminacao a cada quadro; o que conta e ela aparecer."""
+    ev = mortes_por_habilidade(rois, ABILITY_ICONS)
+    assert len(ev) == len(truth["ability_kills"])
+
+
+def test_sem_icones_o_killfeed_nao_inventa(rois, tmp_path):
+    """Sem o banco nao da para dizer QUAL habilidade foi -- e uma eliminacao
+    sem essa resposta o detector da mira ja reporta."""
+    assert mortes_por_habilidade(rois, tmp_path / "vazio") == []
+
+
+# ── ler o nome escrito, sem ler as letras ──────────────────────────────────
+
+
+def _escrito(texto: str, escala: float, grossura: int,
+             fundo: tuple[int, int, int] = (190, 140, 70)) -> "np.ndarray":
+    """Uma placa da HUD com um nome escrito nela."""
+    import cv2
+    import numpy as np
+
+    (largura, alt_letra), _ = cv2.getTextSize(
+        texto, cv2.FONT_HERSHEY_SIMPLEX, escala, grossura
+    )
+    alt = int(alt_letra * 2.6)
+    img = np.full((alt, largura + 16, 3), fundo, np.uint8)
+    cv2.putText(img, texto, (8, (alt + alt_letra) // 2), cv2.FONT_HERSHEY_SIMPLEX,
+                escala, (240, 240, 240), grossura, cv2.LINE_AA)
+    return img
+
+
+def test_o_mesmo_nome_em_tamanhos_diferentes_e_o_mesmo_nome():
+    """As duas escritas da HUD nao tem o mesmo tamanho nem o mesmo
+    espacamento: na gravacao de referencia o mesmo nome sai 50% mais largo no
+    killfeed do que na placa do rodape, normalizado pela altura. E por isso que
+    a comparacao e letra a letra, com cada letra normalizada sozinha."""
+    from owcore.nameplate import read_name, same_name
+
+    grande = read_name(_escrito("JOGADOR", 0.9, 2, (120, 62, 44)))
+    pequeno = read_name(_escrito("JOGADOR", 0.5, 2))
+    assert grande is not None and pequeno is not None
+    assert len(grande) == len(pequeno) == 7
+    assert same_name(grande, pequeno) > 0.5
+
+
+def test_nome_de_outro_tamanho_e_recusado_de_saida():
+    from owcore.nameplate import read_name, same_name
+
+    assert same_name(read_name(_escrito("JOGADOR", 0.9, 2)),
+                     read_name(_escrito("COLEGA", 0.9, 2))) == 0.0
+
+
+def test_nome_do_mesmo_comprimento_ainda_e_outro_nome():
+    """O atalho do comprimento resolve a maioria dos casos e esconde o resto:
+    numa partida real havia dois nomes de nove letras. Quem separa e o desenho
+    de cada letra."""
+    from owcore.nameplate import read_name, same_name
+
+    jogador = read_name(_escrito("JOGADOR", 0.9, 2, (120, 62, 44)))
+    outro = read_name(_escrito("PATRICK", 0.5, 2))
+    assert len(jogador) == len(outro) == 7
+    assert same_name(jogador, outro) < 0.4
+
+
+def test_placa_sem_escrita_nenhuma_nao_inventa_nome():
+    import numpy as np
+    from owcore.nameplate import read_name
+
+    assert read_name(np.full((30, 160, 3), (190, 140, 70), np.uint8)) is None
+
+
+#: uma linha de killfeed, ja acompanhada desde t=10.0. As placas que a
+#: originaram: quem matou em x 100..250 e quem morreu em x 290..410.
+def _tracked_line():
+    kf = service_module("detector_killfeed")
+    line = kf._Line(
+        inner_left=250, inner_right=290, outer_left=100, outer_right=410, h=30,
+        start=10.0, last_seen=10.0, key="a/b", score=0.8, style="ability",
+    )
+    return kf, line
+
+
+def test_a_linha_entrando_nao_vira_uma_segunda_eliminacao():
+    """Enquanto a linha desliza para dentro, as placas ainda estao se abrindo:
+    a borda de fora anda dezenas de pixels de um quadro para o outro. Exigir
+    ela ali faria a mesma eliminacao sair duas vezes."""
+    kf, line = _tracked_line()
+    aliado = kf.Plate(x=100, y=10, w=150, h=30)
+    crescendo = kf.Plate(x=290, y=10, w=90, h=30)  # ainda nao acabou de abrir
+    assert line.same_as(aliado, crescendo, 10.2, slide=0.6)
+    # passada a entrada, a mesma diferenca ja nao e a mesma linha
+    assert not line.same_as(aliado, crescendo, 12.0, slide=0.6)
+
+
+def test_duas_eliminacoes_do_mesmo_jogador_sao_duas_linhas():
+    """As bordas de dentro cercam o icone e sao iguais nas duas -- e por isso
+    que as de fora, que sao o comprimento dos nomes, tem de contar."""
+    kf, line = _tracked_line()
+    aliado = kf.Plate(x=100, y=10, w=150, h=30)       # mesmo matador
+    outra_vitima = kf.Plate(x=290, y=10, w=60, h=30)  # nome mais curto
+    assert not line.same_as(aliado, outra_vitima, 12.0, slide=0.6)
+
+
+def test_a_linha_e_reconhecida_mesmo_deslizando_para_baixo():
+    """Quando uma eliminacao nova chega, a pilha inteira desce. A identidade da
+    linha nao pode depender da altura, ou ela trocaria de linha justamente ai."""
+    kf, line = _tracked_line()
+    aliado = kf.Plate(x=100, y=70, w=150, h=30)
+    inimigo = kf.Plate(x=290, y=70, w=120, h=30)
+    assert line.same_as(aliado, inimigo, 12.0, slide=0.6)

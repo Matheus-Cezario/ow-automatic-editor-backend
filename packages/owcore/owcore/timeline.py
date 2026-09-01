@@ -1,12 +1,12 @@
-"""Da linha do tempo que o usuario montou para a lista de pedacos a cortar.
+"""From the timeline the user built to the list of pieces to cut.
 
-Regras puras, sem ffmpeg e sem banco -- e por isso que da para testar a
-montagem inteira sem abrir um video sequer.
+Pure rules, no ffmpeg and no database -- which is why the whole montage can be
+tested without opening a single video.
 
-A diferenca para `rules.py` e de quem decide. La o sistema escolhe os cortes a
-partir dos eventos; aqui ele nao escolhe nada: recebe blocos ja posicionados e
-so precisa dizer o que vai para o ffmpeg, em que ordem, e o que fazer com o
-espaco vazio entre um bloco e o proximo.
+The difference from `rules.py` is who decides. There the system reads events;
+here it decides nothing: it receives blocks already positioned and only has to
+say what goes to ffmpeg, in what order, and what to do with the empty space
+between one block and the next.
 """
 
 from __future__ import annotations
@@ -16,25 +16,25 @@ from typing import Sequence
 
 from .models import MIN_CUT_S, TimelineCut
 
-#: Buraco menor que isto nao vira preto: e menos de um quadro a 24 fps, e
-#: emenda-lo custaria uma reencodagem inteira para ninguem ver a diferenca. O
-#: bloco seguinte simplesmente comeca esse tanto mais cedo.
+#: A gap smaller than this does not become black: it is less than one frame at
+#: 24 fps, and filling it would cost a whole re-encode for nobody to see the
+#: difference. The next block simply starts that much earlier.
 MIN_GAP_S = 0.04
 
 
 @dataclass(slots=True)
 class Piece:
-    """Um pedaco do video final, na ordem em que sera concatenado.
+    """A piece of the final video, in the order it will be concatenated.
 
-    Ou e um corte da gravacao (`black=False`, com `start_s`/`end_s` na
-    gravacao), ou e o preto que preenche um buraco deixado pelo usuario.
+    It is either a cut from the recording (`black=False`, with `start_s`/`end_s`
+    in the recording) or the black filling a gap the user left.
     """
 
     duration_s: float
     start_s: float = 0.0
     end_s: float = 0.0
     black: bool = False
-    #: instante do momento que originou o corte -- so para nomear o arquivo
+    #: instant of the moment the cut came from -- only used to name the file
     source_t: float = 0.0
     kind: str = ""
 
@@ -49,75 +49,76 @@ def plan(
     source_duration_s: float = 0.0,
     min_gap_s: float = MIN_GAP_S,
 ) -> list[Piece]:
-    """Os pedacos, em ordem, cobrindo o video inteiro sem furo.
+    """The pieces, in order, covering the whole video with no hole.
 
-    O que o usuario deixou vazio vira preto com a musica tocando por cima --
-    e o que qualquer editor faz, e e o que preserva a promessa da tela: cada
-    bloco cai exatamente no ponto da musica onde ele foi posto. Emendar os
-    blocos para tapar o buraco seria mover todos os seguintes.
+    What the user left empty becomes black with the music playing over it --
+    which is what any editor does, and what keeps the screen's promise: every
+    block lands exactly on the point of the music where it was placed. Closing
+    the gap by joining the blocks would move every one that follows.
 
-    Um corte que passa do fim da gravacao e aparado, e o que sobrar do lugar
-    dele tambem vira preto -- de novo para nao empurrar quem vem depois.
+    A cut running past the end of the recording is trimmed, and whatever is
+    left of its slot also becomes black -- again, so as not to push the ones
+    behind it.
     """
-    ordenados = sorted(cuts, key=lambda c: c.at_s)
-    pecas: list[Piece] = []
+    ordered = sorted(cuts, key=lambda c: c.at_s)
+    pieces: list[Piece] = []
     cursor = 0.0
 
-    for corte in ordenados:
-        buraco = corte.at_s - cursor
-        if buraco >= min_gap_s:
-            pecas.append(Piece(duration_s=buraco, black=True))
-            cursor += buraco
+    for cut in ordered:
+        gap = cut.at_s - cursor
+        if gap >= min_gap_s:
+            pieces.append(Piece(duration_s=gap, black=True))
+            cursor += gap
 
-        duracao = corte.duration_s
+        duration = cut.duration_s
         if source_duration_s > 0:
-            duracao = min(duracao, max(0.0, source_duration_s - corte.start_s))
+            duration = min(duration, max(0.0, source_duration_s - cut.start_s))
 
-        if duracao >= MIN_CUT_S:
-            pecas.append(
+        if duration >= MIN_CUT_S:
+            pieces.append(
                 Piece(
-                    duration_s=duracao,
-                    start_s=corte.start_s,
-                    end_s=corte.start_s + duracao,
-                    source_t=corte.source_t,
-                    kind=corte.kind,
+                    duration_s=duration,
+                    start_s=cut.start_s,
+                    end_s=cut.start_s + duration,
+                    source_t=cut.source_t,
+                    kind=cut.kind,
                 )
             )
 
-        # o que a aparacao comeu (ou o bloco inteiro, se ele caiu fora da
-        # gravacao) vira preto: o proximo bloco continua no lugar marcado
-        sobra = corte.duration_s - max(0.0, duracao)
-        if sobra >= min_gap_s:
-            pecas.append(Piece(duration_s=sobra, black=True))
+        # whatever the trim ate (or the whole block, if it fell outside the
+        # recording) becomes black: the next block stays where it was marked
+        leftover = cut.duration_s - max(0.0, duration)
+        if leftover >= min_gap_s:
+            pieces.append(Piece(duration_s=leftover, black=True))
 
-        cursor = corte.until_s
+        cursor = cut.until_s
 
-    # um preto no fim nao acrescenta nada: o video acaba no ultimo corte
-    while pecas and pecas[-1].black:
-        pecas.pop()
+    # trailing black adds nothing: the video ends on the last cut
+    while pieces and pieces[-1].black:
+        pieces.pop()
 
-    # dois pretos seguidos sao um preto so -- cada peca custa uma codificacao
-    juntos: list[Piece] = []
-    for peca in pecas:
-        if peca.black and juntos and juntos[-1].black:
-            juntos[-1].duration_s += peca.duration_s
+    # two blacks in a row are one black -- every piece costs an encode
+    merged: list[Piece] = []
+    for piece in pieces:
+        if piece.black and merged and merged[-1].black:
+            merged[-1].duration_s += piece.duration_s
             continue
-        juntos.append(peca)
-    return juntos
+        merged.append(piece)
+    return merged
 
 
-def total_duration_s(pecas: Sequence[Piece]) -> float:
-    return sum(p.duration_s for p in pecas)
+def total_duration_s(pieces: Sequence[Piece]) -> float:
+    return sum(p.duration_s for p in pieces)
 
 
 def snap(value: float, beats: Sequence[float], tolerance_s: float = 0.12) -> float:
-    """Gruda um instante na batida mais proxima, se houver uma perto.
+    """Snaps an instant to the nearest beat, if there is one close by.
 
-    Existe aqui, e nao so no app, porque o servidor tambem precisa da mesma
-    resposta: o app gruda enquanto o usuario arrasta, e quem confere depois tem
-    de chegar no mesmo numero.
+    It lives here, and not only in the app, because the server needs the same
+    answer: the app snaps while the user drags, and whoever checks afterwards
+    has to arrive at the same number.
     """
     if not beats:
         return value
-    melhor = min(beats, key=lambda b: abs(b - value))
-    return melhor if abs(melhor - value) <= tolerance_s else value
+    best = min(beats, key=lambda b: abs(b - value))
+    return best if abs(best - value) <= tolerance_s else value

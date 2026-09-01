@@ -1,30 +1,32 @@
-"""Da linha do tempo em camadas para um grafo de filtros do ffmpeg.
+"""From the layered timeline to an ffmpeg filter graph.
 
-Este arquivo **não roda ffmpeg**: ele escreve o `-filter_complex` e diz que
-entradas passar. É pura montagem de texto, e por isso dá para testar o grafo
-inteiro sem codificar um quadro sequer — o que importa quando um erro no grafo
-derruba o render todo, e não apenas um corte.
+This file **does not run ffmpeg**: it writes the `-filter_complex` and says
+which inputs to pass. It is pure text assembly, and that is why the whole graph
+can be tested without encoding a single frame -- which matters when an error in
+the graph brings down the entire render, and not just one cut.
 
-## Por que um grafo, e não corte-e-emenda
+## Why a graph, and not cut-and-splice
 
-A V1 cortava cada trecho num arquivo e concatenava. Funciona, é resistente (um
-corte ruim custa só ele) e **não comporta camada**: sobrepor exige que dois
-pedaços existam ao mesmo tempo, e concatenação é justamente o contrário disso.
+V1 cut each stretch into a file and concatenated them. That works, it is
+resilient (a bad cut costs only itself) and it **cannot hold layers**:
+overlaying requires two pieces existing at the same time, and concatenation is
+exactly the opposite of that.
 
-Por isso o caminho antigo continua vivo para montagem de uma camada só, e este
-aqui entra quando há camada, transformação ou som ajustado. A escolha é de
-`Timeline.de_uma_camada_so`.
+So the old path stays alive for single-layer montages, and this one takes over
+when there is a layer, a transform or adjusted sound. The choice is made by
+`Timeline.single_layer`.
 
-## A forma do grafo
+## The shape of the graph
 
-Uma tela de fundo cobre o vídeo inteiro, e cada clipe é sobreposto nela na hora
-certa:
+A background canvas covers the whole video, and each clip is overlaid onto it
+at the right moment:
 
-    [fundo][v0] overlay(enable=...) [t0]
-    [t0]   [v1] overlay(enable=...) [t1]  ...
+    [bg][v0] overlay(enable=...) [t0]
+    [t0][v1] overlay(enable=...) [t1]  ...
 
-O fundo resolve de graça o que na V1 era caso especial: buraco entre clipes é
-onde nada foi sobreposto, e o que se vê ali é a própria tela de fundo.
+The background solves for free what was a special case in V1: a gap between
+clips is where nothing was overlaid, and what you see there is the background
+canvas itself.
 """
 
 from __future__ import annotations
@@ -36,42 +38,41 @@ from . import textfx
 from .models import MIN_CUT_S, ClipSource, Fit, MediaKind, Timeline, TimelineClip
 
 
-
 @dataclass(slots=True)
-class MidiaNoDisco:
-    """Um item da biblioteca já baixado, com o que o grafo precisa saber dele.
+class LibraryFile:
+    """A library item already downloaded, with what the graph needs to know.
 
-    O tipo importa porque imagem não é vídeo: ela não corre no tempo, então
-    entra em laço e ganha a duração que o clipe pedir.
+    The kind matters because an image is not a video: it does not run in time,
+    so it goes in on a loop and takes whatever duration the clip asks for.
     """
 
-    caminho: Path
+    path: Path
     kind: str = MediaKind.VIDEO
 
     @property
-    def e_imagem(self) -> bool:
+    def is_image(self) -> bool:
         return self.kind == MediaKind.IMAGE
 
     @property
-    def e_audio(self) -> bool:
+    def is_audio(self) -> bool:
         return self.kind == MediaKind.AUDIO
 
 
 @dataclass(slots=True)
-class Entrada:
-    """Um `-i` do ffmpeg, com o que vem antes dele."""
+class Input:
+    """One ffmpeg `-i`, with whatever comes before it."""
 
-    caminho: str
-    #: `-ss` antes do input: o ffmpeg pula até o keyframe mais próximo em vez de
-    #: decodificar desde o começo, o que faz cada clipe custar quase nada
+    path: str
+    #: `-ss` before the input: ffmpeg jumps to the nearest keyframe instead of
+    #: decoding from the start, which makes each clip cost almost nothing
     seek: float | None = None
-    duracao: float | None = None
-    #: entradas sintéticas (cor, silêncio) vêm de `-f lavfi`
+    duration: float | None = None
+    #: synthetic inputs (colour, silence) come from `-f lavfi`
     lavfi: bool = False
-    #: uma imagem é um quadro só; em laço ela vira vídeo pelo tempo que se pedir
+    #: an image is a single frame; on a loop it becomes video for as long as asked
     loop: bool = False
 
-    def argumentos(self) -> list[str]:
+    def args(self) -> list[str]:
         args: list[str] = []
         if self.lavfi:
             args += ["-f", "lavfi"]
@@ -79,39 +80,39 @@ class Entrada:
             args += ["-loop", "1"]
         if self.seek is not None:
             args += ["-ss", f"{self.seek:.3f}"]
-        if self.duracao is not None:
-            args += ["-t", f"{self.duracao:.3f}"]
-        args += ["-i", self.caminho]
+        if self.duration is not None:
+            args += ["-t", f"{self.duration:.3f}"]
+        args += ["-i", self.path]
         return args
 
 
 @dataclass(slots=True)
-class Composicao:
-    entradas: list[Entrada] = field(default_factory=list)
-    filtros: list[str] = field(default_factory=list)
-    mapa_video: str = ""
-    mapa_audio: str | None = None
-    duracao_s: float = 0.0
+class Composition:
+    inputs: list[Input] = field(default_factory=list)
+    filters: list[str] = field(default_factory=list)
+    video_map: str = ""
+    audio_map: str | None = None
+    duration_s: float = 0.0
     crf: int = 20
 
     @property
     def filter_complex(self) -> str:
-        return ";".join(self.filtros)
+        return ";".join(self.filters)
 
-    def argumentos_de_entrada(self) -> list[str]:
-        return [a for e in self.entradas for a in e.argumentos()]
+    def input_args(self) -> list[str]:
+        return [a for e in self.inputs for a in e.args()]
 
 
-def _posicao(clip: TimelineClip) -> tuple[str, str]:
-    """Onde o clipe é sobreposto, em expressões que o ffmpeg avalia.
+def _position(clip: TimelineClip) -> tuple[str, str]:
+    """Where the clip is overlaid, as expressions ffmpeg evaluates.
 
-    `x` e `y` do transform são deslocamentos do centro normalizados pela metade
-    do quadro, então a mesma montagem vale em qualquer resolução: `W` e `H` são
-    a tela, `w` e `h` o clipe já escalado.
+    The transform's `x` and `y` are offsets from the centre normalised by half
+    the frame, so the same montage holds at any resolution: `W` and `H` are the
+    canvas, `w` and `h` the already-scaled clip.
 
-    **Texto é a exceção**: a tela dele já tem o tamanho do quadro e o `drawtext`
-    já pôs a frase no lugar dentro dela. Deslocar a tela também moveria o texto
-    duas vezes — com `y=-0.5` ele saía por cima da borda e sumia.
+    **Text is the exception**: its canvas is already frame-sized and `drawtext`
+    has already put the line in place inside it. Offsetting the canvas would
+    move the text twice -- with `y=-0.5` it went over the edge and vanished.
     """
     if clip.source is ClipSource.TEXT:
         return "0", "0"
@@ -120,38 +121,38 @@ def _posicao(clip: TimelineClip) -> tuple[str, str]:
     return x, y
 
 
-def _interpolacao(chaves: list, campo: str, duracao_s: float) -> str:
-    """Uma expressão do ffmpeg que interpola o campo entre os quadros-chave.
+def _interpolate(keys: list, field_name: str, duration_s: float) -> str:
+    """An ffmpeg expression interpolating the field between keyframes.
 
-    Sai uma escada de `if`, do primeiro ponto ao último, com reta entre cada
-    par. O `t` dentro dela é o tempo do clipe já com a velocidade aplicada —
-    por isso os quadros-chave são frações, e não segundos: eles seguem o bloco
-    quando ele estica.
+    What comes out is a ladder of `if`s, from the first point to the last, with
+    a straight line between each pair. The `t` inside it is the clip's time with
+    the speed already applied -- which is why the keyframes are fractions and
+    not seconds: they follow the block when it stretches.
     """
-    pontos = [
-        (max(0.0, k.t * duracao_s), float(getattr(k, campo))) for k in chaves
+    points = [
+        (max(0.0, k.t * duration_s), float(getattr(k, field_name))) for k in keys
     ]
 
-    # antes do primeiro ponto e depois do último, o valor é o do extremo
-    expr = f"{pontos[-1][1]:.4f}"
-    for (t0, v0), (t1, v1) in reversed(list(zip(pontos, pontos[1:]))):
+    # before the first point and after the last, the value is the endpoint's
+    expr = f"{points[-1][1]:.4f}"
+    for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:]))):
         span = max(1e-6, t1 - t0)
-        reta = f"({v0:.4f}+({v1 - v0:.4f})*(t-{t0:.4f})/{span:.4f})"
-        expr = f"if(lt(t,{t1:.4f}),{reta},{expr})"
-    return f"if(lt(t,{pontos[0][0]:.4f}),{pontos[0][1]:.4f},{expr})"
+        line = f"({v0:.4f}+({v1 - v0:.4f})*(t-{t0:.4f})/{span:.4f})"
+        expr = f"if(lt(t,{t1:.4f}),{line},{expr})"
+    return f"if(lt(t,{points[0][0]:.4f}),{points[0][1]:.4f},{expr})"
 
 
-def _enquadrar(fit: Fit, width: int, height: int) -> list[str]:
-    """Põe o clipe na tela de saída, que pode ter outra proporção.
+def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
+    """Places the clip on the output canvas, which may have another aspect.
 
-    Aparece de verdade ao exportar 9:16 de uma gravação 16:9, e as duas
-    respostas são legítimas: `cover` preenche e corta as sobras — numa montagem
-    de gameplay a ação está no meio, e barra preta num celular é desperdício de
-    tela; `contain` mostra o quadro inteiro e aceita as barras, para quem
-    precisa do que está nos cantos.
+    This shows up for real when exporting 9:16 from a 16:9 recording, and both
+    answers are legitimate: `cover` fills and crops the overflow -- in a
+    gameplay montage the action is in the middle, and black bars on a phone are
+    wasted screen; `contain` shows the whole frame and accepts the bars, for
+    whoever needs what is in the corners.
 
-    O `increase`/`decrease` do `force_original_aspect_ratio` faz a conta do lado
-    maior; o `crop` ou o `pad` resolve o que sobrou.
+    `force_original_aspect_ratio`'s `increase`/`decrease` does the maths on the
+    longer side; the `crop` or the `pad` settles what is left over.
     """
     if fit is Fit.CONTAIN:
         return [
@@ -164,258 +165,263 @@ def _enquadrar(fit: Fit, width: int, height: int) -> list[str]:
     ]
 
 
-def _cadeia_de_zoom(clip: TimelineClip, width: int, height: int) -> list[str]:
-    """A janela que anda e aperta dentro do clipe.
+def _zoom_chain(clip: TimelineClip, width: int, height: int) -> list[str]:
+    """The window that moves and tightens inside the clip.
 
-    `scale` não anima no ffmpeg. Quem anima é o `crop`, que aceita expressões em
-    `t`: recorta-se uma janela cada vez menor e devolve-se ela ao tamanho da
-    tela. O efeito é a lente fechando.
+    `scale` does not animate in ffmpeg. What animates is `crop`, which accepts
+    expressions in `t`: an ever smaller window is cropped out and scaled back to
+    the canvas size. The effect is the lens closing in.
     """
-    z = _interpolacao(clip.zoom, "scale", clip.duration_s)
-    x = _interpolacao(clip.zoom, "x", clip.duration_s)
-    y = _interpolacao(clip.zoom, "y", clip.duration_s)
+    z = _interpolate(clip.zoom, "scale", clip.duration_s)
+    x = _interpolate(clip.zoom, "x", clip.duration_s)
+    y = _interpolate(clip.zoom, "y", clip.duration_s)
     return [
         f"crop=w='iw/({z})':h='ih/({z})'"
         f":x='(iw-iw/({z}))*(0.5+({x})/2)'"
         f":y='(ih-ih/({z}))*(0.5+({y})/2)'",
-        # de volta ao tamanho da tela: o recorte encolheu o quadro
+        # back to the canvas size: the crop shrank the frame
         f"scale={int(width)}:{int(height)}",
     ]
 
 
-def _cadeia_de_video(
+def _video_chain(
     clip: TimelineClip,
-    entrada: int,
-    saida: str,
+    input_index: int,
+    output: str,
     width: int,
     height: int,
     fit: Fit,
 ) -> str:
-    """O que acontece com um clipe antes de ele encostar na tela.
+    """What happens to a clip before it touches the canvas.
 
-    A ordem importa. A velocidade vem **antes** de tudo, porque ela muda o
-    relógio do clipe: um fade de meio segundo tem de durar meio segundo no vídeo
-    final, não meio segundo da fonte.
+    Order matters. Speed comes **before** everything, because it changes the
+    clip's clock: a half-second fade has to last half a second in the final
+    video, not half a second of the source.
     """
-    # o trim é sobre a fonte, então conta a velocidade
-    passos = [f"[{entrada}:v]trim=duration={clip.fonte_consumida_s:.3f}"]
-    passos.append("setpts=PTS-STARTPTS")
+    # the trim is on the source, so it counts the speed
+    steps = [f"[{input_index}:v]trim=duration={clip.source_consumed_s:.3f}"]
+    steps.append("setpts=PTS-STARTPTS")
 
     if clip.reverse:
-        # `reverse` precisa do trecho inteiro na memória, e por isso só serve a
-        # clipes curtos — que é o caso de uma montagem na batida
-        passos.append("reverse")
+        # `reverse` needs the whole stretch in memory, and so only serves short
+        # clips -- which is the case for a beat-synced montage
+        steps.append("reverse")
 
     if clip.freeze:
-        # um quadro só, esticado pela duração do bloco
-        passos.append(f"tpad=stop_mode=clone:stop_duration={clip.duration_s:.3f}")
+        # a single frame, stretched over the block's duration
+        steps.append(f"tpad=stop_mode=clone:stop_duration={clip.duration_s:.3f}")
     elif clip.speed != 1.0:
-        # dividir o PTS acelera: a 2x, cada quadro vale metade do tempo
-        passos.append(f"setpts=PTS/{clip.speed:.4f}")
+        # dividing the PTS speeds it up: at 2x, each frame is worth half the time
+        steps.append(f"setpts=PTS/{clip.speed:.4f}")
 
     if clip.source is ClipSource.TEXT:
-        # a tela já vem em rgba da própria fonte (veja `_entrada_do_clipe`): o
-        # texto é escrito direto nela
-        passos.append(textfx.cadeia(clip, height))
+        # the canvas already arrives as rgba from the source itself (see
+        # `_clip_input`): the text is drawn straight onto it
+        steps.append(textfx.filter_chain(clip, height))
 
     if clip.zoom:
-        passos += _cadeia_de_zoom(clip, width, height)
+        steps += _zoom_chain(clip, width, height)
 
-    # antes de qualquer coisa que dependa do tamanho, o clipe passa a ter o
-    # tamanho da tela de saída
+    # before anything that depends on size, the clip takes on the size of the
+    # output canvas
     if clip.source is not ClipSource.TEXT:
-        passos += _enquadrar(fit, width, height)
+        steps += _fit_chain(fit, width, height)
 
-    if not clip.color.neutra:
-        passos.append(
+    if not clip.color.is_neutral:
+        steps.append(
             f"eq=brightness={clip.color.brightness:.4f}"
             f":contrast={clip.color.contrast:.4f}"
             f":saturation={clip.color.saturation:.4f}"
         )
 
     if clip.transform.scale != 1.0:
-        passos.append(
+        steps.append(
             f"scale=iw*{clip.transform.scale:.4f}:ih*{clip.transform.scale:.4f}"
         )
 
-    # o alfa só existe em rgba, e daqui para baixo tudo mexe nele
-    if (not clip.fade.neutro or clip.transform.opacity < 1.0) and (
+    # alpha only exists in rgba, and from here down everything touches it
+    if (not clip.fade.is_neutral or clip.transform.opacity < 1.0) and (
         clip.source is not ClipSource.TEXT
     ):
-        passos.append("format=rgba")
+        steps.append("format=rgba")
 
-    if not clip.fade.neutro:
-        # `alpha=1` é o que faz o fade **revelar** o que está embaixo em vez de
-        # pintar preto por cima. Sobre o fundo preto dá no mesmo; sobre outra
-        # camada, é a diferença entre uma transição e um borrão escuro.
+    if not clip.fade.is_neutral:
+        # `alpha=1` is what makes the fade **reveal** what is underneath rather
+        # than painting black over it. Over the black background it is the same
+        # thing; over another layer it is the difference between a transition
+        # and a dark smear.
         #
-        # E vai sobre o relógio já acelerado: o fade dura o que dura no vídeo.
+        # And it runs on the already-sped-up clock: the fade lasts what it
+        # lasts in the video.
         if clip.fade.in_s > 0:
-            passos.append(f"fade=t=in:st=0:d={clip.fade.in_s:.3f}:alpha=1")
+            steps.append(f"fade=t=in:st=0:d={clip.fade.in_s:.3f}:alpha=1")
         if clip.fade.out_s > 0:
-            inicio = max(0.0, clip.duration_s - clip.fade.out_s)
-            passos.append(
-                f"fade=t=out:st={inicio:.3f}:d={clip.fade.out_s:.3f}:alpha=1"
+            start = max(0.0, clip.duration_s - clip.fade.out_s)
+            steps.append(
+                f"fade=t=out:st={start:.3f}:d={clip.fade.out_s:.3f}:alpha=1"
             )
 
     if clip.transform.opacity < 1.0:
-        passos.append(f"colorchannelmixer=aa={clip.transform.opacity:.4f}")
+        steps.append(f"colorchannelmixer=aa={clip.transform.opacity:.4f}")
 
-    # só agora o clipe é posto na hora dele no vídeo final
-    passos.append(f"setpts=PTS+{clip.at_s:.3f}/TB")
-    return ",".join(passos) + f"[{saida}]"
+    # only now is the clip placed at its moment in the final video
+    steps.append(f"setpts=PTS+{clip.at_s:.3f}/TB")
+    return ",".join(steps) + f"[{output}]"
 
 
-def _atempo(fator: float) -> list[str]:
-    """A cadeia de `atempo` para um fator qualquer.
+def _atempo_chain(factor: float) -> list[str]:
+    """The `atempo` chain for an arbitrary factor.
 
-    O filtro só aceita de 0.5 a 100 por vez; fora disso encadeiam-se dois. Sem
-    isto, câmera lenta abaixo de 0.5x sairia com o áudio intacto — e o descompasso
-    entre imagem e som é pior do que não ter som.
+    The filter only accepts 0.5 to 100 at a time; outside that, two are chained.
+    Without this, slow motion below 0.5x would come out with the audio intact --
+    and image and sound out of step is worse than having no sound.
     """
-    passos: list[str] = []
-    resto = fator
-    while resto < 0.5:
-        passos.append("atempo=0.5")
-        resto /= 0.5
-    while resto > 100.0:
-        passos.append("atempo=100")
-        resto /= 100.0
-    if abs(resto - 1.0) > 1e-6:
-        passos.append(f"atempo={resto:.4f}")
-    return passos
+    steps: list[str] = []
+    rest = factor
+    while rest < 0.5:
+        steps.append("atempo=0.5")
+        rest /= 0.5
+    while rest > 100.0:
+        steps.append("atempo=100")
+        rest /= 100.0
+    if abs(rest - 1.0) > 1e-6:
+        steps.append(f"atempo={rest:.4f}")
+    return steps
 
 
-def _cadeia_de_audio(clip: TimelineClip, entrada: int, saida: str) -> str | None:
-    """O som do clipe, atrasado até a hora em que ele entra."""
+def _audio_chain(clip: TimelineClip, input_index: int, output: str) -> str | None:
+    """The clip's sound, delayed until the moment it comes in."""
     if clip.audio.mute or clip.audio.volume <= 0:
         return None
-    # um quadro congelado não tem som que corra junto
+    # a frozen frame has no sound running alongside it
     if clip.freeze:
         return None
     ms = int(round(clip.at_s * 1000))
-    passos = [
-        f"[{entrada}:a]atrim=duration={clip.fonte_consumida_s:.3f}",
+    steps = [
+        f"[{input_index}:a]atrim=duration={clip.source_consumed_s:.3f}",
         "asetpts=PTS-STARTPTS",
     ]
     if clip.reverse:
-        passos.append("areverse")
+        steps.append("areverse")
     if clip.speed != 1.0:
-        passos += _atempo(clip.speed)
+        steps += _atempo_chain(clip.speed)
     if clip.audio.fade_in_s > 0:
-        passos.append(f"afade=t=in:st=0:d={clip.audio.fade_in_s:.3f}")
+        steps.append(f"afade=t=in:st=0:d={clip.audio.fade_in_s:.3f}")
     if clip.audio.fade_out_s > 0:
-        inicio = max(0.0, clip.duration_s - clip.audio.fade_out_s)
-        passos.append(
-            f"afade=t=out:st={inicio:.3f}:d={clip.audio.fade_out_s:.3f}"
+        start = max(0.0, clip.duration_s - clip.audio.fade_out_s)
+        steps.append(
+            f"afade=t=out:st={start:.3f}:d={clip.audio.fade_out_s:.3f}"
         )
     if clip.audio.volume != 1.0:
-        passos.append(f"volume={clip.audio.volume:.4f}")
+        steps.append(f"volume={clip.audio.volume:.4f}")
     if ms > 0:
-        passos.append(f"adelay={ms}|{ms}")
-    return ",".join(passos) + f"[{saida}]"
+        steps.append(f"adelay={ms}|{ms}")
+    return ",".join(steps) + f"[{output}]"
 
 
-def _na_janela(
-    clip: TimelineClip, inicio: float, fim: float
+def _within_window(
+    clip: TimelineClip, start: float, end: float
 ) -> TimelineClip | None:
-    """O clipe visto pela janela de exportação, ou `None` se ele ficou de fora.
+    """The clip as seen through the export window, or `None` if it fell outside.
 
-    Exportar um trecho não é cortar o vídeo depois de pronto: os clipes são
-    reposicionados como se a janela fosse o começo. Um clipe que começa antes
-    dela entra pelo meio — e aí o ponto de entrada **na fonte** anda junto, na
-    medida da velocidade, senão a imagem saltaria.
+    Exporting a stretch is not trimming the video once it is finished: the clips
+    are repositioned as if the window were the beginning. A clip that starts
+    before it comes in partway -- and then its entry point **into the source**
+    moves along with it, in proportion to the speed, or the image would jump.
     """
-    if clip.until_s <= inicio + 1e-6 or clip.at_s >= fim - 1e-6:
+    if clip.until_s <= start + 1e-6 or clip.at_s >= end - 1e-6:
         return None
 
-    comeu_antes = max(0.0, inicio - clip.at_s)
-    sobra_depois = max(0.0, clip.until_s - fim)
-    nova_duracao = clip.duration_s - comeu_antes - sobra_depois
-    if nova_duracao < MIN_CUT_S:
+    eaten_before = max(0.0, start - clip.at_s)
+    left_after = max(0.0, clip.until_s - end)
+    new_duration = clip.duration_s - eaten_before - left_after
+    if new_duration < MIN_CUT_S:
         return None
 
     return clip.model_copy(
         update={
-            "at_s": max(0.0, clip.at_s - inicio),
-            "duration_s": nova_duracao,
-            # o quanto se pulou do clipe custa mais fonte quando ele corre
-            # acelerado; num texto ou numa imagem, `start_s` não quer dizer nada
-            "start_s": clip.start_s + comeu_antes * clip.speed,
+            "at_s": max(0.0, clip.at_s - start),
+            "duration_s": new_duration,
+            # how much of the clip was skipped costs more source when it runs
+            # sped up; on a text or an image, `start_s` means nothing
+            "start_s": clip.start_s + eaten_before * clip.speed,
         }
     )
 
 
-def _marca_dagua(
+def _watermark(
     exp,
-    entrada: int,
-    anterior: str,
-    saida: str,
+    input_index: int,
+    previous: str,
+    output: str,
     width: int,
 ) -> list[str]:
-    """A marca por cima de tudo, no canto escolhido.
+    """The mark over everything, in the chosen corner.
 
-    Vem depois de todas as camadas de propósito: marca d'água que alguma camada
-    cobre não é marca d'água.
+    It comes after every layer on purpose: a watermark some layer covers is not
+    a watermark.
     """
-    largura = max(1, int(round(exp.watermark_scale * width)))
-    passos = [
-        f"[{entrada}:v]scale={largura}:-1,format=rgba"
-        f",colorchannelmixer=aa={exp.watermark_opacity:.4f}[marca]"
+    mark_width = max(1, int(round(exp.watermark_scale * width)))
+    steps = [
+        f"[{input_index}:v]scale={mark_width}:-1,format=rgba"
+        f",colorchannelmixer=aa={exp.watermark_opacity:.4f}[mark]"
     ]
     x = f"(W-w)/2+({exp.watermark_x:.4f})*(W/2)"
     y = f"(H-h)/2+({exp.watermark_y:.4f})*(H/2)"
-    passos.append(f"[{anterior}][marca]overlay=x={x}:y={y}[{saida}]")
-    return passos
+    steps.append(f"[{previous}][mark]overlay=x={x}:y={y}[{output}]")
+    return steps
 
 
-def _entrada_do_clipe(
+def _clip_input(
     clip: TimelineClip,
     *,
     source: Path,
     source_duration_s: float,
-    midias: dict[str, MidiaNoDisco],
+    library: dict[str, LibraryFile],
     width: int,
     height: int,
     fps: float,
-) -> tuple[Entrada | None, float, bool]:
-    """A entrada do ffmpeg para este clipe, a duração útil e se ele tem som.
+) -> tuple[Input | None, float, bool]:
+    """This clip's ffmpeg input, its usable duration, and whether it has sound.
 
-    Devolve `None` quando o clipe cai fora da fonte — o lugar dele fica sendo a
-    tela de fundo, e os clipes seguintes não saem de onde foram postos.
+    Returns `None` when the clip falls outside the source -- its slot then shows
+    the background canvas, and the clips after it do not move from where they
+    were placed.
     """
     if clip.source is ClipSource.RECORDING:
-        # o que se pede à fonte é o que a velocidade consome, não o que o clipe
-        # ocupa no vídeo
-        pedido = clip.fonte_consumida_s
+        # what is asked of the source is what the speed consumes, not what the
+        # clip occupies in the video
+        wanted = clip.source_consumed_s
         if source_duration_s > 0:
-            pedido = min(pedido, max(0.0, source_duration_s - clip.start_s))
-        if pedido <= 0:
+            wanted = min(wanted, max(0.0, source_duration_s - clip.start_s))
+        if wanted <= 0:
             return None, 0.0, False
-        # Aparado na fonte, ele encolhe no vídeo na mesma proporção — exceto
-        # congelado, que consome um quadro e ocupa o bloco inteiro: ali a
-        # duração no vídeo não é consequência do que se consumiu.
+        # Trimmed at the source, it shrinks in the video by the same proportion
+        # -- except when frozen, which consumes one frame and occupies the whole
+        # block: there the duration in the video is not a consequence of what
+        # was consumed.
         return (
-            Entrada(caminho=str(source), seek=clip.start_s, duracao=pedido),
-            clip.duration_s if clip.freeze else pedido / clip.speed,
+            Input(path=str(source), seek=clip.start_s, duration=wanted),
+            clip.duration_s if clip.freeze else wanted / clip.speed,
             True,
         )
 
     if clip.source is ClipSource.TEXT:
-        # Uma tela transparente do tamanho do quadro, onde o texto e escrito.
-        # Ela e um clipe como qualquer outro dai em diante -- move, some, anda
-        # em camada.
+        # A transparent canvas the size of the frame, where the text is drawn.
+        # From then on it is a clip like any other -- it moves, it fades, it
+        # travels through layers.
         #
-        # O `format=rgba` vai **dentro da fonte**, e nao na cadeia de video. A
-        # diferenca nao e cosmetica: sem ele ali, o `color` negocia yuv420p com
-        # o `drawtext`, desenha preto opaco, e o `format=rgba` seguinte so
-        # acrescenta um alfa que ja nasceu 1. O resultado e uma tela preta por
-        # cima de tudo -- o texto aparecia, e o video sumia debaixo dele.
+        # The `format=rgba` goes **inside the source**, and not in the video
+        # chain. The difference is not cosmetic: without it there, `color`
+        # negotiates yuv420p with `drawtext`, draws opaque black, and the
+        # following `format=rgba` only adds an alpha that was born at 1. The
+        # result is a black canvas over everything -- the text appeared, and the
+        # video vanished underneath it.
         return (
-            Entrada(
-                caminho=f"color=c=black@0.0:s={int(width)}x{int(height)}"
+            Input(
+                path=f"color=c=black@0.0:s={int(width)}x{int(height)}"
                 f":r={fps:.3f},format=rgba",
-                duracao=clip.duration_s,
+                duration=clip.duration_s,
                 lavfi=True,
             ),
             clip.duration_s,
@@ -423,40 +429,41 @@ def _entrada_do_clipe(
         )
 
     if clip.source is ClipSource.MEDIA:
-        item = midias.get(clip.media_id or "")
+        item = library.get(clip.media_id or "")
         if item is None:
             raise ValueError(
                 f"a midia {clip.media_id!r} nao esta na biblioteca deste job"
             )
-        if item.e_imagem:
-            # uma imagem não corre no tempo: ela entra em laço e dura o que o
-            # clipe pedir, sem `-ss` (não há onde buscar num quadro só) e sem
-            # velocidade (não há o que acelerar num quadro parado)
+        if item.is_image:
+            # an image does not run in time: it goes in on a loop and lasts
+            # whatever the clip asks for, with no `-ss` (there is nowhere to
+            # seek in a single frame) and no speed (there is nothing to speed up
+            # in a still frame)
             return (
-                Entrada(
-                    caminho=str(item.caminho),
-                    duracao=clip.duration_s,
+                Input(
+                    path=str(item.path),
+                    duration=clip.duration_s,
                     loop=True,
                 ),
                 clip.duration_s,
                 False,
             )
         return (
-            Entrada(
-                caminho=str(item.caminho),
+            Input(
+                path=str(item.path),
                 seek=clip.start_s,
-                duracao=clip.fonte_consumida_s,
+                duration=clip.source_consumed_s,
             ),
             clip.duration_s,
             True,
         )
 
-    # cor sólida chega quando fizer falta; ignorar em silêncio seria pior do que
-    # não aceitar
+    # solid colour arrives when it is missed; ignoring it silently would be
+    # worse than refusing it
     raise ValueError(f"fonte '{clip.source}' ainda nao e montavel")
 
 
-def compor(
+def compose_graph(
     timeline: Timeline,
     *,
     source: Path,
@@ -464,166 +471,169 @@ def compor(
     height: int,
     fps: float,
     source_duration_s: float = 0.0,
-    midias: dict[str, MidiaNoDisco] | None = None,
-    so_video: bool = False,
-) -> Composicao:
-    """O grafo que monta esta linha do tempo.
+    library: dict[str, LibraryFile] | None = None,
+    video_only: bool = False,
+) -> Composition:
+    """The graph that builds this timeline.
 
-    As camadas entram de baixo para cima, e dentro de cada uma os clipes entram
-    na ordem do tempo. Camada escondida não entra; camada muda entra sem som.
+    Layers come in bottom to top, and within each one the clips come in time
+    order. A hidden layer does not come in; a muted layer comes in without sound.
 
-    `midias` mapeia o id de cada item da biblioteca para o arquivo dele em
-    disco. Um clipe de mídia é mais uma entrada no grafo, e daí em diante passa
-    pelas mesmas transformações de um trecho da gravação — é o ponto de ter um
-    formato só de clipe.
+    `library` maps each library item's id to its file on disk. A media clip is
+    one more input in the graph, and from there on it goes through the same
+    transformations as a stretch of the recording -- that is the point of having
+    a single clip format.
 
-    Um clipe que passa do fim da gravação é **aparado**, como na V1 — o que
-    sobrar do lugar dele fica sendo a tela de fundo, e os clipes seguintes não
-    saem do lugar onde foram postos.
+    A clip running past the end of the recording is **trimmed**, as in V1 --
+    whatever is left of its slot becomes the background canvas, and the clips
+    after it do not move from where they were placed.
     """
     exp = timeline.export
-    fps_fonte = fps if fps > 0 else 30.0
-    fps = exp.fps or fps_fonte
-    width, height = exp.dimensoes(width, height)
+    source_fps = fps if fps > 0 else 30.0
+    fps = exp.fps or source_fps
+    width, height = exp.dimensions(width, height)
     fit = exp.fit
 
-    # o trecho pedido: tudo, ou uma janela dele
-    inicio = exp.from_s
-    fim = min(exp.to_s, timeline.duration_s) if exp.to_s else timeline.duration_s
-    duracao = max(0.0, fim - inicio)
-    if duracao <= 0:
+    # the stretch asked for: everything, or a window of it
+    start = exp.from_s
+    end = min(exp.to_s, timeline.duration_s) if exp.to_s else timeline.duration_s
+    duration = max(0.0, end - start)
+    if duration <= 0:
         raise ValueError("o trecho pedido para exportar esta vazio")
-    c = Composicao(duracao_s=duracao, crf=exp.crf)
+    c = Composition(duration_s=duration, crf=exp.crf)
 
-    # a tela de fundo: é ela que aparece em todo instante que ninguém cobriu
-    c.entradas.append(
-        Entrada(
-            caminho=f"color=c=black:s={int(width)}x{int(height)}:r={fps:.3f}",
-            duracao=duracao,
+    # the background canvas: it is what shows at every instant nobody covered
+    c.inputs.append(
+        Input(
+            path=f"color=c=black:s={int(width)}x{int(height)}:r={fps:.3f}",
+            duration=duration,
             lavfi=True,
         )
     )
-    c.filtros.append(f"[0:v]setsar=1[fundo]")
+    c.filters.append("[0:v]setsar=1[bg]")
 
-    # Com musica e `game_volume` em 0, ela substitui o som dos cortes.
-    # Nao montar a cadeia deles nao e economia: uma cadeia de audio sem saida
-    # deixa o grafo invalido, e o ffmpeg recusa o conjunto inteiro.
-    tem_musica = timeline.tem_musica
-    jogo_entra = not tem_musica or timeline.game_volume > 0
+    # With music and `game_volume` at 0, it replaces the cuts' sound. Not
+    # building their chain is not a saving: an audio chain with no output makes
+    # the graph invalid, and ffmpeg refuses the whole set.
+    has_music = timeline.has_music
+    game_comes_in = not has_music or timeline.game_volume > 0
 
-    anterior = "fundo"
-    #: o som que vem dos cortes -- e o que `game_volume` governa
-    audios: list[str] = []
-    #: o som dos blocos de musica, que nao e som de jogo e nao obedece a ele
-    musicas: list[str] = []
+    previous = "bg"
+    #: the sound coming from the cuts -- what `game_volume` governs
+    cut_audio: list[str] = []
+    #: the sound of the music blocks, which is not game sound and does not obey it
+    music_audio: list[str] = []
     n = 0
 
-    for camada in timeline.layers:
-        if camada.hidden:
+    for layer in timeline.layers:
+        if layer.hidden:
             continue
-        # uma camada de audio nao desenha nada: com `so_video` ela nao tem o que
-        # fazer aqui, e montar a entrada dela seria pagar por um arquivo que
-        # ninguem ia ouvir
-        if camada.e_audio and so_video:
+        # an audio layer draws nothing: with `video_only` it has nothing to do
+        # here, and building its input would mean paying for a file nobody
+        # would hear
+        if layer.is_audio and video_only:
             continue
-        for original in camada.clips:
-            clip = _na_janela(original, inicio, fim)
+        for original in layer.clips:
+            clip = _within_window(original, start, end)
             if clip is None:
-                continue  # fora do trecho pedido
+                continue  # outside the stretch asked for
 
-            entrada, duracao_util, tem_som = _entrada_do_clipe(
+            clip_input, usable_duration, has_sound = _clip_input(
                 clip,
                 source=source,
                 source_duration_s=source_duration_s,
-                midias=midias or {},
+                library=library or {},
                 width=width,
                 height=height,
                 fps=fps,
             )
-            if entrada is None:
-                continue  # cai fora da fonte; o lugar dele fica de fundo
+            if clip_input is None:
+                continue  # falls outside the source; its slot stays background
 
             n += 1
-            c.entradas.append(entrada)
-            aparado = clip.model_copy(update={"duration_s": duracao_util})
+            c.inputs.append(clip_input)
+            trimmed = clip.model_copy(update={"duration_s": usable_duration})
 
-            if not camada.e_audio:
-                c.filtros.append(
-                    _cadeia_de_video(aparado, n, f"v{n}", width, height, fit)
+            if not layer.is_audio:
+                c.filters.append(
+                    _video_chain(trimmed, n, f"v{n}", width, height, fit)
                 )
-                x, y = _posicao(aparado)
-                saida = f"t{n}"
-                c.filtros.append(
-                    f"[{anterior}][v{n}]overlay=x={x}:y={y}:"
-                    f"enable='between(t,{aparado.at_s:.3f},"
-                    f"{aparado.until_s:.3f})':"
-                    f"eof_action=pass[{saida}]"
+                x, y = _position(trimmed)
+                output = f"t{n}"
+                c.filters.append(
+                    f"[{previous}][v{n}]overlay=x={x}:y={y}:"
+                    f"enable='between(t,{trimmed.at_s:.3f},"
+                    f"{trimmed.until_s:.3f})':"
+                    f"eof_action=pass[{output}]"
                 )
-                anterior = saida
+                previous = output
 
-            # com `so_video` nem se monta o som dos clipes: uma cadeia de áudio
-            # sem saída deixa o grafo inválido, e o ffmpeg recusa o conjunto
-            aproveita_o_som = camada.e_audio or jogo_entra
-            if not so_video and not camada.muted and tem_som and aproveita_o_som:
-                cadeia = _cadeia_de_audio(aparado, n, f"a{n}")
-                if cadeia is not None:
-                    c.filtros.append(cadeia)
-                    (musicas if camada.e_audio else audios).append(f"a{n}")
+            # with `video_only` the clips' sound is not built either: an audio
+            # chain with no output makes the graph invalid and ffmpeg refuses
+            # the whole set
+            keeps_sound = layer.is_audio or game_comes_in
+            if not video_only and not layer.muted and has_sound and keeps_sound:
+                chain = _audio_chain(trimmed, n, f"a{n}")
+                if chain is not None:
+                    c.filters.append(chain)
+                    (music_audio if layer.is_audio else cut_audio).append(f"a{n}")
 
     if n == 0:
         raise ValueError("nenhum clipe cai dentro da gravacao")
 
     if exp.watermark_id:
-        marca = (midias or {}).get(exp.watermark_id)
-        if marca is None:
+        mark = (library or {}).get(exp.watermark_id)
+        if mark is None:
             raise ValueError(
                 f"a marca d'agua {exp.watermark_id!r} nao esta na biblioteca"
             )
-        c.entradas.append(Entrada(caminho=str(marca.caminho), loop=marca.e_imagem,
-                                  duracao=duracao if marca.e_imagem else None))
-        c.filtros += _marca_dagua(exp, len(c.entradas) - 1, anterior, "marcado",
-                                  width)
-        anterior = "marcado"
+        c.inputs.append(Input(path=str(mark.path), loop=mark.is_image,
+                              duration=duration if mark.is_image else None))
+        c.filters += _watermark(exp, len(c.inputs) - 1, previous, "watermarked",
+                                width)
+        previous = "watermarked"
 
-    c.filtros.append(f"[{anterior}]trim=duration={duracao:.3f},setpts=PTS-STARTPTS[vout]")
-    c.mapa_video = "[vout]"
+    c.filters.append(
+        f"[{previous}]trim=duration={duration:.3f},setpts=PTS-STARTPTS[vout]"
+    )
+    c.video_map = "[vout]"
 
-    if so_video:
-        # a imagem sozinha, sem trilha de áudio nenhuma: quem pede assim quer o
-        # vídeo mudo
+    if video_only:
+        # the picture alone, with no audio track at all: whoever asks like this
+        # wants the video muted
         return c
 
-    # A mistura final. Sao dois sons, e eles nao querem dizer a mesma coisa: os
-    # blocos de musica de um lado, o som dos cortes do outro -- e `game_volume`
-    # governa so o segundo.
-    partes: list[str] = []
+    # The final mix. There are two sounds, and they do not mean the same thing:
+    # the music blocks on one side, the cuts' sound on the other -- and
+    # `game_volume` governs only the second.
+    parts: list[str] = []
 
-    if musicas:
+    if music_audio:
         volume = (
             f",volume={timeline.music_volume:.4f}"
             if timeline.music_volume != 1.0
             else ""
         )
-        if len(musicas) == 1 and not volume:
-            partes.append(musicas[0])
+        if len(music_audio) == 1 and not volume:
+            parts.append(music_audio[0])
         else:
-            entrada = "".join(f"[{m}]" for m in musicas)
-            junta = (
-                f"amix=inputs={len(musicas)}:dropout_transition=0:normalize=0"
-                if len(musicas) > 1
+            entry = "".join(f"[{m}]" for m in music_audio)
+            join = (
+                f"amix=inputs={len(music_audio)}:dropout_transition=0:normalize=0"
+                if len(music_audio) > 1
                 else "anull"
             )
-            c.filtros.append(f"{entrada}{junta}{volume}[musica]")
-            partes.append("musica")
+            c.filters.append(f"{entry}{join}{volume}[music]")
+            parts.append("music")
 
-    if audios and jogo_entra:
-        if tem_musica:
-            # com musica tocando, o som do jogo entra na medida pedida -- e o
-            # que deixa o tiro aparecer por baixo dela
-            jogo = "".join(f"[{a}]" for a in audios)
-            junta = (
-                f"amix=inputs={len(audios)}:dropout_transition=0:normalize=0"
-                if len(audios) > 1
+    if cut_audio and game_comes_in:
+        if has_music:
+            # with music playing, the game sound comes in at the level asked
+            # for -- which is what lets the shot show through underneath it
+            game = "".join(f"[{a}]" for a in cut_audio)
+            join = (
+                f"amix=inputs={len(cut_audio)}:dropout_transition=0:normalize=0"
+                if len(cut_audio) > 1
                 else "anull"
             )
             volume = (
@@ -631,23 +641,23 @@ def compor(
                 if timeline.game_volume != 1.0
                 else ""
             )
-            c.filtros.append(f"{jogo}{junta}{volume}[jogo]")
-            partes.append("jogo")
+            c.filters.append(f"{game}{join}{volume}[game]")
+            parts.append("game")
         else:
-            # sem musica nenhuma, o audio original dos cortes vale por si
-            partes += audios
+            # with no music at all, the cuts' original audio stands on its own
+            parts += cut_audio
 
-    if len(partes) == 1:
-        # misturar uma faixa so e trabalho a toa, e o `amix` ainda mexeria no
-        # volume dela sem necessidade
-        c.filtros.append(f"[{partes[0]}]anull[aout]")
-        c.mapa_audio = "[aout]"
-    elif partes:
-        entrada = "".join(f"[{p}]" for p in partes)
-        c.filtros.append(
-            f"{entrada}amix=inputs={len(partes)}:dropout_transition=0:"
+    if len(parts) == 1:
+        # mixing a single track is wasted work, and `amix` would also mess with
+        # its volume for no reason
+        c.filters.append(f"[{parts[0]}]anull[aout]")
+        c.audio_map = "[aout]"
+    elif parts:
+        entry = "".join(f"[{p}]" for p in parts)
+        c.filters.append(
+            f"{entry}amix=inputs={len(parts)}:dropout_transition=0:"
             f"normalize=0[aout]"
         )
-        c.mapa_audio = "[aout]"
+        c.audio_map = "[aout]"
 
     return c

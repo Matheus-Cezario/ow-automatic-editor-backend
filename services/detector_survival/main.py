@@ -1,4 +1,4 @@
-"""Microsservico detector de sobrevivencia (vida baixa, morte, fuga)."""
+"""Survival detector microservice (low health, death, escape)."""
 
 from __future__ import annotations
 

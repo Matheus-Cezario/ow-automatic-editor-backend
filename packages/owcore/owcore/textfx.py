@@ -1,9 +1,9 @@
-"""O texto do editor virando `drawtext` do ffmpeg.
+"""The editor's text turning into ffmpeg `drawtext`.
 
-Mora à parte de `compose.py` por um motivo prático: escapar texto para um
-filtergraph é o tipo de código em que uma barra invertida a mais ou a menos
-passa despercebida na revisão e só aparece quando alguém escreve `50%` num
-rótulo. Isolado, ele tem teste próprio.
+Kept apart from `compose.py` for a practical reason: escaping text for a
+filtergraph is the kind of code where one backslash too many or too few slips
+past review and only shows up when somebody types `50%` into a label. On its
+own, it gets its own test.
 """
 
 from __future__ import annotations
@@ -11,20 +11,20 @@ from __future__ import annotations
 from . import fonts
 from .models import TimelineClip
 
-#: O que precisa de barra invertida antes, e por quê:
+#: What needs a backslash in front of it, and why:
 #:
-#: * `\` — a própria barra, senão ela come o próximo caractere;
-#: * `:` — separa uma opção da outra dentro do filtro;
-#: * `'` — delimita o valor de uma opção.
+#: * `\` -- the backslash itself, or it eats the next character;
+#: * `:` -- separates one option from the next inside the filter;
+#: * `'` -- delimits an option's value.
 #:
-#: `%` **não** entra aqui, e a razão custou caro: escapado com barra, o
-#: `drawtext` reclama "Stray %" em nível de aviso e **não desenha nada** —
-#: o texto sumia do vídeo inteiro, sem erro nenhum. Quem resolve o `%` é o
-#: `expansion=none` na cadeia, que desliga o `%{...}` de vez.
+#: `%` is **not** in here, and that lesson was expensive: escaped with a
+#: backslash, `drawtext` warns "Stray %" and **draws nothing** -- the text
+#: vanished from the whole video, with no error at all. What handles `%` is
+#: `expansion=none` in the chain, which turns `%{...}` off for good.
 #:
-#: Quebra de linha vira espaço: o `drawtext` aceita várias linhas, mas o
-#: filtergraph é uma linha só, e uma quebra crua ali parte o grafo em dois.
-_TROCAS: tuple[tuple[str, str], ...] = (
+#: A line break becomes a space: `drawtext` accepts several lines, but the
+#: filtergraph is a single line, and a raw break there splits the graph in two.
+_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("\\", "\\\\"),
     (":", "\\:"),
     ("'", "\\'"),
@@ -33,38 +33,39 @@ _TROCAS: tuple[tuple[str, str], ...] = (
 )
 
 
-def escapar(texto: str) -> str:
-    """Deixa o texto passar pelo `drawtext` sem virar sintaxe."""
-    for de, para in _TROCAS:
-        texto = texto.replace(de, para)
-    return texto
+def escape(text: str) -> str:
+    """Lets the text through `drawtext` without becoming syntax."""
+    for old, new in _REPLACEMENTS:
+        text = text.replace(old, new)
+    return text
 
 
-def cadeia(clip: TimelineClip, height: int) -> str:
-    """O `drawtext` deste clipe, já posicionado no quadro.
+def filter_chain(clip: TimelineClip, height: int) -> str:
+    """This clip's `drawtext`, already positioned in the frame.
 
-    Tamanho e contorno vêm em **fração da altura**: a mesma montagem sai igual
-    em 720p e em 4K, e um corpo de 48px que fica bem num sairia minúsculo no
-    outro. O contorno não é enfeite — sem ele, texto branco some em cena clara.
+    Size and outline come as a **fraction of the height**: the same montage
+    comes out identical at 720p and at 4K, and a 48px body that looks right in
+    one would be tiny in the other. The outline is not decoration -- without
+    it, white text disappears against a bright scene.
     """
-    estilo = clip.text_style
-    corpo = max(1, int(round(estilo.size * height)))
-    borda = int(round(estilo.outline * corpo))
-    fonte = estilo.font or fonts.padrao()
+    style = clip.text_style
+    body_px = max(1, int(round(style.size * height)))
+    outline_px = int(round(style.outline * body_px))
+    font = style.font or fonts.default_font()
 
-    partes = [
-        f"fontfile='{escapar(fonte)}'",
-        f"text='{escapar(clip.text)}'",
-        # sem expansão nenhuma: o texto do usuário é texto, e um `%` solto nele
-        # faria o drawtext desistir de desenhar a frase inteira
+    parts = [
+        f"fontfile='{escape(font)}'",
+        f"text='{escape(clip.text)}'",
+        # no expansion whatsoever: the user's text is text, and a stray `%` in
+        # it would make drawtext give up on drawing the whole line
         "expansion=none",
-        f"fontsize={corpo}",
-        f"fontcolor={estilo.color}",
-        # o texto anda pelo quadro com o mesmo x/y de qualquer clipe: o centro
-        # é 0, as bordas são -1 e 1
+        f"fontsize={body_px}",
+        f"fontcolor={style.color}",
+        # text moves through the frame with the same x/y as any clip: the
+        # centre is 0, the edges are -1 and 1
         f"x=(w-text_w)/2+({clip.transform.x:.4f})*(w/2)",
         f"y=(h-text_h)/2+({clip.transform.y:.4f})*(h/2)",
     ]
-    if borda > 0:
-        partes += [f"borderw={borda}", f"bordercolor={estilo.outline_color}"]
-    return "drawtext=" + ":".join(partes)
+    if outline_px > 0:
+        parts += [f"borderw={outline_px}", f"bordercolor={style.outline_color}"]
+    return "drawtext=" + ":".join(parts)

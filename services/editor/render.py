@@ -1,116 +1,93 @@
-"""Montagem dos videos finais.
+"""Assembly of the final videos.
 
-Recebe os momentos ja escolhidos (nao ve pixel nenhum ate aqui) e volta ao
-video original -- em qualidade cheia -- para cortar apenas os trechos que
-interessam.
+It receives the finished montage (it sees no pixel until this point) and goes
+back to the original video -- at full quality -- to cut only the stretches that
+matter.
 
-Cada video pedido e independente: tem as suas opcoes, a sua musica e a sua
-grade de batidas. Um trecho aproveitado num video continua disponivel para os
-outros -- nada e "gasto".
+Each requested video is independent. A stretch used in one video stays available
+for the others -- nothing is "spent".
+
+There used to be a second path here, the proposals one: given a handful of
+instants and a beat grid, this module decided on its own where each micro-clip
+started and ended. That decision now belongs to the editor, and what arrives
+here already comes with its start, duration and position settled.
 """
 
 from __future__ import annotations
 
 import logging
-import random
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from owcore import ffmpeg, timeline as tl
-from owcore.compose import MidiaNoDisco, compor
-from owcore.models import BeatGrid, ClipOptions, HighlightKind, Timeline
-from owcore.rules import Highlight, fit_to_window, montage_segments
+from owcore.compose import LibraryFile, compose_graph
+from owcore.models import Timeline
 
 log = logging.getLogger(__name__)
 
-MONTAGE_KINDS = {
-    HighlightKind.BEAT_MONTAGE,
-    HighlightKind.ULT_MONTAGE,
-    HighlightKind.SLEEP_MONTAGE,
-    HighlightKind.STUN_MONTAGE,
-}
-
-
-@dataclass(slots=True)
-class RenderItem:
-    """Um video pedido: o que cortar, como cortar e com que musica.
-
-    A musica e as opcoes vem por item, e nao por job: e assim que o usuario
-    poe uma trilha diferente em cada video do mesmo pedido.
-    """
-
-    highlight: Highlight
-    #: proposta que originou o pedido, para amarrar o clipe de volta a ela
-    proposal_id: str = ""
-    options: ClipOptions = field(default_factory=ClipOptions)
-    music: Path | None = None
-    beats: BeatGrid | None = None
-    music_name: str | None = None
-
-
 @dataclass(slots=True)
 class TimelineItem:
-    """Um video que o **usuario** montou, bloco a bloco.
+    """A video the **user** built, block by block.
 
-    Nao tem proposta nem regra por tras: ele ja diz que trecho entra, onde na
-    musica e por quanto tempo. Ao editor sobra cortar e juntar exatamente
-    aquilo -- inclusive o preto dos espacos que o usuario deixou vazios.
+    There is no rule behind it: it already says which stretch comes in, where in
+    the music and for how long. What is left for the editor is cutting and
+    joining exactly that -- the black of the spaces the user left empty
+    included.
     """
 
     timeline: Timeline
     title: str = "Montagem"
-    #: so para nomear o video na lista: a musica esta nos blocos, como midia
+    #: only to name the video in the list: the music is in the blocks, as media
     music_name: str | None = None
-    #: os itens da biblioteca que esta montagem usa, já em disco
-    midias: dict = field(default_factory=dict)
+    #: the library items this montage uses, already on disk
+    library: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class RenderedClip:
-    highlight: Highlight
-    #: None quando os cortes saíram mas a montagem final falhou
+    """Um video pronto (ou os cortes dele, quando a juncao falhou).
+
+    It carried a `Highlight` while the system generated videos by rule: that was
+    what said the kind, the title and the score of the proposed video. Now every
+    video comes out of the editor, so the title is whatever the user gave and
+    there is no score at all -- the fields that still matter live here, with no
+    intermediary.
+    """
+
+    title: str
+    #: the stretch of the recording the montage covers, first cut to last
+    start_s: float
+    end_s: float
+    #: None when the cuts came out but the final assembly failed
     video: Path | None
     thumb: Path | None
     duration_s: float
     meta: dict
-    proposal_id: str = ""
-    #: zip com os cortes individuais que formaram a montagem, para quem quiser
-    #: reeditar por conta própria
+    #: zip of the individual cuts that made up the montage, for whoever wants
+    #: to re-edit on their own
     segments_zip: Path | None = None
 
 
 def render_all(
     source: Path,
-    items: list["RenderItem | TimelineItem"],
-    duration_s: float,
+    items: list[TimelineItem],
     out_dir: Path,
     *,
     on_progress=None,
-    seed: str = "",
 ) -> list[RenderedClip]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     rendered: list[RenderedClip] = []
-    # semeado pelo id do pedido: a ordem sorteada varia entre pedidos mas e
-    # sempre a mesma se o mesmo pedido for reprocessado
-    rng = random.Random(seed)
 
     for i, item in enumerate(items):
         try:
-            if isinstance(item, TimelineItem):
-                clip = _render_timeline(source, item, out_dir, i)
-            elif item.highlight.kind in MONTAGE_KINDS:
-                clip = _render_montage(source, item, duration_s, out_dir, i, rng)
-            else:
-                clip = _render_single(source, item, out_dir, i)
+            clip = _render_timeline(source, item, out_dir, i)
         except ffmpeg.FFmpegError:
-            # um clipe problematico nao pode custar o resto da entrega
-            titulo = (
-                item.title if isinstance(item, TimelineItem)
-                else item.highlight.title
+            # a problematic clip must not cost the rest of the delivery
+            log.exception(
+                "falha ao renderizar '%s'; sigo com os demais", item.title
             )
-            log.exception("falha ao renderizar '%s'; sigo com os demais", titulo)
             continue
         rendered.append(clip)
         if on_progress:
@@ -119,320 +96,189 @@ def render_all(
     return rendered
 
 
-def _render_single(
-    source: Path, item: RenderItem, out_dir: Path, index: int
-) -> RenderedClip:
-    """Trecho corrido da partida. Sai sempre com o audio original -- e o barulho
-    da jogada que faz a cena."""
-    h = item.highlight
-    dest = out_dir / f"{index:02d}_{h.kind}.mp4"
-    ffmpeg.cut(source, h.start, h.end, dest, fade=0.4)
-    thumb = _thumb(dest, out_dir, index)
-    return RenderedClip(
-        highlight=h,
-        proposal_id=item.proposal_id,
-        video=dest,
-        thumb=thumb,
-        duration_s=h.duration,
-        meta={"segments": 1, "original_audio": True, **h.meta},
-    )
-
-
-def _render_montage(
-    source: Path,
-    item: RenderItem,
-    duration_s: float,
-    out_dir: Path,
-    index: int,
-    rng: random.Random,
-) -> RenderedClip:
-    """Um micro-clipe por momento, cada um com duracao igual a N intervalos
-    entre batidas -- assim, concatenados, as trocas de cena caem na percussao.
-
-    Sem musica escolhida a montagem continua saindo: os cortes mantem o **audio
-    original** da partida e a duracao de cada um cai num tamanho fixo razoavel.
-    """
-    h, opts, music, beats = item.highlight, item.options, item.music, item.beats
-    segments = montage_segments(
-        h.beats_at, beats, opts.montage_clip_beats, duration_s
-    )
-    if not segments:
-        raise ffmpeg.FFmpegError("montagem sem segmentos")
-
-    music_start, target = _music_window(opts, music, beats)
-    # repetir trechos so faz sentido quando o usuario delimitou a musica; sem um
-    # fim escolhido, encher a musica inteira daria uma montagem de minutos
-    loop = opts.montage_loop and opts.music_end_s is not None
-    segments = fit_to_window(segments, target, loop=loop, rng=rng)
-    if not segments:
-        raise ffmpeg.FFmpegError(
-            "a janela de musica escolhida e curta demais para um trecho sequer"
-        )
-
-    # com trilha por cima o audio da partida so atrapalha; sem trilha ele e
-    # tudo o que o video tem, entao fica
-    mudo = music is not None
-
-    parts_dir = out_dir / f"{index:02d}_parts"
-    parts_dir.mkdir(parents=True, exist_ok=True)
-    parts: list[Path] = []
-    cortados: list[tuple[float, float]] = []
-    for j, (start, end) in enumerate(segments):
-        part = parts_dir / f"{j:03d}.mp4"
-        try:
-            # sem fade: o corte seco na batida e o efeito desejado
-            ffmpeg.cut(source, start, end, part, mute=mudo)
-        except ffmpeg.FFmpegError:
-            log.warning("corte em %.1fs falhou; sigo com os demais", start)
-            continue
-        parts.append(part)
-        cortados.append((start, end))
-
-    if not parts:
-        raise ffmpeg.FFmpegError("nenhum corte pode ser feito")
-
-    # O zip sai ANTES da montagem: se a junção ou a trilha falharem, o usuário
-    # ainda leva os cortes. Material feito não se joga fora por causa da etapa
-    # seguinte.
-    zip_path = _zip_segments(parts, cortados, out_dir / f"{index:02d}_cortes.zip")
-
-    dest: Path | None = out_dir / f"{index:02d}_{h.kind}.mp4"
-    erro_montagem: str | None = None
-    try:
-        joined = out_dir / f"{index:02d}_{h.kind}_raw.mp4"
-        ffmpeg.concat(parts, joined, mute=mudo)
-        if music is not None:
-            ffmpeg.add_music(joined, music, dest, music_start=music_start)
-            joined.unlink(missing_ok=True)
-        else:
-            joined.replace(dest)
-    except ffmpeg.FFmpegError as exc:
-        log.exception("montagem de '%s' falhou; entrego so os cortes", h.title)
-        erro_montagem = str(exc)[:500]
-        dest = None
-
-    for p in parts:
-        p.unlink(missing_ok=True)
-    parts_dir.rmdir()
-
-    segments = cortados
-    thumb = _thumb(dest, out_dir, index) if dest is not None else None
-    total = sum(e - s for s, e in segments)
-    return RenderedClip(
-        highlight=h,
-        proposal_id=item.proposal_id,
-        video=dest,
-        thumb=thumb,
-        duration_s=total,
-        segments_zip=zip_path,
-        meta={
-            "segments": len(segments),
-            "bpm": beats.bpm if beats else None,
-            "beat_synced": bool(beats and beats.beats),
-            "music_name": item.music_name,
-            "original_audio": music is None,
-            "music_start_s": round(music_start, 2) if music else None,
-            "music_window_s": round(target, 2) if target else None,
-            "looped": loop,
-            **({"render_error": erro_montagem} if erro_montagem else {}),
-            **h.meta,
-        },
-    )
-
-
 def _render_timeline(
     source: Path, item: TimelineItem, out_dir: Path, index: int
 ) -> RenderedClip:
-    """Monta exatamente o que o usuario desenhou na linha do tempo.
+    """Assembles exactly what the user drew on the timeline.
 
-    A diferenca para `_render_montage` e que aqui nada e calculado: a duracao de
-    cada corte e o ponto da musica onde ele entra vieram prontos. O unico
-    trabalho de decisao e o dos buracos -- espaco que o usuario deixou vazio
-    vira preto com a musica tocando, e nao um encurtamento do video, senao todo
-    bloco depois dele sairia do lugar onde foi posto.
+    Nothing here is calculated: each cut's duration and the point of the music
+    where it comes in arrived ready-made. The only decision left is about the
+    gaps -- space the user left empty becomes black with the music playing, and
+    not a shortening of the video, or every block after it would leave the place
+    where it was put.
     """
     spec = item.timeline
     media = ffmpeg.probe(source)
 
-    # Camada, transformacao, som ajustado ou midia importada nao cabem em
-    # corte-e-emenda: eles exigem dois pedacos existindo ao mesmo tempo. Ai a
-    # montagem vira um grafo de filtros -- mais poderoso e menos tolerante,
-    # porque um erro nele derruba o render inteiro em vez de custar um corte.
-    if not spec.de_uma_camada_so:
-        return _render_composicao(source, item, media, out_dir, index)
+    # A layer, a transform, adjusted sound or imported media do not fit
+    # cut-and-splice: they require two pieces existing at the same time. There
+    # the montage becomes a filter graph -- more powerful and less forgiving,
+    # because one error in it brings down the whole render instead of costing
+    # one cut.
+    if not spec.single_layer:
+        return _render_composition(source, item, media, out_dir, index)
 
-    pecas = tl.plan(spec.cuts, source_duration_s=media.duration_s)
-    if not any(p.is_cut for p in pecas):
+    pieces = tl.plan(spec.cuts, source_duration_s=media.duration_s)
+    if not any(p.is_cut for p in pieces):
         raise ffmpeg.FFmpegError(
             "nenhum dos cortes cai dentro da gravacao"
         )
 
-    # este caminho so pega montagem sem musica -- uma camada de som ja manda a
-    # montagem para o grafo de filtros -- entao o audio da partida e tudo o que
-    # o video tem
-    mudo = False
-    taxa = media.audio_rate
+    # this path only takes montages with no music -- a sound layer already
+    # sends the montage to the filter graph -- so the match audio is all the
+    # video has
+    muted = False
+    audio_rate = media.audio_rate
 
     parts_dir = out_dir / f"{index:02d}_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
-    #: tudo o que entra no video, na ordem -- cortes e pretos
+    #: everything that goes into the video, in order -- cuts and blacks
     parts: list[Path] = []
-    #: so os cortes de verdade, que sao o que vai para o zip
-    recortes: list[tuple[Path, tuple[float, float]]] = []
+    #: only the real cuts, which are what goes into the zip
+    cut_files: list[tuple[Path, tuple[float, float]]] = []
 
-    for j, peca in enumerate(pecas):
+    for j, piece in enumerate(pieces):
         part = parts_dir / f"{j:03d}.mp4"
-        if peca.is_cut:
+        if piece.is_cut:
             try:
-                ffmpeg.cut(source, peca.start_s, peca.end_s, part, mute=mudo)
+                ffmpeg.cut(source, piece.start_s, piece.end_s, part, mute=muted)
                 parts.append(part)
-                recortes.append((part, (peca.start_s, peca.end_s)))
+                cut_files.append((part, (piece.start_s, piece.end_s)))
                 continue
             except ffmpeg.FFmpegError:
-                # o corte falhou, mas o lugar dele continua reservado: virar
-                # preto mantem todos os blocos seguintes no ponto da musica
-                # onde o usuario os pos
+                # the cut failed, but its slot stays reserved: turning black
+                # keeps every following block at the point of the music where
+                # the user put it
                 log.warning(
-                    "corte em %.1fs falhou; o lugar dele fica preto", peca.start_s
+                    "corte em %.1fs falhou; o lugar dele fica preto", piece.start_s
                 )
         try:
             ffmpeg.black_clip(
-                part, peca.duration_s,
+                part, piece.duration_s,
                 width=media.width, height=media.height, fps=media.fps,
-                audio_rate=taxa,
+                audio_rate=audio_rate,
             )
         except ffmpeg.FFmpegError:
-            log.warning("nao consegui gerar o preto de %.2fs", peca.duration_s)
+            log.warning("nao consegui gerar o preto de %.2fs", piece.duration_s)
             continue
         parts.append(part)
 
-    if not recortes:
+    if not cut_files:
         raise ffmpeg.FFmpegError("nenhum corte pode ser feito")
 
-    # o zip sai ANTES da montagem, como nas montagens automaticas: se juntar ou
-    # por a trilha falhar, o material cortado nao se perde. So os cortes entram
-    # -- o preto dos buracos nao e material de ninguem
+    # the zip comes out BEFORE the assembly: if joining or adding the
+    # soundtrack fails, the cut material is not lost. Only the cuts go in -- the
+    # black of the gaps is nobody's material
     zip_path = _zip_segments(
-        [p for p, _ in recortes],
-        [trecho for _, trecho in recortes],
+        [p for p, _ in cut_files],
+        [span for _, span in cut_files],
         out_dir / f"{index:02d}_cortes.zip",
     )
 
     dest: Path | None = out_dir / f"{index:02d}_custom.mp4"
-    erro_montagem: str | None = None
+    assembly_error: str | None = None
     try:
         joined = out_dir / f"{index:02d}_custom_raw.mp4"
-        ffmpeg.concat(parts, joined, mute=mudo)
+        ffmpeg.concat(parts, joined, mute=muted)
         joined.replace(dest)
     except ffmpeg.FFmpegError as exc:
         log.exception("montagem de '%s' falhou; entrego so os cortes", item.title)
-        erro_montagem = str(exc)[:500]
+        assembly_error = str(exc)[:500]
         dest = None
 
     for p in parts:
         p.unlink(missing_ok=True)
     parts_dir.rmdir()
 
-    # a miniatura sai do primeiro corte, e nao do primeiro segundo: quem
-    # comecou a montagem com um espaco vazio teria uma capa preta
-    ate_o_primeiro = 0.0
-    for peca in pecas:
-        if peca.is_cut:
+    # the thumbnail comes from the first cut, and not from the first second:
+    # whoever started the montage with an empty space would get a black cover
+    until_first_cut = 0.0
+    for piece in pieces:
+        if piece.is_cut:
             break
-        ate_o_primeiro += peca.duration_s
+        until_first_cut += piece.duration_s
     thumb = (
-        _thumb(dest, out_dir, index, at=ate_o_primeiro + 0.2)
+        _thumb(dest, out_dir, index, at=until_first_cut + 0.2)
         if dest is not None else None
     )
-    highlight = Highlight(
-        kind=HighlightKind.CUSTOM,
-        start=min(c.start_s for c in spec.cuts),
-        end=max(c.end_s for c in spec.cuts),
-        title=item.title or "Montagem",
-        beats_at=[c.source_t for c in spec.cuts],
-        meta={},
-    )
     return RenderedClip(
-        highlight=highlight,
+        title=item.title or "Montagem",
+        start_s=min(c.start_s for c in spec.cuts),
+        end_s=max(c.end_s for c in spec.cuts),
         video=dest,
         thumb=thumb,
-        duration_s=tl.total_duration_s(pecas),
+        duration_s=tl.total_duration_s(pieces),
         segments_zip=zip_path,
         meta={
-            "segments": len(recortes),
+            "segments": len(cut_files),
             "blackfill_s": round(
-                sum(p.duration_s for p in pecas if p.black), 2
+                sum(p.duration_s for p in pieces if p.black), 2
             ),
             "hand_made": True,
             "music_name": None,
             "original_audio": True,
-            **({"render_error": erro_montagem} if erro_montagem else {}),
+            **({"render_error": assembly_error} if assembly_error else {}),
         },
     )
 
 
-def _render_composicao(
+def _render_composition(
     source: Path,
     item: TimelineItem,
     media: ffmpeg.MediaInfo,
     out_dir: Path,
     index: int,
 ) -> RenderedClip:
-    """Monta em camadas, num grafo de filtros.
+    """Assembles in layers, through a filter graph.
 
-    Uma tela de fundo cobre o video inteiro e cada clipe e sobreposto nela na
-    hora certa. O buraco entre clipes deixa de ser caso especial: ele e
-    simplesmente onde ninguem cobriu o fundo.
+    A background canvas covers the whole video and each clip is overlaid onto it
+    at the right moment. The gap between clips stops being a special case: it is
+    simply where nobody covered the background.
 
-    Diferente do caminho de corte-e-emenda, aqui **nao ha zip de cortes**: os
-    pedacos nunca chegam a existir como arquivo, e recorta-los so para o zip
-    seria pagar a montagem duas vezes.
+    Unlike the cut-and-splice path, here there is **no zip of cuts**: the pieces
+    never come to exist as files, and cutting them out just for the zip would be
+    paying for the assembly twice.
     """
     spec = item.timeline
 
-    comp = compor(
+    comp = compose_graph(
         spec,
         source=source,
         width=media.width,
         height=media.height,
         fps=media.fps,
         source_duration_s=media.duration_s,
-        midias=item.midias,
+        library=item.library,
     )
 
     dest: Path | None = out_dir / f"{index:02d}_custom.mp4"
-    erro: str | None = None
+    error_text: str | None = None
     try:
         ffmpeg.compose(comp, dest)
     except ffmpeg.FFmpegError as exc:
         log.exception("composicao de '%s' falhou", item.title)
-        erro = str(exc)[:500]
+        error_text = str(exc)[:500]
         dest = None
 
     clips = spec.clips
-    camadas = [l for l in spec.layers if not l.hidden]
+    layers = [l for l in spec.layers if not l.hidden]
     thumb = _thumb(dest, out_dir, index) if dest is not None else None
     return RenderedClip(
-        highlight=Highlight(
-            kind=HighlightKind.CUSTOM,
-            start=min((c.start_s for c in clips), default=0.0),
-            end=max((c.end_s for c in clips), default=0.0),
-            title=item.title or "Montagem",
-            beats_at=[c.source_t for c in clips],
-            meta={},
-        ),
+        title=item.title or "Montagem",
+        start_s=min((c.start_s for c in clips), default=0.0),
+        end_s=max((c.end_s for c in clips), default=0.0),
         video=dest,
         thumb=thumb,
         duration_s=spec.duration_s,
         meta={
             "segments": len(clips),
-            "layers": len(camadas),
+            "layers": len(layers),
             "composed": True,
             "hand_made": True,
             "media": len({c.media_id for c in clips if c.media_id}),
             "music_name": item.music_name,
-            "original_audio": not spec.tem_musica,
-            **({"render_error": erro} if erro else {}),
+            "original_audio": not spec.has_music,
+            **({"render_error": error_text} if error_text else {}),
         },
     )
 
@@ -440,71 +286,38 @@ def _render_composicao(
 def _zip_segments(
     parts: list[Path], segments: list[tuple[float, float]], dest: Path
 ) -> Path | None:
-    """Empacota os cortes individuais para download.
+    """Packs the individual cuts for download.
 
-    Guarda cada corte **uma vez**, em ordem cronológica: quando a montagem
-    repete trechos, o mesmo material apareceria várias vezes no zip sem
-    acrescentar nada a quem vai reeditar. O nome traz o instante de onde o corte
-    saiu na gravação original.
+    It stores each cut **once**, in chronological order: when the montage repeats
+    stretches, the same material would appear several times in the zip without
+    adding anything for whoever re-edits. The name carries the instant the cut
+    came from in the original recording.
 
-    Os arquivos já estão em H.264 e não comprimem mais, então o zip é apenas um
-    empacotamento (ZIP_STORED) -- recomprimir só gastaria CPU.
+    The files are already H.264 and compress no further, so the zip is only a
+    packaging (ZIP_STORED) -- recompressing would just burn CPU.
     """
-    # Chaveado só pelo início, e ficando com a versão mais longa: o último
-    # trecho da montagem costuma ser uma aparação do mesmo corte, e entregar as
-    # duas versões seria entregar o mesmo material duas vezes, uma pela metade.
-    unicos: dict[float, tuple[float, Path]] = {}
+    # Keyed by the start alone, keeping the longest version: the montage's last
+    # stretch is usually a trim of the same cut, and delivering both versions
+    # would mean delivering the same material twice, one of them halved.
+    unique: dict[float, tuple[float, Path]] = {}
     for part, (start, end) in zip(parts, segments):
-        chave = round(start, 2)
-        atual = unicos.get(chave)
-        if atual is None or (end - start) > atual[0]:
-            unicos[chave] = (end - start, part)
-    if not unicos:
+        key = round(start, 2)
+        current = unique.get(key)
+        if current is None or (end - start) > current[0]:
+            unique[key] = (end - start, part)
+    if not unique:
         return None
 
     try:
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_STORED) as zf:
-            for i, (start, (_dur, part)) in enumerate(sorted(unicos.items()), start=1):
-                minutos = int(start) // 60
-                segundos = start - minutos * 60
-                zf.write(part, f"{i:02d}_{minutos:02d}m{segundos:04.1f}s.mp4")
+            for i, (start, (_dur, part)) in enumerate(sorted(unique.items()), start=1):
+                minutes = int(start) // 60
+                seconds = start - minutes * 60
+                zf.write(part, f"{i:02d}_{minutes:02d}m{seconds:04.1f}s.mp4")
     except OSError:
         log.warning("nao consegui montar o zip dos cortes em %s", dest)
         return None
     return dest
-
-
-def _music_window(
-    options: ClipOptions, music: Path | None, beats: BeatGrid | None
-) -> tuple[float, float | None]:
-    """Onde a musica comeca a tocar e quanto a montagem deve durar.
-
-    O inicio e empurrado para a primeira batida a partir do ponto escolhido pelo
-    usuario: assim o primeiro corte da montagem cai no tempo, em vez de entrar
-    no meio de um compasso. O fim e limitado pelo tamanho real do arquivo -- se
-    alguem pedir um trecho que passa do fim da musica, entrega-se o que existe
-    em vez de um video com silencio no final.
-    """
-    start = max(0.0, options.music_start_s)
-    if beats and beats.beats:
-        depois = [b for b in beats.beats if b >= start - 1e-6]
-        if depois:
-            start = depois[0]
-
-    if music is None:
-        return start, None
-
-    try:
-        music_duration = ffmpeg.probe(music).duration_s
-    except ffmpeg.FFmpegError:
-        music_duration = 0.0
-
-    end = options.music_end_s
-    if music_duration > 0:
-        end = music_duration if end is None else min(end, music_duration)
-    if end is None:
-        return start, None
-    return start, max(0.0, end - start)
 
 
 def _thumb(video: Path, out_dir: Path, index: int, at: float = 0.2) -> Path | None:

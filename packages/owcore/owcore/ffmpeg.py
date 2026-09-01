@@ -1,13 +1,14 @@
-"""Wrappers finos em cima do ffmpeg/ffprobe."""
+"""Thin wrappers around ffmpeg/ffprobe."""
 
 from __future__ import annotations
 
 import json
 import logging
 import subprocess
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .config import get_settings
 from .models import RoiSpec
@@ -32,6 +33,46 @@ def _run(cmd: Sequence[str]) -> str:
     return proc.stdout
 
 
+def _run_acompanhado(
+    cmd: Sequence[str], duracao_s: float, avanco: Callable[[float], None]
+) -> None:
+    """Runs ffmpeg reporting how far along it is, from 0 to 1.
+
+    ffmpeg only says where it is when asked: `-progress pipe:1` makes it write
+    `out_time_us=<microseconds>` twice a second. The alternative is guessing by
+    the wall clock, and on an 11-minute recording that is minutes off -- the
+    cropping does not advance at a constant rate.
+
+    stderr is merged into stdout on purpose: reading two pipes with a single
+    loop deadlocks when the second one fills up, and a damaged recording fills
+    it up.
+    """
+    cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    log.debug("exec: %s", " ".join(cmd))
+    proc = subprocess.Popen(
+        list(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    )
+    # only the last lines matter, and only they are kept: a damaged recording
+    # makes ffmpeg complain **per frame**, and an uncapped list grew with the
+    # video duration only to hand over 25 lines in the end
+    resto: deque[str] = deque(maxlen=25)
+    assert proc.stdout is not None
+    for linha in proc.stdout:
+        linha = linha.strip()
+        chave, _, valor = linha.partition("=")
+        if chave == "out_time_us" and valor.lstrip("-").isdigit():
+            if duracao_s > 0:
+                avanco(max(0.0, min(1.0, int(valor) / 1e6 / duracao_s)))
+        elif "=" not in linha and linha:
+            # not a progress line: this is ffmpeg complaining
+            resto.append(linha)
+    if proc.wait() != 0:
+        raise FFmpegError(
+            f"{cmd[0]} saiu com {proc.returncode}:\n" + "\n".join(resto)
+        )
+
+
 @dataclass(slots=True)
 class MediaInfo:
     duration_s: float
@@ -39,22 +80,32 @@ class MediaInfo:
     height: int
     fps: float
     has_audio: bool
-    #: taxa de amostragem do audio, 0 quando nao ha faixa. O preenchimento
-    #: preto da montagem manual precisa dela: o demuxer `concat` recusa juntar
-    #: pedacos cujo audio nao bate.
+    #: audio sample rate, 0 when there is no track. The montage's black
+    #: filler needs it: the `concat` demuxer refuses to join pieces whose audio
+    #: does not match.
     audio_rate: int = 0
 
 
 def probe(path: Path | str) -> MediaInfo:
-    """Mede um arquivo. Aceita um endereço `http` tambem: o ffprobe puxa so
-    o cabecalho, por `Range`."""
+    """Measures a file. Accepts an `http` address too: ffprobe pulls only the
+    header, via `Range`."""
     s = get_settings()
-    out = _run(
-        [
-            s.ffprobe, "-v", "error", "-print_format", "json",
-            "-show_format", "-show_streams", str(path),
-        ]
-    )
+    try:
+        out = _run(
+            [
+                s.ffprobe, "-v", "error", "-print_format", "json",
+                "-show_format", "-show_streams", str(path),
+            ]
+        )
+    except FFmpegError as exc:
+        # ffprobe's own wording is cryptic ("moov atom not found"), and what it
+        # means almost every time is a file that arrived incomplete. Saying so
+        # here is what turns a report nobody can act on into one that names the
+        # thing to do.
+        raise FFmpegError(
+            f"nao consegui ler o video em {path}: o arquivo parece corrompido "
+            f"ou incompleto.\n{exc}"
+        ) from exc
     data = json.loads(out)
     streams = data.get("streams", [])
     video = next((x for x in streams if x.get("codec_type") == "video"), None)
@@ -82,12 +133,22 @@ def probe(path: Path | str) -> MediaInfo:
     )
 
 
-def extract_rois(src: Path, rois: Sequence[RoiSpec], out_dir: Path) -> dict[str, Path]:
-    """Uma única decodificação do vídeo produzindo todos os recortes.
+def extract_rois(
+    src: Path,
+    rois: Sequence[RoiSpec],
+    out_dir: Path,
+    *,
+    on_progress: Callable[[float], None] | None = None,
+) -> dict[str, Path]:
+    """A single decode of the video producing every crop.
 
-    É o ponto central da economia do sistema: o vídeo pesado é lido uma vez e
-    cada detector recebe só a faixa de pixels que interessa, já em baixa
-    resolução e baixo FPS.
+    This is the centre of the system's economics: the heavy video is read once
+    and each detector receives only the band of pixels that matters, already at
+    low resolution and low FPS.
+
+    `on_progress` recebe 0..1 conforme o recorte anda. Vale passar: numa
+    match recording this call alone is ~3/4 of the total analysis time, and
+    without it the screen sits on the same number for minutes.
     """
     if not rois:
         return {}
@@ -108,9 +169,9 @@ def extract_rois(src: Path, rois: Sequence[RoiSpec], out_dir: Path) -> dict[str,
                 f"crop=w=iw*{roi.w:.6f}:h=ih*{roi.h:.6f}"
                 f":x=iw*{roi.x:.6f}:y=ih*{roi.y:.6f},"
             )
-        # `min(width_px, iw)`: nunca *ampliar*. Numa gravacao 360p o recorte
-        # nativo tem ~100px de largura, e estica-lo ate 320 so inventa pixels e
-        # triplica o arquivo sem acrescentar informacao.
+        # `min(width_px, iw)`: never *upscale*. On a 360p recording the
+        # native crop is ~100px wide, and stretching it to 320 only invents
+        # pixels and triples the file without adding information.
         # (a virgula precisa de escape: no filtergraph ela separa filtros)
         chains.append(
             f"[{label}]{crop}scale=min({roi.width_px}\\,iw):-2:flags=bilinear,"
@@ -120,34 +181,38 @@ def extract_rois(src: Path, rois: Sequence[RoiSpec], out_dir: Path) -> dict[str,
         outputs[roi.name] = dest
         args += [
             "-map", f"[o{i}]", "-an",
-            # CRF 22: medido em gameplay real, a deteccao de eliminacoes e
-            # identica de CRF 16 a 28 -- nao vale pagar por qualidade que
-            # detector nenhum usa. Mais alto que isso comeca a comer a
-            # saturacao, que e justamente o discriminador.
+            # CRF 22: measured on real gameplay, kill detection is identical
+            # from CRF 16 to 28 -- not worth paying for quality no detector
+            # uses. Higher than that starts eating into saturation, which is
+            # precisely the discriminator.
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
             "-pix_fmt", "yuv420p",
-            # Tags BT.601 explicitas -- e isto NAO e cosmetico. Os detectores
-            # decidem por saturacao, e a matriz YUV->RGB muda justamente a
-            # saturacao. O mesmo arquivo marcado como BT.709 era lido com
-            # saturacao 231 na maquina host e 205 dentro do container (um
-            # decodificador honra a tag, o outro assume 601 porque o recorte e
-            # pequeno) -- diferenca suficiente para o detector achar 20
-            # eliminacoes num lugar e 10 no outro, com o mesmo codigo. Marcado
-            # como BT.601, que e o que ambos assumem para quadros deste tamanho,
-            # os dois leem exatamente 220.
+            # Explicit BT.601 tags -- and this is NOT cosmetic. The detectors
+            # decide by saturation, and the YUV->RGB matrix changes exactly
+            # that. The same file tagged BT.709 was read with saturation 231 on
+            # the host machine and 205 inside the container (one decoder
+            # honours the tag, the other assumes 601 because the crop is
+            # small) -- enough of a difference for the detector to find 20
+            # kills in one place and 10 in the other, with identical code.
+            # Tagged BT.601, which is what both assume for frames this size,
+            # the two read exactly 220.
             "-color_primaries", "smpte170m", "-color_trc", "smpte170m",
             "-colorspace", "smpte170m", "-color_range", "tv",
             "-movflags", "+faststart",
             str(dest),
         ]
 
-    _run([s.ffmpeg, "-y", "-v", "error", "-i", str(src),
-          "-filter_complex", ";".join(chains), *args])
+    cmd = [s.ffmpeg, "-y", "-v", "error", "-i", str(src),
+           "-filter_complex", ";".join(chains), *args]
+    if on_progress is None:
+        _run(cmd)
+    else:
+        _run_acompanhado(cmd, probe(src).duration_s, on_progress)
     return outputs
 
 
 def extract_audio(src: Path, dest: Path, sample_rate: int = 22050) -> Path | None:
-    """Extrai áudio mono WAV. Devolve None se a mídia não tiver faixa de áudio."""
+    """Extracts mono WAV audio. Returns None if the media has no audio track."""
     if not probe(src).has_audio:
         return None
     s = get_settings()
@@ -168,7 +233,7 @@ def cut(
     scale_width: int | None = None,
     mute: bool = False,
 ) -> Path:
-    """Corta [start, end) reencodando, para que o corte caia no frame exato."""
+    """Cuts [start, end) re-encoding, so the cut lands on the exact frame."""
     s = get_settings()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +260,7 @@ def cut(
 
 
 def concat(parts: Sequence[Path], dest: Path, *, mute: bool = False) -> Path:
-    """Concatena via demuxer `concat`, reencodando (imune a diferenças de PTS)."""
+    """Concatenates via the `concat` demuxer, re-encoding (immune to PTS drift)."""
     if not parts:
         raise FFmpegError("nada para concatenar")
     s = get_settings()
@@ -220,7 +285,7 @@ def add_music(
     video: Path, music: Path, dest: Path, *, music_start: float = 0.0,
     fade_out: float = 1.5,
 ) -> Path:
-    """Troca o áudio do vídeo pela música, cortando no tamanho do vídeo."""
+    """Swaps the video audio for the music, trimmed to the video length."""
     s = get_settings()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -247,12 +312,13 @@ def black_clip(
     fps: float,
     audio_rate: int = 0,
 ) -> Path:
-    """Um trecho de tela preta, para tapar buraco na montagem manual.
+    """A stretch of black screen, to fill a gap in the montage.
 
-    Quando o usuário deixa espaço entre dois blocos, é isto que toca ali: preto
-    com a música por cima. Sai com os mesmos parâmetros dos cortes vizinhos
-    porque o `concat` junta antes de reencodar e não perdoa divergência —
-    inclusive no áudio, daí o silêncio na mesma taxa quando os cortes têm som.
+    When the user leaves space between two blocks, this is what plays there:
+    black with the music over it. It comes out with the same parameters as the
+    neighbouring cuts because `concat` joins before re-encoding and does not
+    forgive divergence -- audio included, hence the silence at the same rate
+    when the cuts have sound.
     """
     s = get_settings()
     dest = Path(dest)
@@ -277,19 +343,20 @@ def black_clip(
 
 
 def proxy(src: Path, dest: Path, *, width: int = 640, fps: float = 24.0) -> Path:
-    """Cópia pequena de um vídeo, para o monitor do editor.
+    """A small copy of a video, for the editor's monitor.
 
-    A gravação da partida ganha a sua de graça, dentro da decodificação que já
-    extrai os recortes. Um vídeo **importado** não passa por aquela passagem, e
+    The match recording gets its own for free, inside the decode that already
+    extracts the crops. An **imported** video does not go through that pass,
+    and
     por isso precisa da sua aqui — ainda vale a pena: buscar dentro do arquivo
-    cheio a cada arrasto é o que derruba o player.
+    dragging the full file on every seek is what brings the player down.
     """
     s = get_settings()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     _run([
         s.ffmpeg, "-y", "-v", "error", "-i", str(src),
-        # a vírgula precisa de escape: no filtergraph ela separa filtros
+        # the comma needs escaping: in the filtergraph it separates filters
         "-vf", f"scale=min({width}\\,iw):-2:flags=bilinear,fps={fps}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
         "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(dest),
@@ -298,21 +365,21 @@ def proxy(src: Path, dest: Path, *, width: int = 640, fps: float = 24.0) -> Path
 
 
 def compose(comp, dest: Path) -> Path:
-    """Roda o grafo montado por `owcore.compose`.
+    """Runs the graph built by `owcore.compose`.
 
-    É o caminho da montagem em camadas. O de corte-e-emenda continua existindo
-    para a montagem de uma camada só, e é mais resistente: lá um corte que falha
-    custa só ele, aqui um erro no grafo derruba o render inteiro.
+    This is the layered-montage path. The cut-and-splice one still exists for
+    single-layer montages, and is more resilient: there a cut that fails costs
+    only itself, here an error in the graph brings the whole render down.
     """
     s = get_settings()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [s.ffmpeg, "-y", "-v", "error"]
-    cmd += comp.argumentos_de_entrada()
-    cmd += ["-filter_complex", comp.filter_complex, "-map", comp.mapa_video]
-    if comp.mapa_audio:
-        cmd += ["-map", comp.mapa_audio, "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    cmd += comp.input_args()
+    cmd += ["-filter_complex", comp.filter_complex, "-map", comp.video_map]
+    if comp.audio_map:
+        cmd += ["-map", comp.audio_map, "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
     else:
         cmd += ["-an"]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(comp.crf),

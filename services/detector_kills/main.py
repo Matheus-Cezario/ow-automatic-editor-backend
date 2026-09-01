@@ -1,4 +1,10 @@
-"""Microsservico detector de eliminacoes."""
+"""Microservice of the crosshair region: kills and critical hits.
+
+One crop, two readings. The magenta skull says somebody died; the red X marker
+says the shot landed on the head. They are the same handful of pixels at the
+same instant, so asking the preprocessor for two identical crops would be
+paying twice for the same work.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +17,7 @@ from owcore.models import DetectionEvent, JobParams
 from owcore.profiles import Profile
 from owcore.worker import run_worker
 
-from detect import detect_kills
+from detect import detect_headshots, detect_kills
 
 
 class KillsDetector(DetectorWorker):
@@ -28,7 +34,11 @@ class KillsDetector(DetectorWorker):
         duration_s: float,
     ) -> list[DetectionEvent]:
         templates = Path(get_settings().templates_dir) / "kills"
-        return detect_kills(artifacts["kills"], profile, templates)
+        roi = artifacts["kills"]
+        events = detect_kills(roi, profile, templates)
+        events += detect_headshots(roi, profile)
+        events.sort(key=lambda e: e.t)
+        return events
 
 
 if __name__ == "__main__":

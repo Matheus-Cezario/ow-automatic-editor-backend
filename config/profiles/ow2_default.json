@@ -14,12 +14,33 @@
     },
     "killfeed": {
       "name": "killfeed",
-      "_nota": "comeca em 0.68 para nao pegar o painel de placar, que e vermelho fixo",
+      "_nota": "comeca em 0.68 para nao pegar o painel de placar, que e vermelho fixo. Comeca em 0.02 e nao em 0.04 porque a PRIMEIRA linha do killfeed nasce em ~0.031 da altura: com o corte em 0.04 ela vinha cortada pela metade, e a linha cortada perdia altura suficiente para o detector de killfeed nao reconhecer a placa.",
       "x": 0.68,
-      "y": 0.04,
+      "y": 0.02,
       "w": 0.32,
-      "h": 0.28,
+      "h": 0.3,
       "fps": 5.0,
+      "width_px": 960,
+      "_nota_resolucao": "960 nao amplia nada: o recorte sai com min(960, largura nativa), entao e 'nativo ate 3000px de tela'. Estava em 480, e numa gravacao 1440p isso jogava fora 40% dos pixels da faixa. Custa: o nome de quem matou precisa deles. Em 480 a letra do killfeed fica com 8 pixels de altura e as letras se colam umas nas outras -- medido na gravacao de referencia, das 3 linhas do jogador nenhuma sai inteira. O casamento de icone tambem muda com isso, e para melhor: em 480 a mesma gravacao rendia 7 linhas com herois que nem estavam na partida, e em nativo rende linhas coerentes, com a mesma habilidade repetida ao longo da vida de cada linha."
+    },
+    "ult": {
+      "name": "ult",
+      "_nota": "botao de ultimate do rodape, centrado em (0.50, 0.86). E onde se ve a ultimate DO JOGADOR: carregada ela vira um disco branco com o icone do heroi, cercado por um anel ciano; usada, volta a ser um anel escuro com a porcentagem.",
+      "x": 0.45,
+      "y": 0.79,
+      "w": 0.1,
+      "h": 0.14,
+      "fps": 5.0,
+      "width_px": 240
+    },
+    "player": {
+      "name": "player",
+      "_nota": "a placa do proprio jogador no canto inferior esquerdo: nivel, emblema e o NOME. E o unico lugar da tela que diz quem esta jogando, e sem ele nao da para saber de quem foi a eliminacao anunciada no killfeed. A faixa comeca em 0.897 e nao em 0.885 de proposito: acima disso vem a barra de vida, e os tracinhos dela passariam pelo filtro de letra e formariam uma 'palavra' de 26 letras -- mais longa que qualquer nome. Medido na gravacao de referencia (1440p): as letras do nome ficam entre 0.902 e 0.924 da altura.",
+      "x": 0.09,
+      "y": 0.897,
+      "w": 0.15,
+      "h": 0.034,
+      "fps": 1.0,
       "width_px": 480
     },
     "health": {
@@ -68,7 +89,34 @@
     ],
     "min_gap_s": 0.8,
     "min_pulse_s": 0.0,
-    "template_threshold": 0.85
+    "template_threshold": 0.85,
+    "headshot": {
+      "_nota": "Acerto critico: o OW2 desenha o marcador de acerto em VERMELHO (o acerto normal e branco). Sao quatro tracos grossos em X, centrados na mira, que nascem pequenos e crescem por ~0.3s. A decisao nao e por cor -- e por FORMA: as quatro diagonais tem de estar vermelhas e as quatro direcoes retas (cima, baixo, esquerda, direita) NAO. Sem essa segunda metade a caveira de eliminacao, que tambem e vermelha e tambem nasce na mira, virava headshot: ela preenche as oito direcoes.",
+      "_nota_medida": "Medido em gravacao real 2558x1438: o X pontua 0.81 no pico e a cena fica em 0.06 no percentil 99. A mira e o centro da TELA, e a posicao dela dentro do recorte sai da propria geometria da ROI -- nao ha numero a calibrar aqui.",
+      "min_redness": 70,
+      "min_value": 150,
+      "radius_bands": [
+        [
+          0.08,
+          0.3
+        ],
+        [
+          0.15,
+          0.5
+        ],
+        [
+          0.25,
+          0.7
+        ],
+        [
+          0.4,
+          0.92
+        ]
+      ],
+      "ray_samples": 16,
+      "threshold": 0.55,
+      "min_gap_s": 1.0
+    }
   },
   "death": {
     "_nota": "Morte = a vida ir a zero e voltar cheia no quadro seguinte (voce passa a espectar um companheiro), ou a barra sumir de vez (menu, troca de round). Para as regras os dois casos significam o mesmo: a sequencia foi interrompida.",
@@ -86,13 +134,126 @@
     "safe_after_s": 4.0
   },
   "ults": {
-    "_nota": "Sem os icones de ultimate em templates/ults/ este detector nao emite nada -- de proposito. A via de audio existe mas vem desligada: em gameplay real ela nao distingue fala de ultimate de tiro e explosao.",
+    "_nota": "Tres vias, e elas respondem a perguntas diferentes. A do BOTAO ve a ultimate do proprio jogador e e a unica que funciona sem o usuario preparar nada. A do killfeed procura icones de ultimate inimiga em templates/ults/ -- sem esses recortes ela nao emite nada, de proposito. A de audio existe mas vem desligada: em gameplay real ela nao distingue fala de ultimate de tiro e explosao.",
     "template_threshold": 0.85,
     "min_gap_s": 3.0,
     "audio_enabled": false,
     "audio_spike_db": 12.0,
     "audio_context_s": 5.0,
-    "audio_min_gap_s": 8.0
+    "audio_min_gap_s": 8.0,
+    "self": {
+      "_nota": "Ultimate do proprio jogador, lida no botao do rodape. Carregada = disco BRANCO com o icone do heroi + anel CIANO em volta. Usar a ultimate apaga as duas coisas de uma vez, entao o evento e a BORDA DE DESCIDA: o instante em que o botao deixa de estar carregado.",
+      "_nota_conjuncao": "As duas condicoes valem juntas, nunca sozinhas: a explosao da D.Va enche a regiao de branco sem nada de ciano, e o ceu de alguns mapas faz o contrario. Medido nas gravacoes de teste, carregada da 0.12-0.17 de disco e 0.08-0.44 de ciano; qualquer outro quadro fica abaixo de 0.03 em pelo menos uma delas.",
+      "hsv_white": [
+        {
+          "lo": [
+            0,
+            0,
+            185
+          ],
+          "hi": [
+            179,
+            70,
+            255
+          ]
+        }
+      ],
+      "hsv_cyan": [
+        {
+          "lo": [
+            92,
+            100,
+            120
+          ],
+          "hi": [
+            120,
+            255,
+            255
+          ]
+        }
+      ],
+      "min_disc_frac": 0.08,
+      "min_cyan_frac": 0.04,
+      "max_offset": 0.3,
+      "aspect_range": [
+        0.7,
+        1.45
+      ],
+      "_nota_tempo": "flicker_s costura piscadas do HUD (um quadro sem botao nao e uma ultimate usada). min_after_s exige que o botao fique descarregado depois: carregar de novo leva dezenas de segundos, entao um 'apagou e voltou' em 6s foi o HUD sumindo, nao uma ultimate. Efeito colateral conhecido: D.Va e Dmon tem duas ultimates encadeadas (Autodestruicao e depois Chamar Meka); quando as duas caem dentro de min_after_s -- no campo de treino, onde a carga e instantanea -- so a segunda vira evento.",
+      "_nota_carga": "min_charged_s existe porque o botao nao e a unica coisa clara e redonda que passa por esta janela: a kill cam desenha um disco com o rosto de quem matou, e clarao de explosao ou de ceu tambem enche a regiao. Todos esses duram 1 a 3 quadros. Medido em 27 min de partida real (Ana 16min + Sigma 11min): as ultimates de verdade ficam carregadas 2.8s a 43s, e as 10 faixas curtas eram todas falsas. O numero foi calibrado em PARTIDA, de proposito -- no campo de treino a carga e instantanea, e deixar aqueles clipes mandarem foi o que deixou 10 falsos passarem antes.",
+      "flicker_s": 2.0,
+      "min_charged_s": 2.0,
+      "min_after_s": 6.0,
+      "icon_threshold": 0.55
+    }
+  },
+  "killfeed": {
+    "_nota": "Cada linha do killfeed e '<quem matou> <icone da habilidade> > <quem morreu>'. A cor NAO diz o time: medido na gravacao de referencia, o mesmo jogador aparece na placa azul de uma linha e na vermelha de outra -- azul e quem matou, vermelha e quem morreu, dos dois lados da partida. Quem foi so o nome escrito na placa azul responde, e e o que `name_threshold` confere contra a placa do rodape.",
+    "_nota_icone": "O icone mora no vao entre as duas placas, e o '>' ocupa o final desse vao. As fracoes de icon_span foram medidas na HUD real; o glifo e recortado dentro dessa janela e comparado com templates/abilities/. Ultimate aparece como disco branco com desenho preto; habilidade comum, como desenho branco em caixa escura.",
+    "_nota_medida": "Em gravacao real o icone certo pontua 0.65-0.93 e o segundo colocado fica em 0.27-0.55.",
+    "hsv_killer": [
+      {
+        "lo": [
+          92,
+          90,
+          90
+        ],
+        "hi": [
+          112,
+          255,
+          255
+        ]
+      }
+    ],
+    "hsv_victim": [
+      {
+        "lo": [
+          160,
+          90,
+          80
+        ],
+        "hi": [
+          179,
+          255,
+          255
+        ]
+      },
+      {
+        "lo": [
+          0,
+          90,
+          80
+        ],
+        "hi": [
+          8,
+          255,
+          255
+        ]
+      }
+    ],
+    "row_height_range": [
+      0.04,
+      0.25
+    ],
+    "min_aspect": 1.5,
+    "min_fill": 0.5,
+    "gap_range": [
+      0.4,
+      4.0
+    ],
+    "icon_span": [
+      0.03,
+      0.66
+    ],
+    "icon_height": 1.24,
+    "_nota_limiar": "0.65 e o corte entre o icone certo e o palpite. Abaixo dele o casamento nomeia arma comum e passiva -- coisas que nem aparecem no killfeed --, porque um vao sem icone nenhum (morte por tiro) ainda tem o '>' para casar com alguma coisa. Medido em 16 min de partida real: com 0.65 sairam 7 eliminacoes, todas conferidas uma a uma na imagem, e nenhum falso; com 0.55 sairam 19, das quais 7 eram vao sem icone.",
+    "icon_threshold": 0.65,
+    "_nota_hold": "hold_s segura a contagem de linhas por um instante: o recorte do icone falha em quadros isolados (a linha desliza ao entrar, e a compressao come o desenho), e sem isso cada falha partia uma linha em duas eliminacoes. So atrasa a queda da contagem -- nao inventa linha. 1s nao chegava perto: em partida real o recorte de UMA linha falha por 3 a 5 segundos seguidos, e a mesma eliminacao saia 2, 3 ou 4 vezes. 7s e a vida de uma linha na tela, e e o que a varredura de 1s a 12s aponta: a partir de 5s o resultado da Ana para de mudar, e 7s ainda tira a linha antiga que reaparecia como eliminacao nova quando uma linha mais recente a empurrava para baixo. Segurar mais nunca perdeu eliminacao de verdade -- duas com a mesma habilidade sobem a contagem para 2, e isso ja e uma borda de subida.",
+    "hold_s": 7.0,
+    "_nota_slide": "slide_s e quanto tempo a linha leva para acabar de entrar. Nesse comeco as placas ainda estao se abrindo -- em gravacao real uma das bordas de fora anda 16 a 20 pixels de um quadro para o outro --, e so as bordas de dentro, que cercam o icone, servem para reconhecer a linha. Passado esse tempo as de fora voltam a valer, e sao elas que separam duas eliminacoes do mesmo jogador.",
+    "slide_s": 0.6,
+    "_nota_nome": "0.40 fica no meio do vao. Medido na gravacao de referencia, com 81 linhas de killfeed conferidas uma a uma: as 3 linhas do jogador pontuam 0.59, 0.66 e 0.66, e a maior nota entre as 78 dos outros e 0.21 -- e ela e de MATEUSKCZ, que por acaso tem as mesmas 9 letras de CENOURAET. Nomes de comprimentos diferentes dao 0 sozinhos.",
+    "name_threshold": 0.4
   },
   "banner": {
     "_nota": "O rodape mostra varios avisos com a mesma cor e forma (SAVED BY, ORB OF HARMONY, GAINED FROM, ... STUNNED BY, PUT ... TO SLEEP). Cor e geometria acham a faixa; quem diz QUAL habilidade e o ICONE da ponta esquerda, comparado com os moldes em config/shapes/. Icone e nao texto de proposito: o texto muda de idioma, o icone nao.",

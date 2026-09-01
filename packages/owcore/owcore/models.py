@@ -1,4 +1,4 @@
-"""Modelos de domínio (pydantic) e tabelas (SQLAlchemy)."""
+"""Domain models (pydantic) and tables (SQLAlchemy)."""
 
 from __future__ import annotations
 
@@ -20,12 +20,12 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# ─────────────────────────────── enums ──────────────────────────────────────
+# --------------------------------- enums -----------------------------------
 
 
 class JobStatus(StrEnum):
-    """Ciclo de vida da *análise*. Ela roda uma vez, sozinha, e termina em
-    `READY`: a partir daí o job fica esperando o usuário escolher o que gerar."""
+    """Lifecycle of the *analysis*. It runs once, on its own, and ends at
+    `READY`: from there the job waits for the user to open the editor."""
 
     PENDING = "pending"
     PREPROCESSING = "preprocessing"
@@ -35,7 +35,7 @@ class JobStatus(StrEnum):
 
 
 class RenderStatus(StrEnum):
-    """Ciclo de vida de *um pedido de geração*. Um job tem quantos quiser."""
+    """Lifecycle of *one render request*. A job has as many as it likes."""
 
     PENDING = "pending"
     RENDERING = "rendering"
@@ -44,12 +44,12 @@ class RenderStatus(StrEnum):
 
 
 class TrackStatus(StrEnum):
-    """Ciclo de vida de *um item de midia* enviado para o job.
+    """Lifecycle of *one media item* uploaded to the job.
 
-    Uma musica sobe antes de qualquer video existir: e preciso ouvi-la no app e
-    ver as batidas para poder posicionar os cortes em cima dela. Com a
-    biblioteca de midia, o mesmo vale para um clipe ou uma imagem importada --
-    o app precisa da miniatura e das dimensoes antes de deixar montar com eles.
+    Music arrives before any video exists: you have to hear it in the app and
+    see the beats before you can place cuts on top of it. With the media
+    library, the same holds for an imported clip or image -- the app needs the
+    thumbnail and the dimensions before it will let you build with them.
     """
 
     PENDING = "pending"
@@ -58,10 +58,10 @@ class TrackStatus(StrEnum):
 
 
 class MediaKind(StrEnum):
-    """O que o arquivo importado e.
+    """What the imported file is.
 
-    Decide o que a analise faz com ele: audio ganha batidas e forma de onda,
-    video ganha miniatura e proxy, imagem ganha miniatura.
+    Decides what the analysis does with it: audio gets beats and a waveform,
+    video gets a thumbnail and a proxy, an image gets a thumbnail.
     """
 
     AUDIO = "audio"
@@ -74,37 +74,43 @@ class EventKind(StrEnum):
     DEATH = "death"
     LOW_HP = "low_hp"
     ESCAPE = "escape"
+    #: an ultimate was used. `meta["side"]` says whose: "self" when the footer
+    #: button discharged (the player's own), "enemy" when the icon appeared in
+    #: the killfeed or the audio spiked.
     ULT_USED = "ult_used"
     ULT_NEGATED = "ult_negated"
-    #: dardo tranquilizante da Ana acertando alguem
+    #: critical hit -- the red X marker on the crosshair
+    HEADSHOT = "headshot"
+    #: someone on our team killed with an ability named in the killfeed;
+    #: `meta["ability"]` carries "hero/ability"
+    ABILITY_KILL = "ability_kill"
+    #: Ana's sleep dart landing on someone
     SLEEP = "sleep"
-    #: pedrada (Accretion) do Sigma atordoando alguem
+    #: Sigma's Accretion rock stunning someone
     STUN = "stun"
 
 
-class HighlightKind(StrEnum):
-    MULTIKILL = "multikill"
-    SOLO_WIPE = "solo_wipe"
-    ESCAPE = "escape"
-    BEAT_MONTAGE = "beat_montage"
-    ULT_MONTAGE = "ult_montage"
-    SLEEP_MONTAGE = "sleep_montage"
-    STUN_MONTAGE = "stun_montage"
-    #: montado pelo usuario na linha do tempo -- nao sai de regra nenhuma
-    CUSTOM = "custom"
+#: What a generated video is. There used to be a kind per rule -- "kill
+#: streak", "solo wipe", "beat montage" -- because the system proposed
+#: ready-made videos from the events. It does not any more: every video comes
+#: out of the editor, and what it is, is whatever title the user gave it.
+#:
+#: It is still a text column in the database, so clips already generated keep
+#: the old kind they had -- the app only needs to know how to draw them.
+CLIP_KIND_CUSTOM = "custom"
 
 
-#: Detectores que a análise espera antes de montar a lista de propostas.
-#: Um por *região da tela*, não por habilidade: `banner` lê a faixa do rodapé e
-#: distingue as habilidades pelo ícone.
-DETECTORS = ("kills", "survival", "ults", "banner")
+#: Detectors the analysis waits for before considering itself finished.
+#: One per *screen region*, not per ability: `banner` reads the footer strip and
+#: tells the abilities apart by their icon.
+DETECTORS = ("kills", "survival", "ults", "banner", "killfeed")
 
 
-# ────────────────────────── modelos de mensagem ─────────────────────────────
+# ---------------------------- message models -------------------------------
 
 
 class RoiSpec(BaseModel):
-    """Recorte normalizado (0..1) da tela, mais o downscale aplicado."""
+    """A normalised (0..1) crop of the screen, plus the downscale applied."""
 
     name: str
     x: float
@@ -113,23 +119,35 @@ class RoiSpec(BaseModel):
     h: float
     fps: float = 10.0
     width_px: int = 320
-    #: se True, o recorte é a tela inteira reduzida (usado p/ detectar morte)
+    #: if True, the crop is the whole screen scaled down (used to detect death)
     fullscreen: bool = False
 
+    def relative(self, sx: float, sy: float) -> tuple[float, float]:
+        """Where a point on the **screen** falls inside this crop, in 0..1.
 
-#: Nome da saída que vira o proxy do editor. Não é ROI de detector nenhum: é a
-#: tela inteira reduzida, pendurada na mesma decodificação porque o decode do
-#: vídeo pesado já está pago — pedir uma segunda passagem só para isto seria
-#: gastar de novo o que o sistema mais economiza.
+        This is for elements anchored to a fixed screen position rather than to
+        the middle of the ROI -- the crosshair, for instance, sits at (0.5, 0.5)
+        of the screen, and the kills ROI is shifted upwards, so inside it the
+        crosshair is not centred. Deriving that from the geometry itself avoids
+        a second number in the profile that would have to be corrected in step
+        every time the ROI moved.
+        """
+        return ((sx - self.x) / self.w, (sy - self.y) / self.h)
+
+
+#: Name of the output that becomes the editor's proxy. It is no detector's
+#: ROI: it is the whole screen scaled down, hung off the same decode because
+#: decoding the heavy video is already paid for -- asking for a second pass just
+#: for this would spend again exactly what the system saves most.
 PROXY_ROI = "proxy"
 
 
 def proxy_roi() -> RoiSpec:
-    """A tela inteira, pequena e em FPS baixo: o bastante para editar.
+    """The whole screen, small and at low FPS: enough to edit with.
 
-    O corte final continua saindo da gravação original, em qualidade cheia —
-    isto aqui só existe para o monitor poder buscar um instante sem arrastar
-    meio giga por HTTP a cada arrasto.
+    The final cut still comes out of the original recording, at full quality --
+    this exists only so the monitor can seek to an instant without dragging half
+    a gigabyte over HTTP on every scrub.
     """
     return RoiSpec(
         name=PROXY_ROI,
@@ -144,7 +162,7 @@ def proxy_roi() -> RoiSpec:
 
 
 class Artifact(BaseModel):
-    """Referência a um blob no storage."""
+    """A reference to a blob in storage."""
 
     key: str
     kind: str
@@ -153,7 +171,7 @@ class Artifact(BaseModel):
 
 class DetectionEvent(BaseModel):
     kind: EventKind
-    t: float  # segundos desde o início do vídeo
+    t: float  # seconds since the start of the video
     confidence: float = 1.0
     meta: dict[str, Any] = Field(default_factory=dict)
 
@@ -164,79 +182,39 @@ class BeatGrid(BaseModel):
 
 
 class JobParams(BaseModel):
-    """Parâmetros da **análise**: definem o que conta como momento importante.
+    """Parameters of the **analysis**: how to read the match.
 
-    Valem para o job inteiro e são aplicados quando o sistema monta a lista de
-    vídeos possíveis. O que é escolhido depois, na hora de gerar cada vídeo,
-    está em `ClipOptions`.
+    They apply to the whole job. There used to be many more -- how many kills
+    made a streak, how many made a "solo wipe" -- because the analysis ended by
+    proposing ready-made videos. It does not propose any more: it delivers the
+    moments, and grouping them is the job of whoever edits. What is left here is
+    what still changes **which events exist**.
+
+    An unknown field is ignored (not `extra="forbid"`): a match recorded when
+    those parameters existed still opens.
     """
 
-    multikill_min: int = 3
-    multikill_window_s: float = 10.0
-    solo_wipe_min: int = 4
-    solo_wipe_window_s: float = 15.0
-    escape_min_events: int = 2
-    escape_window_s: float = 20.0
-    pre_roll_s: float = 4.0
-    post_roll_s: float = 3.0
-    #: uma ultimate inimiga seguida de eliminacao dentro desta janela conta
-    #: como ultimate anulada
+    #: an enemy ultimate followed by a kill within this window counts as a
+    #: negated ultimate
     ult_negate_window_s: float = 6.0
-
-    make_beat_montage: bool = True
     profile: str | None = None
 
 
-class ClipOptions(BaseModel):
-    """Escolhas de **um** vídeo, na hora de gerar.
-
-    Cada vídeo tem as suas: é assim que músicas diferentes convivem no mesmo
-    job. Sem música escolhida, o vídeo sai com o **áudio original** da partida.
-    """
-
-    #: quantas batidas dura cada corte da montagem
-    montage_clip_beats: int = 2
-    #: de onde a musica comeca a tocar
-    music_start_s: float = 0.0
-    #: onde ela termina; None = ate o fim do arquivo
-    music_end_s: float | None = None
-    #: repetir trechos ate o video ter exatamente a duracao da janela de musica.
-    #: Com False o video para quando acabam os momentos, sem passar dela.
-    montage_loop: bool = False
-
-    @model_validator(mode="after")
-    def _janela_de_musica_coerente(self) -> "ClipOptions":
-        if self.music_start_s < 0:
-            raise ValueError("music_start_s nao pode ser negativo")
-        if self.music_end_s is not None and self.music_end_s <= self.music_start_s:
-            raise ValueError("music_end_s tem de ser maior que music_start_s")
-        return self
-
-    @property
-    def music_window_s(self) -> float | None:
-        """Duracao alvo do video, ou None se o usuario nao delimitou."""
-        if self.music_end_s is None:
-            return None
-        return self.music_end_s - self.music_start_s
-
-
-class Selection(BaseModel):
-    """Uma proposta escolhida pelo usuário, com as opções dela."""
-
-    proposal_id: str
-    options: ClipOptions = Field(default_factory=ClipOptions)
-    #: preenchido pelo gateway ao receber o upload da musica desta escolha
-    music_key: str | None = None
-    music_name: str | None = None
-
-
-#: nada abaixo disto vale um corte: e menos de um quadro em qualquer gravacao
+#: nothing below this is worth a cut: it is less than a frame on any recording
 MIN_CUT_S = 0.05
 
-#: Eventos que valem uma miniatura na barra lateral do editor: os que viram
-#: bloco. Vida baixa e interrupcao sao o contexto da jogada, nao a jogada.
+#: Events worth a thumbnail in the editor's sidebar: the ones that become
+#: blocks. Low health and interruption are the context of the play, not the
+#: play.
+#:
+#: This has to match the list the editor shows (`_usefulMoments`, in the app):
+#: a kind that appears there and is missing here becomes a card with no frame
+#: forever -- nobody extracts the thumbnail, and the app keeps asking for it
+#: until it gives up.
 THUMB_KINDS = (
     EventKind.KILL,
+    EventKind.HEADSHOT,
+    EventKind.ABILITY_KILL,
     EventKind.SLEEP,
     EventKind.STUN,
     EventKind.ULT_NEGATED,
@@ -245,39 +223,40 @@ THUMB_KINDS = (
 
 
 def frame_key(job_id: str, t: float) -> str:
-    """Onde mora a miniatura do instante `t` daquela partida.
+    """Where the thumbnail for instant `t` of that match lives.
 
-    Deriva do instante em vez de virar coluna no banco: quem escreve e quem le
-    chegam na mesma chave sozinhos, e uma miniatura a mais nao e uma migracao a
-    mais. O arredondamento em centesimos e o mesmo que a API usa para falar de
-    tempo, entao o app pede exatamente o que o worker gravou.
+    It derives from the instant rather than becoming a database column: writer
+    and reader arrive at the same key on their own, and one more thumbnail is
+    not one more migration. The rounding to hundredths is the same the API uses
+    to talk about time, so the app asks for exactly what the worker wrote.
     """
     return f"{job_id}/frames/{t:.2f}.jpg"
 
 
 class TimelineCut(BaseModel):
-    """Um bloco na linha do tempo: um pedaco da gravacao posto num ponto do video.
+    """A block on the timeline: a piece of the recording placed at a point of
+    the video.
 
-    E a unidade da montagem manual. O usuario diz *qual* trecho (`start_s` +
-    `duration_s`, na gravacao) e *onde* ele entra (`at_s`, no video que vai
-    sair). As duas coisas sao independentes: o mesmo momento pode aparecer
-    duas vezes, em pontos diferentes da musica, com duracoes diferentes.
+    It is the unit of the montage. The user says *which* stretch (`start_s` +
+    `duration_s`, in the recording) and *where* it comes in (`at_s`, in the
+    video that will come out). The two are independent: the same moment can
+    appear twice, at different points of the music, with different durations.
     """
 
-    #: instante do momento que originou o bloco. Nao afeta o corte -- serve
-    #: para o app saber de que evento este bloco veio e para nomear o arquivo
+    #: instant of the moment the block came from. Does not affect the cut --
+    #: it lets the app know which event this block came from, and names the file
     source_t: float = 0.0
-    #: onde o corte comeca na gravacao
+    #: where the cut starts in the recording
     start_s: float
-    #: quanto ele dura
+    #: how long it lasts
     duration_s: float
-    #: onde ele entra no video final; 0 e o primeiro quadro
+    #: where it comes in, in the final video; 0 is the first frame
     at_s: float
-    #: kill/sleep/stun -- so rotula
+    #: kill/sleep/stun -- a label only
     kind: str = ""
 
     @model_validator(mode="after")
-    def _coerente(self) -> "TimelineCut":
+    def _check_coherent(self) -> "TimelineCut":
         if self.start_s < 0:
             raise ValueError("start_s nao pode ser negativo")
         if self.at_s < 0:
@@ -288,41 +267,41 @@ class TimelineCut(BaseModel):
 
     @property
     def end_s(self) -> float:
-        """Onde o corte termina *na gravacao*."""
+        """Where the cut ends *in the recording*."""
         return self.start_s + self.duration_s
 
     @property
     def until_s(self) -> float:
-        """Onde o corte termina *no video*."""
+        """Where the cut ends *in the video*."""
         return self.at_s + self.duration_s
 
 
 class ClipSource(StrEnum):
-    """De onde sai a imagem de um clipe.
+    """Where a clip's picture comes from.
 
-    Nasce discriminado para a biblioteca de midia entrar sem mexer no modelo:
-    hoje o editor so produz `RECORDING` e `COLOR`, e `MEDIA` e `TEXT` chegam nas
-    fases seguintes.
+    It is born discriminated so the media library could arrive without touching
+    the model: the editor produces `RECORDING` and `COLOR`, with `MEDIA` and
+    `TEXT` arriving in the phases after.
     """
 
-    #: um trecho da gravacao da partida
+    #: a stretch of the match recording
     RECORDING = "recording"
-    #: cor solida. O preto dos buracos deixa de ser um caso especial do render e
-    #: passa a ser um clipe como qualquer outro
+    #: solid colour. The black of the gaps stops being a special case of the
+    #: render and becomes a clip like any other
     COLOR = "color"
-    #: arquivo importado pelo usuario (Fase 4)
+    #: a file imported by the user (Phase 4)
     MEDIA = "media"
-    #: texto (Fase 6)
+    #: text (Phase 6)
     TEXT = "text"
 
 
 class Transform(BaseModel):
-    """Onde e de que tamanho o clipe aparece no quadro.
+    """Where and at what size the clip appears in the frame.
 
-    `x` e `y` sao deslocamentos do centro, normalizados pela metade do quadro:
-    -1 encosta na borda esquerda/superior, +1 na direita/inferior, 0 e o centro.
-    Assim a mesma montagem vale em qualquer resolucao -- o que importa numa
-    montagem e a proporcao, nao o pixel.
+    `x` and `y` are offsets from the centre, normalised by half the frame: -1
+    touches the left/top edge, +1 the right/bottom, 0 is the centre. That way
+    the same montage holds at any resolution -- what matters in a montage is the
+    proportion, not the pixel.
     """
 
     scale: float = 1.0
@@ -331,7 +310,7 @@ class Transform(BaseModel):
     opacity: float = 1.0
 
     @model_validator(mode="after")
-    def _coerente(self) -> "Transform":
+    def _check_coherent(self) -> "Transform":
         if self.scale <= 0:
             raise ValueError("scale tem de ser maior que zero")
         if not 0.0 <= self.opacity <= 1.0:
@@ -339,8 +318,8 @@ class Transform(BaseModel):
         return self
 
     @property
-    def neutra(self) -> bool:
-        """True quando o clipe entra do jeito que veio, sem nada por cima."""
+    def is_neutral(self) -> bool:
+        """True when the clip comes in as it was, with nothing on top."""
         return (
             self.scale == 1.0
             and self.x == 0.0
@@ -350,7 +329,7 @@ class Transform(BaseModel):
 
 
 class ClipAudio(BaseModel):
-    """O som do proprio clipe -- que nao e a trilha do video."""
+    """The clip's own sound -- which is not the video's soundtrack."""
 
     volume: float = 1.0
     mute: bool = False
@@ -358,7 +337,7 @@ class ClipAudio(BaseModel):
     fade_out_s: float = 0.0
 
     @model_validator(mode="after")
-    def _coerente(self) -> "ClipAudio":
+    def _check_coherent(self) -> "ClipAudio":
         if self.volume < 0:
             raise ValueError("volume nao pode ser negativo")
         if self.fade_in_s < 0 or self.fade_out_s < 0:
@@ -366,7 +345,7 @@ class ClipAudio(BaseModel):
         return self
 
     @property
-    def neutro(self) -> bool:
+    def is_neutral(self) -> bool:
         return (
             self.volume == 1.0
             and not self.mute
@@ -376,11 +355,11 @@ class ClipAudio(BaseModel):
 
 
 class ClipColor(BaseModel):
-    """Ajuste de cor do clipe.
+    """The clip's colour adjustment.
 
-    Os tres que resolvem quase tudo numa montagem de gameplay: gravacao escura,
-    gravacao lavada, gravacao sem cor. O resto (curva, temperatura) chega quando
-    fizer falta.
+    The three that solve almost everything in a gameplay montage: a dark
+    recording, a washed-out recording, a colourless recording. The rest (curves,
+    temperature) arrives when it is missed.
     """
 
     brightness: float = 0.0
@@ -388,7 +367,7 @@ class ClipColor(BaseModel):
     saturation: float = 1.0
 
     @model_validator(mode="after")
-    def _coerente(self) -> "ClipColor":
+    def _check_coherent(self) -> "ClipColor":
         if not -1.0 <= self.brightness <= 1.0:
             raise ValueError("brightness fica entre -1 e 1")
         if not 0.0 <= self.contrast <= 3.0:
@@ -398,7 +377,7 @@ class ClipColor(BaseModel):
         return self
 
     @property
-    def neutra(self) -> bool:
+    def is_neutral(self) -> bool:
         return (
             self.brightness == 0.0
             and self.contrast == 1.0
@@ -407,76 +386,76 @@ class ClipColor(BaseModel):
 
 
 class ClipFade(BaseModel):
-    """Entrada e saida do clipe, em segundos.
+    """The clip's fade in and out, in seconds.
 
-    Sao transicoes de e para o **fundo** -- que numa montagem em camadas e
-    preto. A transicao *entre dois clipes* (crossfade) e outra coisa e nao cabe
-    no formato de sobreposicao: ela exige os dois existindo ao mesmo tempo com
-    pesos que mudam.
+    These are transitions to and from the **background** -- which in a layered
+    montage is black. A transition *between two clips* (a crossfade) is another
+    thing entirely and does not fit the overlay format: it requires both
+    existing at the same time with shifting weights.
     """
 
     in_s: float = 0.0
     out_s: float = 0.0
 
     @model_validator(mode="after")
-    def _coerente(self) -> "ClipFade":
+    def _check_coherent(self) -> "ClipFade":
         if self.in_s < 0 or self.out_s < 0:
             raise ValueError("fade nao pode ser negativo")
         return self
 
     @property
-    def neutro(self) -> bool:
+    def is_neutral(self) -> bool:
         return self.in_s == 0.0 and self.out_s == 0.0
 
 
 class Fit(StrEnum):
-    """O que fazer quando a proporcao do clipe nao e a da saida.
+    """What to do when the clip's aspect is not the output's.
 
-    Sai de verdade quando alguem exporta 9:16 de uma gravacao 16:9 -- e as duas
-    respostas sao legitimas, dependendo do que se quer.
+    It comes up for real when somebody exports 9:16 from a 16:9 recording -- and
+    both answers are legitimate, depending on what you want.
     """
 
-    #: preenche a tela e corta o que sobra. O padrao: numa montagem de gameplay
-    #: a acao esta no meio, e barra preta em cima e embaixo e desperdicio de
-    #: tela num celular
+    #: fills the screen and crops the overflow. The default: in a gameplay
+    #: montage the action is in the middle, and black bars top and bottom are
+    #: wasted screen on a phone
     COVER = "cover"
-    #: mostra o quadro inteiro e deixa barras. Serve a quem precisa do que esta
-    #: nos cantos -- a HUD, o placar
+    #: shows the whole frame and accepts bars. For whoever needs what is in
+    #: the corners -- the HUD, the scoreboard
     CONTAIN = "contain"
 
 
 class ExportSpec(BaseModel):
-    """Como o video final e escrito.
+    """How the final video is written.
 
-    Separado da montagem de proposito: a mesma montagem vira um 16:9 para o
-    YouTube e um 9:16 para os Shorts sem que nada dela mude. O que muda e a
-    janela por onde se olha.
+    Kept apart from the montage on purpose: the same montage becomes a 16:9 for
+    YouTube and a 9:16 for Shorts without anything in it changing. What changes
+    is the window you look through.
     """
 
-    #: `0` em qualquer um deles = o tamanho da gravacao
+    #: `0` in either of them = the recording's size
     width: int = 0
     height: int = 0
-    #: `0` = o fps da gravacao
+    #: `0` = the recording's fps
     fps: float = 0.0
-    #: qualidade do H.264: menor e melhor. 20 e o padrao do sistema
+    #: H.264 quality: lower is better. 20 is the system default
     crf: int = 20
     fit: Fit = Fit.COVER
 
-    #: recorte do tempo, em segundos do video montado. `None` = tudo
+    #: time window, in seconds of the assembled video. `None` = everything
     from_s: float = 0.0
     to_s: float | None = None
 
-    #: item da biblioteca desenhado por cima de tudo
+    #: library item drawn over everything
     watermark_id: str | None = None
-    #: tamanho da marca, em fracao da largura do quadro
+    #: mark size, as a fraction of the frame width
     watermark_scale: float = 0.12
-    #: canto onde ela fica, do centro: (1, -1) e o canto superior direito
+    #: the corner it sits in, from the centre: (1, -1) is the top right
     watermark_x: float = 0.82
     watermark_y: float = -0.82
     watermark_opacity: float = 0.65
 
     @model_validator(mode="after")
-    def _coerente(self) -> "ExportSpec":
+    def _check_coherent(self) -> "ExportSpec":
         if self.width < 0 or self.height < 0:
             raise ValueError("as dimensoes nao podem ser negativas")
         if (self.width > 0) != (self.height > 0):
@@ -494,8 +473,8 @@ class ExportSpec(BaseModel):
         return self
 
     @property
-    def padrao(self) -> bool:
-        """E a exportacao que o sistema faria sozinho?"""
+    def is_default(self) -> bool:
+        """Is this the export the system would produce on its own?"""
         return (
             self.width == 0
             and self.fps == 0
@@ -506,37 +485,37 @@ class ExportSpec(BaseModel):
             and self.watermark_id is None
         )
 
-    def dimensoes(self, largura_fonte: int, altura_fonte: int) -> tuple[int, int]:
-        """O tamanho da tela final.
+    def dimensions(self, source_width: int, source_height: int) -> tuple[int, int]:
+        """The size of the final canvas.
 
-        Arredondado para par: o H.264 em `yuv420p` guarda a cor em blocos de
-        2x2, e uma dimensao impar simplesmente nao codifica.
+        Rounded down to even: H.264 in `yuv420p` stores colour in 2x2 blocks,
+        and an odd dimension simply does not encode.
         """
-        w = self.width or largura_fonte
-        h = self.height or altura_fonte
+        w = self.width or source_width
+        h = self.height or source_height
         return (int(w) // 2 * 2, int(h) // 2 * 2)
 
 
 class TextStyle(BaseModel):
-    """Como o texto aparece.
+    """How the text looks.
 
-    O tamanho e a borda sao **fracoes da altura do quadro**, e nao pixels: a
-    mesma montagem tem de sair igual em 720p e em 4K, e um corpo de 48px que
-    fica bem num sairia minusculo no outro.
+    Size and outline are **fractions of the frame height**, not pixels: the
+    same montage has to come out identical at 720p and at 4K, and a 48px body
+    that looks right in one would be tiny in the other.
     """
 
-    #: altura da letra, de 0 a 1 da altura do quadro
+    #: letter height, 0 to 1 of the frame height
     size: float = 0.08
     color: str = "white"
-    #: espessura do contorno, em fracao do tamanho da letra. Contorno nao e
-    #: enfeite: sem ele, texto branco some em cena clara
+    #: outline thickness, as a fraction of the letter size. The outline is not
+    #: decoration: without it, white text disappears in a bright scene
     outline: float = 0.12
     outline_color: str = "black"
-    #: caminho da fonte; vazio usa a do sistema
+    #: font path; empty uses the system's
     font: str = ""
 
     @model_validator(mode="after")
-    def _coerente(self) -> "TextStyle":
+    def _check_coherent(self) -> "TextStyle":
         if not 0.01 <= self.size <= 0.5:
             raise ValueError("size do texto vai de 0.01 a 0.5 da altura")
         if not 0.0 <= self.outline <= 1.0:
@@ -545,22 +524,22 @@ class TextStyle(BaseModel):
 
 
 class ZoomKey(BaseModel):
-    """Um ponto da animacao de zoom, dentro do clipe.
+    """One point of the zoom animation, inside the clip.
 
-    `t` vai de 0 a 1 -- e a fracao do clipe, nao segundos. Assim a animacao
-    sobrevive a esticar ou aparar o bloco: um zoom que fecha no fim continua
-    fechando no fim.
+    `t` runs from 0 to 1 -- it is a fraction of the clip, not seconds. That way
+    the animation survives stretching or trimming the block: a zoom that closes
+    at the end goes on closing at the end.
     """
 
     t: float
-    #: 1 = tamanho cheio; 2 = o dobro, ou seja, metade do quadro na tela
+    #: 1 = full size; 2 = double, i.e. half the frame filling the screen
     scale: float = 1.0
-    #: para onde a lente aponta, do centro, de -1 a 1
+    #: where the lens points, from the centre, -1 to 1
     x: float = 0.0
     y: float = 0.0
 
     @model_validator(mode="after")
-    def _coerente(self) -> "ZoomKey":
+    def _check_coherent(self) -> "ZoomKey":
         if not 0.0 <= self.t <= 1.0:
             raise ValueError("t de um quadro-chave vai de 0 a 1")
         if not 1.0 <= self.scale <= 8.0:
@@ -571,31 +550,32 @@ class ZoomKey(BaseModel):
 
 
 class TimelineClip(BaseModel):
-    """Um pedaco do video final: o que aparece, onde e por quanto tempo.
+    """A piece of the final video: what appears, where, and for how long.
 
-    E o `TimelineCut` da V1 com lugar para o resto: de que fonte sai, como e
-    posicionado no quadro e o que acontece com o som dele. Um corte da V1 e
-    exatamente um `Clip` de `RECORDING` com transform e audio neutros, e e assim
-    que a migracao o le.
+    It is V1's `TimelineCut` with room for the rest: which source it comes from,
+    how it is positioned in the frame and what happens to its sound. A V1 cut is
+    exactly a `RECORDING` clip with a neutral transform and neutral audio, and
+    that is how the migration reads it.
     """
 
     source: ClipSource = ClipSource.RECORDING
-    #: onde ele entra no video; 0 e o primeiro quadro
+    #: where it comes in, in the video; 0 is the first frame
     at_s: float
     duration_s: float
-    #: onde comeca na fonte (gravacao ou midia). Ignorado por cor e texto
+    #: where it starts in the source (recording or media). Ignored by colour and text
     start_s: float = 0.0
-    #: instante do momento que originou o clipe -- rotulo, nao afeta o corte
+    #: instant of the moment the clip came from -- a label, does not affect the cut
     source_t: float = 0.0
-    #: kill/sleep/stun, para nomear e colorir
+    #: kill/sleep/stun, used to name and colour it
     kind: str = ""
-    #: cor solida quando `source` e COLOR. Chama-se `fill` porque `color` ja e
-    #: a correcao de cor -- sao a *cor do conteudo* e o *ajuste do conteudo*,
-    #: duas coisas que se encontram no mesmo clipe
+    #: solid colour when `source` is COLOR. It is called `fill` because
+    #: `color` is already the colour correction -- they are the *colour of the
+    #: content* and the *adjustment of the content*, two things meeting in the
+    #: same clip
     fill: str = "black"
-    #: id do item da biblioteca quando `source` e MEDIA
+    #: id of the library item when `source` is MEDIA
     media_id: str | None = None
-    #: o que esta escrito, quando `source` e TEXT
+    #: what is written, when `source` is TEXT
     text: str = ""
     text_style: TextStyle = Field(default_factory=TextStyle)
     transform: Transform = Field(default_factory=Transform)
@@ -603,28 +583,29 @@ class TimelineClip(BaseModel):
     color: ClipColor = Field(default_factory=ClipColor)
     fade: ClipFade = Field(default_factory=ClipFade)
 
-    #: Animacao de zoom dentro do clipe. Vazio = sem animacao.
+    #: Zoom animation inside the clip. Empty = no animation.
     #:
-    #: E o *punch* na batida: dois quadros-chave bastam. Zoom e coisa do
-    #: conteudo -- olhar mais de perto o que esta ali --, e nao se confunde com
-    #: `transform.scale`, que e o tamanho do clipe dentro do quadro (o PiP).
+    #: It is the *punch* on the beat: two keyframes are enough. Zoom is about
+    #: the content -- looking more closely at what is there -- and is not to be
+    #: confused with `transform.scale`, which is the clip's size within the
+    #: frame (the PiP).
     zoom: list[ZoomKey] = Field(default_factory=list)
 
-    #: Congela no ultimo quadro em vez de correr. A duracao continua sendo a do
-    #: clipe; o que muda e que a imagem para.
+    #: Freezes on the last frame instead of running. The duration is still the
+    #: clip's; what changes is that the picture stops.
     freeze: bool = False
-    #: Toca de tras para frente.
+    #: Plays backwards.
     reverse: bool = False
 
-    #: Quanto mais rapido o clipe corre. 2 = dobro, 0.5 = camera lenta.
+    #: How much faster the clip runs. 2 = double, 0.5 = slow motion.
     #:
-    #: Muda quanto da fonte ele consome: um clipe de 2s a 2x come 4s de
-    #: gravacao. Nao muda quanto ele ocupa no video -- isso e `duration_s`, e e
-    #: o que o usuario arrasta.
+    #: It changes how much source it consumes: a 2s clip at 2x eats 4s of
+    #: recording. It does not change how much it occupies in the video -- that
+    #: is `duration_s`, and that is what the user drags.
     speed: float = 1.0
 
     @model_validator(mode="after")
-    def _coerente(self) -> "TimelineClip":
+    def _check_coherent(self) -> "TimelineClip":
         if self.start_s < 0:
             raise ValueError("start_s nao pode ser negativo")
         if self.at_s < 0:
@@ -648,45 +629,45 @@ class TimelineClip(BaseModel):
         return self
 
     @property
-    def fonte_consumida_s(self) -> float:
-        """Quanto da fonte este clipe come.
+    def source_consumed_s(self) -> float:
+        """How much source this clip eats.
 
-        Nao e a duracao dele no video: a 2x, dois segundos de video comem quatro
-        de gravacao. E `duration_s` que o usuario arrasta na regua; isto aqui e
-        consequencia.
+        It is not its duration in the video: at 2x, two seconds of video eat
+        four of recording. `duration_s` is what the user drags on the ruler;
+        this is a consequence.
         """
-        # um clipe congelado come um quadro só: o resto é o mesmo quadro parado
+        # a frozen clip eats one frame: the rest is that same frame, still
         if self.freeze:
             return MIN_CUT_S
         return self.duration_s * self.speed
 
     @property
     def end_s(self) -> float:
-        """Onde termina *na fonte* -- ja contando a velocidade."""
-        return self.start_s + self.fonte_consumida_s
+        """Where it ends *in the source* -- speed already accounted for."""
+        return self.start_s + self.source_consumed_s
 
     @property
     def until_s(self) -> float:
-        """Onde termina *no video*."""
+        """Where it ends *in the video*."""
         return self.at_s + self.duration_s
 
     @property
-    def simples(self) -> bool:
-        """Um clipe que o caminho de corte-e-emenda da V1 da conta de fazer."""
+    def is_simple(self) -> bool:
+        """A clip that V1's cut-and-splice path can handle."""
         return (
             self.source is ClipSource.RECORDING
-            and self.transform.neutra
-            and self.audio.neutro
-            and self.color.neutra
-            and self.fade.neutro
+            and self.transform.is_neutral
+            and self.audio.is_neutral
+            and self.color.is_neutral
+            and self.fade.is_neutral
             and self.speed == 1.0
             and not self.zoom
             and not self.freeze
             and not self.reverse
         )
 
-    def como_corte(self) -> TimelineCut:
-        """A visao V1 deste clipe, para o caminho de corte-e-emenda."""
+    def as_cut(self) -> TimelineCut:
+        """The V1 view of this clip, for the cut-and-splice path."""
         return TimelineCut(
             source_t=self.source_t,
             start_s=self.start_s,
@@ -696,7 +677,7 @@ class TimelineClip(BaseModel):
         )
 
     @classmethod
-    def de_corte(cls, cut: TimelineCut) -> "TimelineClip":
+    def from_cut(cls, cut: TimelineCut) -> "TimelineClip":
         return cls(
             source=ClipSource.RECORDING,
             at_s=cut.at_s,
@@ -708,35 +689,36 @@ class TimelineClip(BaseModel):
 
 
 class LayerKind(StrEnum):
-    """Uma camada desenha ou toca -- nao as duas coisas."""
+    """A layer either draws or plays -- never both."""
 
     VIDEO = "video"
-    #: so som. Os clipes dela apontam para audio da biblioteca, e nada do que
-    #: esta nela aparece na tela
+    #: sound only. Its clips point at library audio, and nothing in it appears
+    #: on screen
     AUDIO = "audio"
 
 
 class Layer(BaseModel):
-    """Uma camada da linha do tempo.
+    """A layer of the timeline.
 
-    Chama-se camada, e nao faixa, porque `Track` neste sistema ja e a musica que
-    o usuario enviou -- dois `Track` no mesmo modelo seriam uma armadilha.
+    It is called a layer, and not a track, because `Track` in this system is
+    already the music the user uploaded -- two `Track`s in the same model would
+    be a trap.
 
-    A ordem na lista e a ordem de empilhamento: a primeira e o fundo, a ultima
-    fica por cima. Uma camada de audio nao entra nesse empilhamento: ela nao
-    desenha nada, so toca.
+    The order in the list is the stacking order: the first is the background,
+    the last sits on top. An audio layer takes no part in that stacking: it
+    draws nothing, it only plays.
     """
 
     kind: LayerKind = LayerKind.VIDEO
     name: str = ""
     muted: bool = False
     hidden: bool = False
-    #: travada nao muda nada no render -- e o app que recusa editar
+    #: locked changes nothing in the render -- it is the app that refuses edits
     locked: bool = False
     clips: list[TimelineClip] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _sem_sobreposicao(self) -> "Layer":
+    def _no_overlap(self) -> "Layer":
         ordenados = sorted(self.clips, key=lambda c: c.at_s)
         for anterior, seguinte in zip(ordenados, ordenados[1:]):
             if seguinte.at_s < anterior.until_s - 1e-6:
@@ -747,7 +729,7 @@ class Layer(BaseModel):
         return self
 
     @property
-    def e_audio(self) -> bool:
+    def is_audio(self) -> bool:
         return self.kind is LayerKind.AUDIO
 
     @property
@@ -755,37 +737,37 @@ class Layer(BaseModel):
         return max((c.until_s for c in self.clips), default=0.0)
 
 
-class Receita(BaseModel):
-    """Como montar um video a partir do que aconteceu numa partida.
+class Recipe(BaseModel):
+    """How to build a video out of what happened in a match.
 
-    Uma predefinicao nao guarda cortes -- guarda o **jeito** de cortar. "Dois
-    segundos por eliminacao, encaixado na batida, com zoom" vale para qualquer
-    partida, enquanto uma lista de cortes so vale para aquela.
+    A preset does not store cuts -- it stores the **way** of cutting. "Two
+    seconds per kill, snapped to the beat, with zoom" holds for any match, while
+    a list of cuts only holds for that one.
 
-    E o que faz a segunda partida custar um clique em vez de meia hora de
-    encaixe.
+    It is what makes the second match cost one click instead of half an hour of
+    fitting.
     """
 
-    #: que eventos viram corte
+    #: which events become cuts
     kinds: list[str] = Field(default_factory=lambda: ["kill", "sleep", "stun"])
-    #: quanto tempo antes do evento o corte comeca -- o momento precisa de
-    #: embalo, senao a eliminacao aparece no primeiro quadro
+    #: how long before the event the cut starts -- the moment needs a run-up,
+    #: or the kill lands on the very first frame
     lead_s: float = 1.0
-    #: tamanho de cada corte. Ignorado quando `beats_per_cut` manda
+    #: length of each cut. Ignored when `beats_per_cut` rules
     duration_s: float = 2.0
-    #: com trilha, cada corte dura N batidas em vez de `duration_s`
+    #: with a soundtrack, each cut lasts N beats instead of `duration_s`
     beats_per_cut: float = 0.0
-    #: espaco entre um corte e o seguinte
+    #: gap between one cut and the next
     gap_s: float = 0.0
-    #: quantos cortes no maximo. `0` = todos os que houver
+    #: at most this many cuts. `0` = all there are
     max_cuts: int = 0
 
-    #: efeitos aplicados a cada corte
+    #: effects applied to each cut
     zoom: bool = False
     fade_s: float = 0.0
     speed: float = 1.0
 
-    #: texto que o sistema escreve sozinho
+    #: text the system writes by itself
     counter: bool = False
     streaks: bool = False
 
@@ -794,7 +776,7 @@ class Receita(BaseModel):
     export: ExportSpec = Field(default_factory=ExportSpec)
 
     @model_validator(mode="after")
-    def _faz_sentido(self) -> "Receita":
+    def _check_coherent(self) -> "Recipe":
         if self.lead_s < 0:
             raise ValueError("lead_s nao pode ser negativo")
         if self.duration_s < MIN_CUT_S:
@@ -816,16 +798,17 @@ class Receita(BaseModel):
         return self
 
 
-def _bloco_da_trilha(
-    track_id: str, music_start_s: float, duracao_s: float
+def _track_as_block(
+    track_id: str, music_start_s: float, duration_s: float
 ) -> "Layer":
-    """A faixa continua vira um bloco de musica que cobre o video.
+    """The continuous track becomes a music block covering the video.
 
-    Houve dois jeitos de ter musica: uma faixa continua por baixo de tudo, que
-    nao se cortava, e blocos postos na regua. Sobrou o segundo -- e como o
-    primeiro e exatamente um bloco que comeca onde a musica entrava e cobre o
-    video inteiro, montagens antigas nao precisam de migracao no banco: **quem
-    converte o formato velho e o codigo que le**, como sempre foi aqui.
+    There were two ways of having music: a continuous track under everything,
+    which could not be cut, and blocks placed on the ruler. The second one
+    survived -- and since the first is exactly a block starting where the music
+    came in and covering the whole video, old montages need no database
+    migration: **the code that reads converts the old format**, as it always has
+    here.
     """
     return Layer(
         kind=LayerKind.AUDIO,
@@ -835,7 +818,7 @@ def _bloco_da_trilha(
                 source=ClipSource.MEDIA,
                 media_id=track_id,
                 at_s=0.0,
-                duration_s=duracao_s,
+                duration_s=duration_s,
                 start_s=max(0.0, music_start_s),
             )
         ],
@@ -843,53 +826,54 @@ def _bloco_da_trilha(
 
 
 class MontageDraft(BaseModel):
-    """A montagem **em andamento**, do jeito que ficou na tela.
+    """The montage **in progress**, exactly as it was left on screen.
 
-    E a `Timeline` sem a exigencia de estar pronta: aceita zero cortes, porque
-    um rascunho existe desde antes de o primeiro bloco entrar. Cada bloco, esse
-    sim, e validado -- guardar lixo agora seria devolver lixo depois.
+    It is the `Timeline` without the requirement of being finished: it accepts
+    zero cuts, because a draft exists from before the first block comes in. Each
+    block, on the other hand, is validated -- storing rubbish now would mean
+    handing rubbish back later.
 
-    Existe porque recarregar a pagina custava a montagem inteira: meia hora de
-    encaixe na batida sumia num F5.
+    It exists because reloading the page cost the whole montage: half an hour of
+    fitting to the beat vanished on an F5.
     """
 
     title: str = ""
     track_id: str | None = None
     music_start_s: float = 0.0
-    #: formato da V1, ainda aceito enquanto o app nao manda camadas
+    #: V1 format, still accepted while the app does not send layers
     cuts: list[TimelineCut] = Field(default_factory=list)
     layers: list[Layer] = Field(default_factory=list)
 
-    #: Correções do usuário à grade de batidas. Não afetam o vídeo: o corte
-    #: guarda instantes absolutos, e a grade é só o imã da tela. Vêm no rascunho
-    #: para não se perder num F5 -- consertar a grade duas vezes irrita mais do
-    #: que consertá-la uma.
+    #: The user's corrections to the beat grid. They do not affect the video:
+    #: a cut stores absolute instants, and the grid is only the screen's magnet.
+    #: They travel in the draft so they are not lost on an F5 -- fixing the grid
+    #: twice is more annoying than fixing it once.
     beat_offset_s: float = 0.0
     beat_multiplier: float = 1.0
     beat_bar: int = 1
 
-    #: a mistura e o formato de saida tambem sao trabalho: quem baixou o volume
-    #: do jogo e escolheu 9:16 nao quer refazer as duas coisas depois de um F5
+    #: the mix and the output format are work too: whoever lowered the game
+    #: volume and chose 9:16 does not want to redo both after an F5
     music_volume: float = 1.0
     game_volume: float = 0.0
     export: ExportSpec = Field(default_factory=ExportSpec)
 
     @model_validator(mode="after")
-    def _a_trilha_vira_bloco(self) -> "MontageDraft":
+    def _track_becomes_block(self) -> "MontageDraft":
         if not self.track_id:
             return self
-        # um rascunho da V1 guarda `cuts` em vez de camadas; materializa-los
-        # antes e o que impede a camada de som de virar a unica camada
+        # a V1 draft stores `cuts` instead of layers; materialising them first
+        # is what stops the audio layer from becoming the only layer
         if not self.layers and self.cuts:
             self.layers = [
-                Layer(clips=[TimelineClip.de_corte(c) for c in self.cuts])
+                Layer(clips=[TimelineClip.from_cut(c) for c in self.cuts])
             ]
             self.cuts = []
         fim = max((c.until_s for c in self.clips), default=0.0)
         if fim >= MIN_CUT_S:
             self.layers = [
                 *self.layers,
-                _bloco_da_trilha(self.track_id, self.music_start_s, fim),
+                _track_as_block(self.track_id, self.music_start_s, fim),
             ]
         self.track_id = None
         self.music_start_s = 0.0
@@ -897,11 +881,11 @@ class MontageDraft(BaseModel):
 
     @property
     def clips(self) -> list[TimelineClip]:
-        """Todos os clipes, de todas as camadas -- inclusive os de um rascunho
-        salvo antes de as camadas existirem."""
+        """Every clip, from every layer -- including those of a draft saved
+        before layers existed."""
         if self.layers:
             return [c for l in self.layers for c in l.clips]
-        return [TimelineClip.de_corte(c) for c in self.cuts]
+        return [TimelineClip.from_cut(c) for c in self.cuts]
 
     @property
     def duration_s(self) -> float:
@@ -909,46 +893,48 @@ class MontageDraft(BaseModel):
 
 
 class Timeline(BaseModel):
-    """Um video montado a mao: as camadas e a musica por baixo delas.
+    """A hand-built video: the layers, and the music beneath them.
 
-    **Le o formato da V1.** Um pedido antigo (ou um rascunho salvo antes desta
-    versao) chega com `cuts` em vez de `layers`, e e convertido aqui na leitura
-    -- uma camada so, de clipes de gravacao. Nao ha migracao a rodar no banco:
-    o formato velho continua sendo entrada valida, e sai do outro lado no novo.
+    **It reads the V1 format.** An old request (or a draft saved before this
+    version) arrives with `cuts` instead of `layers`, and is converted here on
+    read -- a single layer of recording clips. There is no migration to run on
+    the database: the old format is still valid input, and comes out the other
+    side in the new one.
     """
 
     title: str = ""
-    #: **formato antigo**: a faixa continua por baixo de tudo. Continua sendo
-    #: entrada valida e vira um bloco na camada de som na leitura -- ninguem
-    #: monta mais assim
+    #: **old format**: the continuous track under everything. Still valid
+    #: input, and turned into a block on the audio layer on read -- nobody
+    #: builds like this any more
     track_id: str | None = None
-    #: de que ponto da musica a faixa continua entrava
+    #: which point of the music the continuous track came in at
     music_start_s: float = 0.0
     layers: list[Layer] = Field(default_factory=list)
 
-    #: Volume da musica e do som do jogo, de 0 a 2.
+    #: Volume of the music and of the game sound, 0 to 2.
     #:
-    #: Com `game_volume` em 0 a musica **substitui** o audio, que e o que a V1
-    #: fazia. Acima disso os dois se misturam -- e o que deixa o tiro aparecer
-    #: por baixo da musica. Sem bloco de musica nenhum, o audio dos cortes vale
-    #: por si e nenhum dos dois volumes tem o que fazer.
+    #: With `game_volume` at 0 the music **replaces** the audio, which is what
+    #: V1 did. Above that the two mix -- which is what lets the shot show
+    #: through underneath the music. With no music block at all, the cuts' audio
+    #: stands on its own and neither volume has anything to do.
     music_volume: float = 1.0
     game_volume: float = 0.0
 
-    #: como o video final e escrito. A mesma montagem vira 16:9 e 9:16 sem que
-    #: nada dela mude -- o que muda e a janela por onde se olha
+    #: how the final video is written. The same montage becomes 16:9 and 9:16
+    #: without anything in it changing -- what changes is the window you look
+    #: through
     export: ExportSpec = Field(default_factory=ExportSpec)
 
     @model_validator(mode="before")
     @classmethod
-    def _aceita_o_formato_da_v1(cls, dados: Any) -> Any:
+    def _accept_v1_format(cls, dados: Any) -> Any:
         if not isinstance(dados, dict):
             return dados
         if dados.get("layers") or "cuts" not in dados:
             return dados
         cortes = dados.pop("cuts") or []
         dados["layers"] = [{"clips": [
-            TimelineClip.de_corte(
+            TimelineClip.from_cut(
                 c if isinstance(c, TimelineCut) else TimelineCut(**c)
             ).model_dump()
             for c in cortes
@@ -956,7 +942,7 @@ class Timeline(BaseModel):
         return dados
 
     @model_validator(mode="after")
-    def _tem_o_que_montar(self) -> "Timeline":
+    def _has_something_to_build(self) -> "Timeline":
         if self.music_start_s < 0:
             raise ValueError("music_start_s nao pode ser negativo")
         for nome, v in (("music_volume", self.music_volume),
@@ -968,14 +954,14 @@ class Timeline(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _a_trilha_vira_bloco(self) -> "Timeline":
+    def _track_becomes_block(self) -> "Timeline":
         if not self.track_id:
             return self
         fim = max((l.duration_s for l in self.layers), default=0.0)
         if fim >= MIN_CUT_S:
             self.layers = [
                 *self.layers,
-                _bloco_da_trilha(self.track_id, self.music_start_s, fim),
+                _track_as_block(self.track_id, self.music_start_s, fim),
             ]
         self.track_id = None
         self.music_start_s = 0.0
@@ -983,67 +969,71 @@ class Timeline(BaseModel):
 
     @property
     def duration_s(self) -> float:
-        """Quanto o video vai durar -- inclusive os buracos entre os clipes."""
+        """How long the video will last -- gaps between clips included."""
         return max((l.duration_s for l in self.layers), default=0.0)
 
     @property
     def clips(self) -> list[TimelineClip]:
-        """Todos os clipes, de todas as camadas, de baixo para cima."""
+        """Every clip, from every layer, bottom to top."""
         return [c for l in self.layers for c in l.clips]
 
     @property
-    def de_uma_camada_so(self) -> bool:
-        """Da para montar pelo caminho de corte-e-emenda da V1?
+    def single_layer(self) -> bool:
+        """Can this be built through V1's cut-and-splice path?
 
-        Uma camada, nenhum clipe com transformacao, som ajustado ou fonte que
-        nao seja a gravacao, e a saida no formato da gravacao. E o caso da
-        maioria das montagens, e nele o caminho antigo e mais resistente: um
-        corte que falha custa so ele, enquanto um erro no grafo de filtros
-        derruba o render inteiro.
+        One layer, no clip with a transform, adjusted sound or a source other
+        than the recording, and the output in the recording's format. That is
+        the case for most montages, and there the old path is more resilient: a
+        cut that fails costs only itself, while an error in the filter graph
+        brings the whole render down.
 
-        Uma saida fora do padrao -- outra proporcao, um trecho, uma marca
-        d'agua -- so existe no grafo de filtros, entao ela sozinha ja tira a
-        montagem deste caminho. O mesmo vale para uma camada de audio: emendar
-        cortes nao sabe misturar som que corre por fora deles.
+        A non-default output -- another aspect, a time window, a watermark --
+        only exists in the filter graph, so that alone takes the montage off
+        this path. The same goes for an audio layer: splicing cuts cannot mix
+        sound that runs outside them.
         """
-        if not self.export.padrao:
+        if not self.export.is_default:
             return False
-        if any(l.e_audio for l in self.layers):
+        if any(l.is_audio for l in self.layers):
             return False
         visiveis = [l for l in self.layers if not l.hidden]
         if len(visiveis) != 1:
             return False
-        return all(c.simples for c in visiveis[0].clips)
+        return all(c.is_simple for c in visiveis[0].clips)
 
     @property
-    def tem_musica(self) -> bool:
-        """A montagem tem musica, isto e: algum bloco numa camada de som.
+    def has_music(self) -> bool:
+        """The montage has music, that is: any block on an audio layer.
 
-        E o que decide o que os dois volumes significam. Sem musica nenhuma o
-        audio dos cortes sai como esta; com musica, `game_volume` diz quanto do
-        jogo aparece por baixo dela.
+        It is what decides what the two volumes mean. With no music the cuts'
+        audio comes out as it is; with music, `game_volume` says how much of the
+        game shows through underneath it.
         """
-        return any(l.e_audio and l.clips for l in self.layers)
+        return any(l.is_audio and l.clips for l in self.layers)
 
     @property
     def cuts(self) -> list[TimelineCut]:
-        """A visao V1 desta linha do tempo. So faz sentido com uma camada."""
-        return [c.como_corte() for c in self.clips]
+        """The V1 view of this timeline. Only meaningful with one layer."""
+        return [c.as_cut() for c in self.clips]
 
 
-# ───────────────────────── mensagens do barramento ──────────────────────────
+# --------------------------- bus messages ----------------------------------
 
 STREAM_JOBS = "ow.jobs"
 STREAM_ROI = "ow.roi"
 STREAM_EDIT = "ow.edit"
-#: um pedido de geração recém-criado, ainda sem as batidas das músicas
-STREAM_RENDER = "ow.render"
-#: pedido com as batidas já analisadas, pronto para o editor cortar
+#: a render request, ready for the editor to cut.
+#:
+#: There used to be a stage between creating the request and this queue: the
+#: rhythm service analysed the music of each chosen proposal and only then
+#: released the editor. There are no proposals any more, and the editor's music
+#: arrives already analysed through the library -- the request is born ready,
+#: and the gateway publishes straight here.
 STREAM_RENDER_READY = "ow.render.ready"
-#: arquivo recém-enviado, esperando quem o analise (batidas e onda para áudio;
-#: miniatura, dimensões e proxy para vídeo e imagem)
+#: a freshly uploaded file, waiting to be analysed (beats and waveform for
+#: audio; thumbnail, dimensions and proxy for video and image)
 STREAM_MEDIA = "ow.media"
-#: análise terminada: alguém que extraia uma miniatura de cada momento
+#: analysis finished: someone to extract a thumbnail for each moment
 STREAM_THUMBS = "ow.thumbs"
 
 
@@ -1102,19 +1092,19 @@ class Job(Base):
     video_name: Mapped[str] = mapped_column(String(255), default="")
 
     duration_s: Mapped[float] = mapped_column(Float, default=0.0)
-    #: quadros por segundo da gravação — o editor precisa dele para o passo de
+    #: frames per second of the recording -- the editor needs it for the step
     #: um quadro fazer sentido
     fps: Mapped[float] = mapped_column(Float, default=0.0)
-    #: tamanho da gravação. É o padrão de exportação — e o que deixa o editor
-    #: dizer se a saída pedida corta o quadro ou deixa barras
+    #: size of the recording. It is the export default -- and what lets the
+    #: editor say whether the requested output crops the frame or leaves bars
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
     params: Mapped[dict] = mapped_column(JSON, default=dict)
-    #: cópia reduzida da gravação, para o monitor do editor. Sai da mesma
-    #: decodificação dos recortes, então custa quase nada
+    #: reduced copy of the recording, for the editor's monitor. It comes out
+    #: of the same decode as the crops, so it costs almost nothing
     proxy_key: Mapped[str] = mapped_column(String(255), default="")
-    #: forma de onda do áudio da partida, já reduzida — é ela que mostra o tiro
-    #: e a explosão na régua
+    #: waveform of the match audio, already reduced -- it is what shows the
+    #: shot and the explosion on the ruler
     waveform: Mapped[list] = mapped_column(JSON, default=list)
     #: montagem em andamento, salva sozinha enquanto o usuario edita
     draft: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -1125,9 +1115,6 @@ class Job(Base):
     )
 
     events: Mapped[list["Event"]] = relationship(
-        back_populates="job", cascade="all, delete-orphan"
-    )
-    proposals: Mapped[list["Proposal"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
     renders: Mapped[list["Render"]] = relationship(
@@ -1147,32 +1134,8 @@ class Job(Base):
     )
 
 
-class Proposal(Base):
-    """Um vídeo que o sistema *pode* gerar com os momentos que encontrou.
-
-    Sai da análise e fica esperando: o usuário escolhe quais quer, e cada
-    escolha pode ser gerada mais de uma vez, com músicas diferentes.
-    """
-
-    __tablename__ = "proposals"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
-    kind: Mapped[str] = mapped_column(String(24))
-    title: Mapped[str] = mapped_column(String(160), default="")
-    start_s: Mapped[float] = mapped_column(Float, default=0.0)
-    end_s: Mapped[float] = mapped_column(Float, default=0.0)
-    score: Mapped[float] = mapped_column(Float, default=0.0)
-    #: instantes que originam os cortes (uma montagem tem vários)
-    moments: Mapped[list] = mapped_column(JSON, default=list)
-    meta: Mapped[dict] = mapped_column(JSON, default=dict)
-
-    job: Mapped[Job] = relationship(back_populates="proposals")
-    clips: Mapped[list["Clip"]] = relationship(back_populates="proposal")
-
-
 class Render(Base):
-    """Um pedido de geração: as propostas escolhidas e as opções de cada uma."""
+    """A render request: the montages the user sent to be rendered."""
 
     __tablename__ = "renders"
 
@@ -1182,12 +1145,8 @@ class Render(Base):
     stage: Mapped[str] = mapped_column(String(64), default="")
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: lista de `Selection` serializada -- os videos que sairam de proposta
-    selections: Mapped[list] = mapped_column(JSON, default=list)
-    #: lista de `Timeline` serializada -- os videos que o usuario montou
+    #: serialised list of `Timeline` -- the videos the user built
     timelines: Mapped[list] = mapped_column(JSON, default=list)
-    #: grade de batidas por proposta escolhida, preenchida pelo serviço de ritmo
-    beats: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
@@ -1200,20 +1159,20 @@ class Render(Base):
 
 
 class Media(Base):
-    """Um arquivo que o usuario trouxe: musica, clipe ou imagem.
+    """A file the user brought in: music, clip or image.
 
-    Comecou como "a musica do job" e virou a biblioteca de midia da partida --
-    porque era a mesma coisa. Uma musica sobe, um worker a analisa e o gateway
-    a entrega com `Range`: e exatamente o caminho que um clipe importado
-    percorre. Generalizar custou uma coluna (`kind`) e evitou um segundo sistema
-    de upload vivendo ao lado do primeiro.
+    It began as "the job's music" and became the match's media library --
+    because they were the same thing. Music is uploaded, a worker analyses it
+    and the gateway serves it with `Range`: exactly the path an imported clip
+    walks. Generalising cost one column (`kind`) and avoided a second upload
+    system living beside the first.
 
-    Ela e do **job**, e nao de um pedido: o mesmo arquivo serve a quantas
-    montagens o usuario quiser, sem subir de novo.
+    It belongs to the **job**, not to a request: the same file serves as many
+    montages as the user likes, with no re-upload.
 
-    > A tabela ainda se chama `tracks`, por historia. Renomea-la exigiria migrar
-    > dados por um ganho de estetica; o modelo, que e o que se le no codigo, diz
-    > o que ela guarda.
+    > The table is still called `tracks`, for historical reasons. Renaming it
+    > would mean migrating data for an aesthetic gain; the model, which is what
+    > you read in the code, says what it holds.
     """
 
     __tablename__ = "tracks"
@@ -1222,28 +1181,28 @@ class Media(Base):
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(String(16), default=TrackStatus.PENDING)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: audio, video ou imagem. O default cobre as linhas de quando so havia
-    #: musica: elas eram todas audio
+    #: audio, video or image. The default covers the rows from when there was
+    #: only music: they were all audio
     kind: Mapped[str] = mapped_column(String(16), default=MediaKind.AUDIO)
     name: Mapped[str] = mapped_column(String(255), default="")
     key: Mapped[str] = mapped_column(String(255))
     duration_s: Mapped[float] = mapped_column(Float, default=0.0)
 
-    # ── so audio ────────────────────────────────────────────────────────────
+    # -- audio only ---------------------------------------------------------
     bpm: Mapped[float] = mapped_column(Float, default=0.0)
-    #: instantes das batidas, em segundos
+    #: beat instants, in seconds
     beats: Mapped[list] = mapped_column(JSON, default=list)
-    #: forma de onda ja reduzida a alguns milhares de picos (0..1), para o app
-    #: desenhar sem baixar o audio inteiro
+    #: waveform already reduced to a few thousand peaks (0..1), so the app can
+    #: draw without downloading the whole audio
     peaks: Mapped[list] = mapped_column(JSON, default=list)
 
-    # ── video e imagem ──────────────────────────────────────────────────────
+    # -- video and image ----------------------------------------------------
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
     fps: Mapped[float] = mapped_column(Float, default=0.0)
     thumb_key: Mapped[str] = mapped_column(String(255), default="")
-    #: copia reduzida, pelo mesmo motivo do proxy da gravacao: o monitor nao
-    #: pode arrastar o arquivo cheio a cada busca
+    #: reduced copy, for the same reason as the recording's proxy: the monitor
+    #: cannot drag the full file on every seek
     proxy_key: Mapped[str] = mapped_column(String(255), default="")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -1269,7 +1228,7 @@ class Event(Base):
 
 
 class DetectorReport(Base):
-    """Um registro por detector por job — é assim que o editor sabe que pode começar."""
+    """One record per detector per job -- how the pipeline knows it can start."""
 
     __tablename__ = "detector_reports"
 
@@ -1292,9 +1251,6 @@ class Clip(Base):
     render_id: Mapped[str] = mapped_column(
         ForeignKey("renders.id", ondelete="CASCADE")
     )
-    proposal_id: Mapped[str | None] = mapped_column(
-        ForeignKey("proposals.id", ondelete="SET NULL"), nullable=True
-    )
     kind: Mapped[str] = mapped_column(String(24))
     title: Mapped[str] = mapped_column(String(160), default="")
     start_s: Mapped[float] = mapped_column(Float, default=0.0)
@@ -1306,18 +1262,17 @@ class Clip(Base):
 
     job: Mapped[Job] = relationship(back_populates="clips")
     render: Mapped[Render] = relationship(back_populates="clips")
-    proposal: Mapped["Proposal | None"] = relationship(back_populates="clips")
 
 class Montage(Base):
-    """Uma montagem nomeada de uma partida.
+    """A named montage of a match.
 
-    Ate a Fase 8 havia **uma** montagem por job, guardada numa coluna do
-    proprio job. Isso obrigava a escolher: ou o corte de 30 s para o Shorts ou
-    a montagem longa, nunca as duas. Sao trabalhos diferentes sobre o mesmo
-    material, e agora cada um tem o seu nome.
+    Until Phase 8 there was **one** montage per job, kept in a column of the job
+    itself. That forced a choice: either the 30-second cut for Shorts or the
+    long montage, never both. They are different pieces of work over the same
+    material, and now each has its own name.
 
-    O conteudo continua sendo um `MontageDraft` -- o mesmo formato que o app ja
-    mandava. O que mudou foi onde ele mora, e o fato de haver varios.
+    The content is still a `MontageDraft` -- the same format the app already
+    sent. What changed is where it lives, and the fact that there are several.
     """
 
     __tablename__ = "montages"
@@ -1327,7 +1282,7 @@ class Montage(Base):
         ForeignKey("jobs.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(120), default="")
-    #: a montagem em si, no formato do `MontageDraft`
+    #: the montage itself, in `MontageDraft` format
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -1340,35 +1295,35 @@ class Montage(Base):
     )
 
     @property
-    def resumo(self) -> dict:
-        """O bastante para a lista de montagens sem baixar a montagem inteira.
+    def summary(self) -> dict:
+        """Enough for the montage list without downloading the whole montage.
 
-        Quem so quer escolher entre "vertical curta" e "a longa" nao precisa
-        dos clipes de nenhuma das duas.
+        Whoever only wants to choose between "short vertical" and "the long one"
+        does not need the clips of either.
         """
         try:
             m = MontageDraft(**(self.data or {}))
         except ValidationError:
-            # uma montagem guardada por uma versao anterior do formato nao pode
-            # derrubar a lista: ela aparece vazia e continua abrivel
+            # a montage stored by an earlier version of the format must not
+            # take down the list: it shows as empty and stays openable
             return {"n_clips": 0, "duration_s": 0.0, "has_music": False}
         clips = m.clips
         return {
             "n_clips": len(clips),
             "duration_s": round(max((c.until_s for c in clips), default=0.0), 2),
-            "has_music": any(l.e_audio and l.clips for l in m.layers),
+            "has_music": any(l.is_audio and l.clips for l in m.layers),
         }
 
 
 class MontageVersion(Base):
-    """Uma foto de uma montagem, guardada para se poder voltar a ela.
+    """A snapshot of a montage, kept so you can go back to it.
 
-    Nao e o desfazer -- esse vive no app e morre com a aba. Isto e o "estava bom
-    ontem": marcos raros e deliberados, tirados quando se gera um video (o que
-    saiu foi *isto*) ou quando o usuario pede.
+    It is not undo -- that lives in the app and dies with the tab. This is the
+    "it was good yesterday": rare, deliberate markers, taken when a video is
+    generated (what came out was *this*) or when the user asks.
 
-    Guardar uma foto a cada salvamento automatico encheria o banco de estados
-    identicos e tornaria a lista inutil de tao longa.
+    Keeping a snapshot on every autosave would fill the database with identical
+    states and make the list useless from sheer length.
     """
 
     __tablename__ = "montage_versions"
@@ -1377,7 +1332,7 @@ class MontageVersion(Base):
     montage_id: Mapped[str] = mapped_column(
         ForeignKey("montages.id", ondelete="CASCADE"), index=True
     )
-    #: por que esta foto existe: "gerou o video", "antes de restaurar"...
+    #: why this snapshot exists: "generated the video", "before restoring"...
     label: Mapped[str] = mapped_column(String(120), default="")
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -1386,17 +1341,17 @@ class MontageVersion(Base):
 
 
 class Preset(Base):
-    """Uma predefinicao: o jeito de montar, guardado para a proxima partida.
+    """A preset: the way of building, saved for the next match.
 
-    Nao pertence a nenhum job de proposito -- e justamente para atravessar de
-    uma partida para outra que ela existe.
+    It belongs to no job on purpose -- crossing from one match to another is
+    precisely why it exists.
     """
 
     __tablename__ = "presets"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(120), default="")
-    #: a receita, no formato de `Receita`
+    #: a receita, no formato de `Recipe`
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

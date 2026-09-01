@@ -1,9 +1,9 @@
-"""Extracao da grade de batidas da musica escolhida pelo usuario.
+"""Extraction of the beat grid from the music the user chose.
 
-Usa `librosa` quando disponivel. Se nao estiver instalado (ou falhar), cai num
-estimador proprio, em numpy puro: envelope de energia -> autocorrelacao ->
-periodo dominante -> fase que melhor casa com os picos. O sistema continua
-montando no ritmo em vez de simplesmente desistir.
+Uses `librosa` when available. If it is not installed (or fails), it falls back
+to an estimator of its own, in pure numpy: energy envelope -> autocorrelation ->
+dominant period -> the phase that best matches the onsets. The system goes on
+building to the beat instead of simply giving up.
 """
 
 from __future__ import annotations
@@ -15,23 +15,23 @@ from pathlib import Path
 
 import numpy as np
 
-from owcore.audio import peaks_para, read_wav, waveform
+from owcore.audio import peaks_for, read_wav, waveform
 from owcore.config import get_settings
 from owcore.models import BeatGrid
 
 log = logging.getLogger(__name__)
 
 SR = 22050
-HOP_FPS = 100.0  # janelas de 10 ms para o envelope
+HOP_FPS = 100.0  # 10 ms windows for the envelope
 
 
 def _decode_to_wav(src: Path, dest: Path) -> Path:
-    """Qualquer formato de audio -> WAV mono PCM, via ffmpeg.
+    """Any audio format -> mono PCM WAV, via ffmpeg.
 
-    O destino pode coincidir com a origem: com storage S3 o blob e baixado
-    para o mesmo diretorio de trabalho onde a decodificacao ia escrever, e o
-    ffmpeg recusa entrada e saida no mesmo arquivo. Nesse caso renomeia-se a
-    saida em vez de estourar.
+    The destination can coincide with the source: with S3 storage the blob is
+    downloaded into the same working directory where the decode was going to
+    write, and ffmpeg refuses input and output being the same file. In that case
+    the output is renamed instead of blowing up.
     """
     s = get_settings()
     src = Path(src).resolve()
@@ -49,7 +49,7 @@ def _decode_to_wav(src: Path, dest: Path) -> Path:
     return dest
 
 
-# ------------------------------ fallback numpy -------------------------------
+# ------------------------------ numpy fallback -------------------------------
 
 
 def _onset_envelope(data: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
@@ -59,7 +59,7 @@ def _onset_envelope(data: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
         return np.zeros(0, np.float32), HOP_FPS
     energy = np.sqrt((data[: n * hop].reshape(n, hop) ** 2).mean(axis=1))
     db = 20.0 * np.log10(np.maximum(energy, 1e-6))
-    # fluxo espectral do pobre: so a parte que sobe importa para o ataque
+    # poor man's spectral flux: only the rising part matters for the onset
     flux = np.diff(db, prepend=db[0])
     return np.maximum(flux, 0.0), sr / hop
 
@@ -81,7 +81,7 @@ def _estimate_beats(data: np.ndarray, sr: int, duration: float) -> BeatGrid:
     period = lag / fps
     bpm = 60.0 / period
 
-    # fase: desloca a grade ate somar o maximo de energia de ataque
+    # phase: shift the grid until it sums the most onset energy
     step = max(1, lag // 24)
     offsets = np.arange(0, lag, step)
     scores = [env[int(o) :: lag].sum() for o in offsets]
@@ -96,20 +96,20 @@ def _estimate_beats(data: np.ndarray, sr: int, duration: float) -> BeatGrid:
 
 @dataclass(slots=True)
 class TrackAnalysis:
-    """Tudo o que o app precisa saber de uma musica para montar em cima dela."""
+    """Everything the app needs to know about a track to build on top of it."""
 
     grid: BeatGrid
     duration_s: float
-    #: forma de onda reduzida a alguns milhares de picos em 0..1
+    #: waveform reduced to a few thousand peaks in 0..1
     peaks: list[float]
 
 
 def analyze_track(src: Path, work_dir: Path) -> TrackAnalysis:
-    """Analise completa da musica: batidas, duracao e forma de onda.
+    """Full analysis of the track: beats, duration and waveform.
 
-    Roda **antes** de existir video nenhum -- e o que a tela de montagem usa
-    para desenhar a musica e grudar os cortes na batida. Uma unica decodificacao
-    serve as tres coisas.
+    It runs **before** any video exists -- it is what the editing screen uses to
+    draw the music and snap the cuts to the beat. A single decode serves all
+    three.
     """
     wav = _decode_to_wav(Path(src), Path(work_dir) / "track.wav")
     data, sr = read_wav(wav)
@@ -119,17 +119,8 @@ def analyze_track(src: Path, work_dir: Path) -> TrackAnalysis:
     return TrackAnalysis(
         grid=_beats(data, sr, duration),
         duration_s=round(duration, 3),
-        peaks=waveform(data, peaks_para(duration)),
+        peaks=waveform(data, peaks_for(duration)),
     )
-
-
-def analyze_music(src: Path, work_dir: Path) -> BeatGrid:
-    wav = _decode_to_wav(Path(src), Path(work_dir) / "music.wav")
-    data, sr = read_wav(wav)
-    duration = data.size / sr if sr else 0.0
-    if duration <= 0:
-        raise ValueError("musica vazia ou ilegivel")
-    return _beats(data, sr, duration)
 
 
 def _beats(data: np.ndarray, sr: int, duration: float) -> BeatGrid:

@@ -12,6 +12,7 @@ SAMPLE = ROOT / "data" / "sample" / "match.mp4"
 TRUTH = ROOT / "data" / "sample" / "match.truth.json"
 MUSIC = ROOT / "data" / "sample" / "music.wav"
 ULT_TEMPLATES = ROOT / "data" / "sample" / "ult_templates"
+ABILITY_ICONS = ROOT / "data" / "sample" / "ability_icons"
 
 
 def service_module(service: str, module: str = "detect") -> ModuleType:
@@ -79,7 +80,8 @@ def isolated(tmp_path, monkeypatch):
 needs_sample = pytest.mark.skipif(
     not SAMPLE.exists(),
     reason="rode: python tools/make_sample.py --out data/sample/match.mp4 "
-           "--music data/sample/music.wav --ult-templates data/sample/ult_templates",
+           "--music data/sample/music.wav --ult-templates data/sample/ult_templates "
+           "--ability-icons data/sample/ability_icons",
 )
 
 
