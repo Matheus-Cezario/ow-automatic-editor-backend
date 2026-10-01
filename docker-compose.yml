@@ -1,0 +1,143 @@
+# Sobe o sistema inteiro em modo docker: Redis Streams + S3 (RustFS) + PostgreSQL e
+# os microsservicos, todos da mesma imagem (docker/Dockerfile) mudando so o
+# SERVICE. Rode a partir da raiz deste repositorio:
+#
+#     docker compose up --build
+#
+# App + API -> http://localhost:8000   Console do S3 -> http://localhost:9001
+#
+# O gateway serve o app Flutter compilado do repositorio irmao
+# (../ow-automatic-editor-frontend/build/web). Sem o build a pasta montada fica
+# vazia e ele serve so a API. Para outro caminho: OW_FRONTEND_WEB=/caminho.
+
+x-worker: &worker
+  restart: unless-stopped
+  environment: &worker-env
+    OW_MODE: docker
+    OW_PROFILE: ${OW_PROFILE:-ow2_default}
+    OW_LOG_LEVEL: ${OW_LOG_LEVEL:-INFO}
+    OW_REDIS_URL: redis://redis:6379/0
+    OW_S3_ENDPOINT: http://s3:9000
+    OW_S3_BUCKET: ow-editor
+    OW_S3_ACCESS_KEY: minioadmin
+    OW_S3_SECRET_KEY: minioadmin
+    OW_DATABASE_URL: postgresql+psycopg://ow:ow@postgres:5432/ow
+    OW_DETECTOR_TIMEOUT_S: ${OW_DETECTOR_TIMEOUT_S:-900}
+  depends_on: &worker-deps
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    s3:
+      condition: service_healthy
+
+services:
+  # -- infraestrutura -------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ow
+      POSTGRES_PASSWORD: ow
+      POSTGRES_DB: ow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ow -d ow"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Storage S3. O MinIO deixou de publicar imagens (Docker Hub e quay.io
+  # negam o pull); o RustFS e um substituto compativel, com o mesmo par de
+  # portas e o mesmo login padrao.
+  s3:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: minioadmin
+      RUSTFS_SECRET_KEY: minioadmin
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - s3data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9000"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # -- microsservicos -------------------------------------------------------
+  gateway:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: gateway } }
+    command: ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *worker-env
+      OW_WEB_DIR: /app/web
+      # o gateway atende varias requisicoes ao mesmo tempo
+      OW_DB_POOL_SIZE: 10
+      OW_DB_MAX_OVERFLOW: 10
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${OW_FRONTEND_WEB:-../ow-automatic-editor-frontend/build/web}:/app/web:ro
+
+  preprocessor:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: preprocessor } }
+
+  detector-kills:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_kills } }
+
+  detector-survival:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_survival } }
+
+  detector-ults:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_ults } }
+
+  detector-banner:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_banner } }
+
+  detector-killfeed:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_killfeed } }
+
+  planner:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: planner } }
+
+  thumbs:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: thumbs } }
+
+  beats:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: beats } }
+
+  editor:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: editor } }
+
+volumes:
+  pgdata:
+  redisdata:
+  s3data:
