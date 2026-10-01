@@ -1,13 +1,13 @@
 #!/usr/bin/env python
-"""Gera um video sintetico que imita a HUD do Overwatch 2, com um JSON de
-gabarito (timestamps exatos de cada evento).
+"""Generates a synthetic video that imitates the Overwatch 2 HUD, with a ground
+truth JSON (the exact timestamp of every event).
 
-Serve para dois propositos:
+It serves two purposes:
 
-1. testar o pipeline inteiro de ponta a ponta sem precisar de gameplay real;
-2. dar ao usuario um jeito de ver o sistema funcionando antes de gravar.
+1. testing the whole pipeline end to end without real gameplay;
+2. giving the user a way to see the system working before recording.
 
-Uso:
+Usage:
     python tools/make_sample.py --out data/sample/match.mp4
 """
 
@@ -27,80 +27,86 @@ import numpy as np
 W, H, FPS = 1280, 720, 30
 SR = 44100
 
-# gabarito (segundos)
+# ground truth (seconds)
 KILLS = [
-    5.0, 6.2, 7.4,            # rajada de 3  -> MULTIKILL
-    20.0, 21.0, 22.2, 23.1,   # rajada de 4  -> SOLO_WIPE
-    34.0,                     # avulsa       -> montagem
-    41.5,                     # avulsa       -> montagem
-    52.0,                     # avulsa       -> montagem
+    5.0, 6.2, 7.4,            # burst of 3
+    20.0, 21.0, 22.2, 23.1,   # burst of 4
+    34.0,                     # single
+    41.5,                     # single
+    52.0,                     # single
 ]
-# Ao morrer no OW2 voce passa a espectar um companheiro: a vida zera por um
-# instante e volta cheia. E essa a assinatura que o detector procura.
+# When you die in OW2 you start spectating a teammate: health drops to zero for
+# an instant and comes back full. That is the signature the detector looks for.
 DEATHS = [28.0]
-LOW_HP = [(12.0, 2.5), (15.5, 2.0), (45.0, 2.2)]  # episodios sobrevividos
+LOW_HP = [(12.0, 2.5), (15.5, 2.0), (45.0, 2.2)]  # survived episodes
 LOW_HP_FRAC = 0.18
 FULL_HP_FRAC = 0.95
-ULTS = [40.0, 51.0]                               # ult inimiga (audio + icone)
-# habilidades anunciadas no rodape, e avisos-isca com o mesmo formato
-SLEEPS = [18.0, 30.0, 48.0]          # dardo da Ana, faixa ciano
-STUNS = [22.0, 38.0]                 # pedrada do Sigma, faixa VERDE de proposito:
-                                     # a cor do aviso muda de gravacao para
-                                     # gravacao, e o pipeline tem de aguentar
-AVISOS_ISCA = [25.0, 55.0]
+ULTS = [40.0, 51.0]                               # enemy ult (audio + icon)
+# abilities announced in the footer, and decoy banners with the same format
+SLEEPS = [18.0, 30.0, 48.0]          # Ana's dart, cyan banner
+STUNS = [22.0, 38.0]                 # Sigma's rock, GREEN banner on purpose:
+                                     # the banner colour changes from recording
+                                     # to recording, and the pipeline must cope
+DECOY_BANNERS = [25.0, 55.0]
 BANNER_S = 2.5
 SKULL_DURATION = 0.9
 
-# ultimate DO JOGADOR: o instante em que ela e usada. O botao fica carregado
-# nos segundos anteriores e apaga aqui -- e a borda de descida que vira evento.
+# the PLAYER's ultimate: the instant it is used. The button stays charged for
+# the seconds before and goes out here -- the falling edge is what becomes the
+# event.
 SELF_ULTS = [24.0, 47.0]
 SELF_ULT_CHARGE_S = 6.0
-# armadilha: o botao aparece carregado por um instante e some. No jogo isso e a
-# kill cam (um disco com o rosto de quem matou, no mesmo lugar) ou um clarao de
-# explosao; em 27 min de gravacao real toda faixa curta assim era falsa, e
-# ultimate de verdade fica carregada segundos antes de ser usada. Longe de
-# `SELF_ULTS` o bastante para `min_after_s` nao ser quem a descarta: quem tem
-# de recusa-la e `min_charged_s`.
+# trap: the button shows up charged for an instant and disappears. In the game
+# that is the kill cam (a disc with the killer's face, in the same place) or an
+# explosion flash; in 27 min of real recordings every short stretch like that
+# was false, and a real ultimate stays charged for seconds before being used.
+# Far enough from `SELF_ULTS` that `min_after_s` is not what discards it: it is
+# `min_charged_s` that must refuse it.
 ULT_FLASHES = [30.0]
 ULT_FLASH_S = 0.4
-# acerto critico: marcador em X vermelho na mira. Longe das eliminacoes de
-# proposito -- a caveira cobre as mesmas diagonais, e o detector avisa que
-# nesse encontro ela vence.
+# critical hit: a red X marker on the crosshair. Away from the kills on purpose
+# -- the skull covers the same diagonals, and the detector notes that in that
+# clash the skull wins.
 HEADSHOTS = [10.0, 33.0, 44.0]
 HEADSHOT_S = 0.35
-# eliminacao com habilidade anunciada no killfeed. A linha fica na tela por
-# varios segundos: o evento e ela APARECER, nao ela estar la.
-# Longe das janelas de LOW_HP: a vinheta de dano do video sintetico e bem
-# mais forte que a do jogo e cobre o canto do killfeed, apagando a placa
-# vermelha. Isso e limitacao do desenho de teste, nao do detector.
+# a kill with an ability announced in the killfeed. The line stays on screen
+# for several seconds: the event is it APPEARING, not it being there.
+# Away from the LOW_HP windows: the synthetic video's damage vignette is much
+# stronger than the game's and covers the killfeed corner, erasing the red
+# plate. That is a limitation of the test drawing, not of the detector.
 ABILITY_KILLS = [26.0, 36.0]
 ABILITY_ROW_S = 6.0
-# a mesma linha de killfeed, mas com OUTRO nome na placa de quem matou: um
-# colega de time eliminando com habilidade. O killfeed anuncia as dez pessoas
-# da partida, e so as do jogador viram material da montagem -- estas existem
-# para o detector ter de recusa-las.
+# the same killfeed line, but with ANOTHER name on the killer's plate: a
+# teammate killing with an ability. The killfeed announces all ten people in
+# the match, and only the player's become montage material -- these exist so
+# the detector has to refuse them.
 #
-# `PATRICK` tem as mesmas 7 letras de `PLAYER_NAME` de proposito: com nomes de
-# comprimentos diferentes a comparacao acertaria pela contagem, sem nunca olhar
-# o desenho das letras, e o teste passaria mesmo com o desenho quebrado.
+# `PATRICK` has the same 7 letters as `PLAYER_NAME` on purpose: with names of
+# different lengths the comparison would get it right by the count, without
+# ever looking at the letter shapes, and the test would pass even with the
+# drawing broken. No letter of the two sits in the same position either.
+#
+# Not every 7-letter name survives the killfeed's small font: in some, two
+# letters touch and the name is read with 6. `HUNTER7` was checked to read whole.
 TEAMMATE_KILLS = [16.0, 51.0]
-PLAYER_NAME = "JOGADOR"
+PLAYER_NAME = "HUNTER7"
 TEAMMATE_NAME = "PATRICK"
 
 DURATION = 60.0
 
 
-# ------------------------------- desenho ------------------------------------
+# ------------------------------- drawing ------------------------------------
 
 
 def draw_skull(img: np.ndarray, cx: int, cy: int, r: int, alpha: float) -> None:
-    """Caveira de eliminacao, na mira.
+    """Kill skull, on the crosshair.
 
-    Cor e posicao medidas em gameplay real: magenta bem saturado (HSV ~167,
-    230, 235) centrado em (0.50, 0.485) da tela -- ligeiramente *acima* do meio.
+    Colour and position measured in real gameplay: a very saturated magenta
+    (HSV ~167, 230, 235) centred at (0.50, 0.485) of the screen -- slightly
+    *above* the middle.
     """
     layer = img.copy()
-    red = (115, 23, 235)  # BGR do magenta da HUD
+    red = (115, 23, 235)  # BGR of the HUD magenta
     cv2.circle(layer, (cx, cy - r // 5), r, red, -1)
     cv2.rectangle(layer, (cx - r // 2, cy + r // 2), (cx + r // 2, cy + r), red, -1)
     dark = (10, 10, 40)
@@ -112,7 +118,7 @@ def draw_skull(img: np.ndarray, cx: int, cy: int, r: int, alpha: float) -> None:
 
 
 def draw_ult_icon(img: np.ndarray, x: int, y: int) -> None:
-    """Icone no killfeed usado como ultimate: losango laranja com um anel."""
+    """Killfeed icon used as an ultimate: an orange diamond with a ring."""
     pts = np.array([[x, y - 18], [x + 18, y], [x, y + 18], [x - 18, y]], np.int32)
     cv2.fillPoly(img, [pts], (30, 150, 255))
     cv2.circle(img, (x, y), 8, (255, 255, 255), 2)
@@ -124,84 +130,84 @@ def ult_template() -> np.ndarray:
     return tpl
 
 
-# ---------------------- botao de ultimate e killfeed ------------------------
+# ---------------------- ultimate button and killfeed ------------------------
 #
-# Estas tres coisas -- botao de ultimate carregado, marcador de acerto critico
-# e linha de killfeed -- sao as que os detectores novos leem. Aqui elas sao
-# desenhadas com a mesma geometria que a HUD real usa, medida nas gravacoes de
-# referencia; o que se testa e a canalizacao (achar a regiao, recortar o
-# glifo, casar, virar evento), nao a precisao do casamento, que foi medida em
-# gameplay de verdade.
+# These three things -- charged ultimate button, critical hit marker and
+# killfeed line -- are what the newer detectors read. Here they are drawn with
+# the same geometry the real HUD uses, measured on the reference recordings;
+# what is tested is the plumbing (find the region, crop the glyph, match, turn
+# into an event), not the matching accuracy, which was measured on real
+# gameplay.
 
-#: as marcas usadas no video de exemplo. Sao poligonos e nao arquivos porque o
-#: mesmo desenho precisa sair em dois lugares -- na tela e no banco de icones
-#: contra o qual o detector compara --, e desenha-lo garante que os dois
-#: combinem sem depender de nenhum asset do jogo.
-GLIFOS: dict[str, list[tuple[float, float]]] = {
-    # seta larga para cima, com entalhe: assimetrica na vertical e na
-    # horizontal, entao nao casa consigo mesma girada
+#: the marks used in the sample video. They are polygons and not files because
+#: the same drawing has to come out in two places -- on screen and in the icon
+#: bank the detector compares against -- and drawing it guarantees both match
+#: without depending on any game asset.
+GLYPHS: dict[str, list[tuple[float, float]]] = {
+    # wide arrow pointing up, with a notch: asymmetric vertically and
+    # horizontally, so it does not match itself rotated
     "self_ult": [(0.5, 0.05), (0.95, 0.55), (0.68, 0.55), (0.68, 0.95),
                  (0.32, 0.95), (0.32, 0.55), (0.05, 0.55)],
-    # ampulheta deitada
+    # hourglass lying down
     "ability_kill": [(0.05, 0.08), (0.05, 0.92), (0.5, 0.5),
                      (0.95, 0.92), (0.95, 0.08), (0.5, 0.5)],
 }
 
 
 def glyph_mask(key: str, side: int) -> np.ndarray:
-    """A marca, branca sobre preto, no tamanho pedido."""
+    """The mark, white on black, at the requested size."""
     m = np.zeros((side, side), np.uint8)
-    pts = np.array([[int(x * side), int(y * side)] for x, y in GLIFOS[key]], np.int32)
+    pts = np.array([[int(x * side), int(y * side)] for x, y in GLYPHS[key]], np.int32)
     cv2.fillPoly(m, [pts], 255)
     return m
 
 
 def glyph_template(key: str, side: int = 128) -> np.ndarray:
-    """A mesma marca no formato do banco de icones: preta sobre branco."""
+    """The same mark in the icon bank's format: black on white."""
     return 255 - glyph_mask(key, side)
 
 
 def _stamp(img: np.ndarray, mask: np.ndarray, x: int, y: int,
-           cor: tuple[int, int, int]) -> None:
-    """Pinta a marca por transparencia -- e nao cola um quadrado opaco."""
+           colour: tuple[int, int, int]) -> None:
+    """Paints the mark through its mask -- instead of pasting an opaque square."""
     h, w = mask.shape
-    alvo = img[y:y + h, x:x + w]
-    if alvo.shape[:2] != mask.shape:
+    target = img[y:y + h, x:x + w]
+    if target.shape[:2] != mask.shape:
         return
-    alvo[mask > 0] = cor
+    target[mask > 0] = colour
 
 
-#: geometria do botao de ultimate, igual a do perfil `ow2_default`
+#: ultimate button geometry, the same as the `ow2_default` profile's
 ULT_CX, ULT_CY = 0.5, 0.86
 ULT_DISC_R = 26
 ULT_RING_R0, ULT_RING_R1 = 30, 38
 
 
-def draw_ult_button(img: np.ndarray, carregada: bool) -> None:
-    """O botao do rodape nos seus dois estados.
+def draw_ult_button(img: np.ndarray, charged: bool) -> None:
+    """The footer button in its two states.
 
-    Carregado e um disco BRANCO com a marca do heroi em preto, cercado por um
-    anel CIANO; descarregado e so um anel escuro. O detector exige as duas
-    coisas juntas, entao desenhar so uma delas nao produziria evento -- e e
-    justamente isso que faz do estado descarregado uma armadilha util.
+    Charged is a WHITE disc with the hero's mark in black, surrounded by a CYAN
+    ring; not charged is just a dark ring. The detector requires both things
+    together, so drawing only one of them would produce no event -- which is
+    exactly what makes the uncharged state a useful trap.
     """
     cx, cy = int(ULT_CX * W), int(ULT_CY * H)
-    if not carregada:
+    if not charged:
         cv2.circle(img, (cx, cy), ULT_DISC_R + 4, (210, 210, 210), 2)
         return
-    cv2.circle(img, (cx, cy), ULT_RING_R1, (235, 190, 60), -1)   # ciano BGR
+    cv2.circle(img, (cx, cy), ULT_RING_R1, (235, 190, 60), -1)   # cyan BGR
     cv2.circle(img, (cx, cy), ULT_RING_R0, (40, 45, 50), -1)
     cv2.circle(img, (cx, cy), ULT_DISC_R, (250, 250, 250), -1)
-    lado = int(ULT_DISC_R * 1.15)
-    _stamp(img, glyph_mask("self_ult", lado),
-           cx - lado // 2, cy - lado // 2, (20, 20, 20))
+    side = int(ULT_DISC_R * 1.15)
+    _stamp(img, glyph_mask("self_ult", side),
+           cx - side // 2, cy - side // 2, (20, 20, 20))
 
 
 def draw_crit_marker(img: np.ndarray) -> None:
-    """Marcador de acerto critico: quatro tracos vermelhos em X na mira.
+    """Critical hit marker: four red strokes in an X on the crosshair.
 
-    As quatro direcoes RETAS ficam limpas de proposito -- e a diferenca entre
-    este marcador e a caveira de eliminacao, que preenche as oito.
+    The four STRAIGHT directions stay clear on purpose -- that is the
+    difference between this marker and the kill skull, which fills all eight.
     """
     cx, cy = W // 2, H // 2
     r0, r1 = 14, 40
@@ -211,122 +217,124 @@ def draw_crit_marker(img: np.ndarray) -> None:
         cv2.line(img, p0, p1, (60, 40, 235), 5)
 
 
-#: geometria de uma linha do killfeed, dentro da ROI `killfeed`
+#: geometry of a killfeed line, inside the `killfeed` ROI
 KF_Y0, KF_H = 30, 26
-KF_ALLY = (900, 1060)     # placa ciano: quem matou
-KF_ENEMY = (1120, 1270)   # placa vermelha: quem morreu
+KF_ALLY = (900, 1060)     # cyan plate: the killer
+KF_ENEMY = (1120, 1270)   # red plate: the victim
 
 
-def draw_killfeed_row(img: np.ndarray, vitima: int = 0,
+def draw_killfeed_row(img: np.ndarray, victim: int = 0,
                       killer: str = PLAYER_NAME) -> None:
-    """`[ placa de quem matou ] [ icone ] > [ placa de quem morreu ]`.
+    """`[ killer plate ] [ icon ] > [ victim plate ]`.
 
-    `vitima` encurta a placa vermelha. No jogo o comprimento de
-    cada placa e o do nome escrito nela, entao duas eliminacoes so tem a mesma
-    largura se forem do mesmo jogador **sobre a mesma vitima**; desenhar todas
-    identicas faria o exemplo testar um killfeed que nao existe. E e por essa
-    largura que o detector reconhece uma linha de um quadro para o outro.
+    `victim` shortens the red plate. In the game the length of each plate is
+    that of the name written on it, so two kills only have the same width if
+    they are by the same player **on the same victim**; drawing them all
+    identical would make the sample test a killfeed that does not exist. And it
+    is by that width that the detector recognises a line from one frame to the
+    next.
 
-    `killer` e o nome escrito na placa azul. A cor NAO diz de quem foi a
-    eliminacao -- azul e quem matou e vermelha e quem morreu, dos dois lados da
-    partida --, entao e esse nome, e so ele, que separa a eliminacao do jogador
-    da do colega de time.
+    `killer` is the name written on the blue plate. The colour does NOT say
+    whose kill it was -- blue is the killer and red the victim, on both sides
+    of the match -- so it is this name, and only it, that separates the
+    player's kill from a teammate's.
     """
     y0, y1 = KF_Y0, KF_Y0 + KF_H
     cv2.rectangle(img, (KF_ALLY[0], y0), (KF_ALLY[1], y1), (190, 140, 70), -1)
     _draw_name(img, killer, KF_ALLY[0] + 6, y0, KF_H, 0.5, 2)
-    cv2.rectangle(img, (KF_ENEMY[0], y0), (KF_ENEMY[1] + vitima, y1),
+    cv2.rectangle(img, (KF_ENEMY[0], y0), (KF_ENEMY[1] + victim, y1),
                   (90, 60, 200), -1)
-    # a caixinha do icone e o chevron ocupam o vao entre as duas placas
+    # the icon box and the chevron fill the gap between the two plates
     cv2.rectangle(img, (KF_ALLY[1] + 4, y0 - 3), (KF_ALLY[1] + 36, y1 + 3),
                   (55, 52, 50), -1)
-    lado = 22
-    _stamp(img, glyph_mask("ability_kill", lado),
-           KF_ALLY[1] + 9, (y0 + y1) // 2 - lado // 2, (240, 240, 240))
-    # o `>` ocupa o ULTIMO quarto do vao, como na HUD real: medida na gravacao
-    # de referencia, a caixinha do icone vai ate ~0.73 do vao e o chevron
-    # comeca ali. `killfeed.icon_span` para em 0.66 justamente para nao
-    # encostar nele -- desenhar o chevron mais a esquerda que no jogo faria o
-    # video de exemplo testar um layout que nao existe.
+    side = 22
+    _stamp(img, glyph_mask("ability_kill", side),
+           KF_ALLY[1] + 9, (y0 + y1) // 2 - side // 2, (240, 240, 240))
+    # the `>` takes the LAST quarter of the gap, as on the real HUD: measured on
+    # the reference recording, the icon box goes up to ~0.73 of the gap and the
+    # chevron starts there. `killfeed.icon_span` stops at 0.66 precisely so it
+    # does not touch it -- drawing the chevron further left than in the game
+    # would make the sample test a layout that does not exist.
     cv2.putText(img, ">", (KF_ALLY[1] + int(0.76 * (KF_ENEMY[0] - KF_ALLY[1])), y1 - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (235, 235, 235), 2)
 
 
-#: geometria da faixa de aviso, igual a do perfil `ow2_default`
+#: banner geometry, the same as the `ow2_default` profile's
 BANNER_Y0, BANNER_Y1 = 0.695, 0.727
 BANNER_W = 0.167
 
 
-#: cores de faixa, em BGR, dentro das duas faixas HSV do profile
-COR_CIANO = (196, 150, 74)
-COR_VERDE = (110, 165, 60)
+#: banner colours, in BGR, inside the profile's two HSV ranges
+CYAN = (196, 150, 74)
+GREEN = (110, 165, 60)
 
 
-def _icone(nome: str) -> np.ndarray:
-    """Carrega um molde real usado pelo detector, em tons de cinza.
+def _icon(name: str) -> np.ndarray:
+    """Loads a real template used by the detector, in greyscale.
 
-    O video sintetico existe para exercitar o *pipeline* -- achar a faixa,
-    recortar o icone na posicao certa, casar e virar evento. A precisao do
-    casamento em si foi medida em gameplay real; aqui o que se testa e a
-    canalizacao, e para isso o icone tem de ser o mesmo que o detector procura.
+    The synthetic video exists to exercise the *pipeline* -- find the banner,
+    crop the icon in the right place, match and turn into an event. The
+    matching accuracy itself was measured on real gameplay; what is tested here
+    is the plumbing, and for that the icon must be the one the detector looks
+    for.
     """
-    caminho = Path(__file__).resolve().parents[1] / "config" / "shapes" / nome
-    img = cv2.imread(str(caminho), cv2.IMREAD_GRAYSCALE)
+    path = Path(__file__).resolve().parents[1] / "config" / "shapes" / name
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise SystemExit(f"molde de icone nao encontrado: {caminho}")
+        raise SystemExit(f"icon template not found: {path}")
     return img
 
 
 def draw_banner(
     img: np.ndarray,
-    texto: str,
-    icone: np.ndarray | None,
-    cor: tuple[int, int, int] = COR_CIANO,
+    text: str,
+    icon: np.ndarray | None,
+    colour: tuple[int, int, int] = CYAN,
 ) -> None:
-    """Faixa de aviso do rodape. Com `icone` None desenha uma isca: mesma faixa,
-    mesma cor, mesma posicao -- outro simbolo."""
+    """Footer banner. With `icon` None it draws a decoy: same banner, same
+    colour, same position -- a different symbol."""
     y0, y1 = int(BANNER_Y0 * H), int(BANNER_Y1 * H)
-    largura = int(BANNER_W * W)
-    x0 = W // 2 - largura // 2
-    alt = y1 - y0
-    cv2.rectangle(img, (x0, y0), (x0 + largura, y1), cor, -1)
-    lado = alt
-    ax = x0 + int(alt * 0.18)
-    if icone is not None:
-        # composto por transparencia, e nao colado como um quadrado opaco: na
-        # HUD do OW2 o icone e um desenho claro POR CIMA da faixa colorida.
-        # Colar o molde inteiro punha uma moldura escura em volta dele, e a
-        # normalizacao de contraste do detector passava a enxergar essa moldura
-        # em vez do desenho -- o recorte deixava de parecer o proprio molde.
+    width = int(BANNER_W * W)
+    x0 = W // 2 - width // 2
+    height = y1 - y0
+    cv2.rectangle(img, (x0, y0), (x0 + width, y1), colour, -1)
+    side = height
+    ax = x0 + int(height * 0.18)
+    if icon is not None:
+        # composited through its alpha, and not pasted as an opaque square: on
+        # the OW2 HUD the icon is a light drawing ON TOP of the coloured banner.
+        # Pasting the whole template put a dark frame around it, and the
+        # detector's contrast normalisation started seeing that frame instead
+        # of the drawing -- the crop stopped looking like the template itself.
         alpha = (
-            cv2.resize(icone, (lado, lado), interpolation=cv2.INTER_AREA)
+            cv2.resize(icon, (side, side), interpolation=cv2.INTER_AREA)
             .astype(np.float32) / 255.0
         )[:, :, None]
-        fundo = img[y0:y0 + lado, ax:ax + lado].astype(np.float32)
-        img[y0:y0 + lado, ax:ax + lado] = (
-            fundo * (1.0 - alpha) + 255.0 * alpha
+        under = img[y0:y0 + side, ax:ax + side].astype(np.float32)
+        img[y0:y0 + side, ax:ax + side] = (
+            under * (1.0 - alpha) + 255.0 * alpha
         ).astype(np.uint8)
     else:
-        cv2.circle(img, (ax + lado // 2, y0 + lado // 2), lado // 3,
+        cv2.circle(img, (ax + side // 2, y0 + side // 2), side // 3,
                    (255, 255, 255), 2)
-    cv2.putText(img, texto, (ax + lado + 6, y1 - int(alt * 0.28)),
-                cv2.FONT_HERSHEY_SIMPLEX, alt / 46.0, (255, 255, 255), 1)
+    cv2.putText(img, text, (ax + side + 6, y1 - int(height * 0.28)),
+                cv2.FONT_HERSHEY_SIMPLEX, height / 46.0, (255, 255, 255), 1)
 
 
 def background(t: float) -> np.ndarray:
-    """Cenario jogavel: gradiente esverdeado + blobs em movimento.
+    """Playable scenery: a greenish gradient + moving blobs.
 
-    A paleta e escolhida para ficar longe das duas cores que os detectores
-    procuram: o magenta da caveira de eliminacao (hue 156-178) e o ciano da
-    faixa de aviso do rodape (hue 90-115). Assim, um evento detectado no video
-    sintetico so pode ter vindo da HUD desenhada, nunca do cenario.
+    The palette is chosen to stay away from the two colours the detectors look
+    for: the kill skull's magenta (hue 156-178) and the footer banner's cyan
+    (hue 90-115). That way, an event detected in the synthetic video can only
+    have come from the drawn HUD, never from the scenery.
     """
     yy = np.linspace(60, 150, H, dtype=np.float32)[:, None]
     xx = np.linspace(40, 120, W, dtype=np.float32)[None, :]
     img = np.zeros((H, W, 3), np.float32)
-    img[:, :, 0] = 30 + xx * 0.12               # azul baixo
-    img[:, :, 1] = yy * 0.85 + xx * 0.35        # verde dominante
-    img[:, :, 2] = 50 + xx * 0.30               # vermelho medio
+    img[:, :, 0] = 30 + xx * 0.12               # low blue
+    img[:, :, 1] = yy * 0.85 + xx * 0.35        # dominant green
+    img[:, :, 2] = 50 + xx * 0.30               # medium red
     img = np.clip(img, 0, 255).astype(np.uint8)
 
     for k in range(6):
@@ -338,27 +346,27 @@ def background(t: float) -> np.ndarray:
     return np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 
-#: geometria da barra de vida, igual a do perfil `ow2_default`
+#: health bar geometry, the same as the `ow2_default` profile's
 BAR_X0, BAR_X1 = 0.09, 0.225
 BAR_Y0, BAR_Y1 = 0.855, 0.895
 N_TICKS = 26
 
 
 def draw_hud(img: np.ndarray, hp: float | None) -> None:
-    # mira
+    # crosshair
     cv2.line(img, (W // 2 - 12, H // 2), (W // 2 + 12, H // 2), (230, 230, 230), 2)
     cv2.line(img, (W // 2, H // 2 - 12), (W // 2, H // 2 + 12), (230, 230, 230), 2)
     if hp is None:
-        return  # sem HUD: menu, troca de round
+        return  # no HUD: menu, round change
 
-    # a placa do jogador acompanha o resto da HUD: some junto no menu e na
-    # troca de round, como no jogo
+    # the player's card follows the rest of the HUD: it disappears with it in
+    # the menu and on round changes, as in the game
     draw_player_card(img)
 
-    # Barra de vida como o OW2 desenha: tracinhos verticais claros sobre um
-    # trilho escuro, com a largura total normalizada. E a *alternancia* desses
-    # tracinhos que o detector le -- por isso eles precisam existir de verdade,
-    # e nao serem um retangulo solido.
+    # Health bar as OW2 draws it: light vertical ticks over a dark track, with
+    # the total width normalised. It is the *alternation* of those ticks that
+    # the detector reads -- that is why they must really exist, and not be a
+    # solid rectangle.
     x0, x1 = int(BAR_X0 * W), int(BAR_X1 * W)
     y0, y1 = int(BAR_Y0 * H), int(BAR_Y1 * H)
     cv2.rectangle(img, (x0, y0), (x1, y1), (38, 34, 30), -1)
@@ -370,48 +378,48 @@ def draw_hud(img: np.ndarray, hp: float | None) -> None:
                       (235, 240, 240), -1)
 
 
-#: a placa do proprio jogador, igual a do perfil `ow2_default` (roi `player`).
-#: Um pouco por dentro da ROI: no jogo a placa nao encosta na borda do recorte,
-#: e uma letra colada na borda sai partida do recorte.
+#: the player's own card, the same as the `ow2_default` profile's (roi
+#: `player`). Slightly inside the ROI: in the game the card does not touch the
+#: crop's edge, and a letter glued to the edge comes out cut by the crop.
 CARD_X0, CARD_X1 = 0.095, 0.232
 CARD_Y0, CARD_Y1 = 0.899, 0.929
 
 
-def draw_player_card(img: np.ndarray, nome: str = PLAYER_NAME) -> None:
-    """A placa com o nome do jogador.
+def draw_player_card(img: np.ndarray, name: str = PLAYER_NAME) -> None:
+    """The card with the player's name.
 
-    E o unico lugar da tela que diz quem esta jogando. O detector de killfeed
-    le daqui para saber quais das eliminacoes anunciadas sao do usuario.
+    It is the only place on screen that says who is playing. The killfeed
+    detector reads it to know which of the announced kills are the user's.
 
-    A escala da letra e maior que a do killfeed de proposito: na HUD de verdade
-    as duas escritas tem tamanhos e espacamentos diferentes, e comparar duas
-    escritas identicas faria o exemplo testar uma comparacao que nao existe.
+    The letter scale is larger than the killfeed's on purpose: on the real HUD
+    the two writings have different sizes and spacings, and comparing two
+    identical writings would make the sample test a comparison that does not
+    exist.
     """
     x0, x1 = int(CARD_X0 * W), int(CARD_X1 * W)
     y0, y1 = int(CARD_Y0 * H), int(CARD_Y1 * H)
     cv2.rectangle(img, (x0, y0), (x1, y1), (120, 62, 44), -1)
-    _draw_name(img, nome, x0 + int((x1 - x0) * 0.22), y0, y1 - y0, 0.62, 2)
+    _draw_name(img, name, x0 + int((x1 - x0) * 0.22), y0, y1 - y0, 0.62, 2)
 
 
-def _draw_name(img: np.ndarray, nome: str, x: int, y: int, alt: int,
-               escala: float, grossura: int) -> None:
-    """Escreve o nome numa placa, centrado na vertical.
+def _draw_name(img: np.ndarray, name: str, x: int, y: int, height: int,
+               scale: float, thickness: int) -> None:
+    """Writes the name on a plate, vertically centred.
 
-    Abaixo de 0.5 de escala as letras da Hershey se encostam e viram uma so --
-    o que ja e um nome diferente. Medido no tamanho da placa do killfeed: com
-    0.45 e grossura 1, `JOGADOR` sai com 6 letras em vez de 7; com 0.5 e
-    grossura 2 sai com as 7 e casa com a placa do rodape em 0.70, contra 0.24
-    de `PATRICK`, que tem o mesmo comprimento.
+    Below a 0.5 scale the Hershey letters touch and merge into one -- which is
+    already a different name. Measured at the killfeed plate's size: at 0.45
+    and thickness 1 a 7-letter name came out with 6 letters; at 0.5 and
+    thickness 2 it comes out with all 7.
     """
-    (_tw, th), _ = cv2.getTextSize(nome, cv2.FONT_HERSHEY_SIMPLEX, escala, grossura)
-    cv2.putText(img, nome, (x, y + (alt + th) // 2), cv2.FONT_HERSHEY_SIMPLEX,
-                escala, (240, 240, 240), grossura, cv2.LINE_AA)
+    (_tw, th), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    cv2.putText(img, name, (x, y + (height + th) // 2), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, (240, 240, 240), thickness, cv2.LINE_AA)
 
 
 def draw_damage_vignette(img: np.ndarray, strength: float) -> None:
-    """Vinheta vermelha nas bordas -- no OW2 isto e *dano recebido*, nao vida
-    baixa. Fica aqui de proposito: numa partida real ela pisca o tempo todo, e
-    o detector precisa continuar acertando mesmo com ela na tela."""
+    """Red vignette on the edges -- in OW2 this is *damage taken*, not low
+    health. It is here on purpose: in a real match it flashes all the time, and
+    the detector must keep getting it right with it on screen."""
     band_y, band_x = int(H * 0.11), int(W * 0.11)
     layer = img.copy()
     cv2.rectangle(layer, (0, 0), (W, band_y), (30, 30, 245), -1)
@@ -422,7 +430,7 @@ def draw_damage_vignette(img: np.ndarray, strength: float) -> None:
 
 
 def health_at(t: float) -> float | None:
-    """Vida no instante t. None = sem HUD na tela."""
+    """Health at instant t. None = no HUD on screen."""
     for d in DEATHS:
         if d <= t < d + 0.35:
             return 0.0
@@ -436,9 +444,9 @@ def frame_at(t: float) -> np.ndarray:
     img = background(t)
     hp = health_at(t)
 
-    # A vinheta de dano acompanha os momentos de vida baixa, como no jogo --
-    # e serve de armadilha: ela e vermelha e cobre as bordas, mas nao deve
-    # produzir evento nenhum sozinha.
+    # The damage vignette follows the low-health moments, as in the game --
+    # and serves as a trap: it is red and covers the edges, but must not
+    # produce any event on its own.
     for s, ln in LOW_HP:
         if s <= t < s + ln:
             draw_damage_vignette(img, 0.6 + 0.4 * abs(math.sin((t - s) * 6.0)))
@@ -448,20 +456,20 @@ def frame_at(t: float) -> np.ndarray:
         if k <= t < k + SKULL_DURATION:
             phase = (t - k) / SKULL_DURATION
             alpha = min(1.0, (1.0 - phase) * 2.2)
-            # centrada em (0.50, 0.485), como medido em gameplay real
+            # centred at (0.50, 0.485), as measured in real gameplay
             draw_skull(img, W // 2, int(H * 0.485), 34, alpha)
 
     for s0 in SLEEPS:
         if s0 <= t < s0 + BANNER_S:
-            draw_banner(img, "PUT MERCY (TESTE) TO SLEEP",
-                        _icone("ana_sleep_icon.png"), COR_CIANO)
+            draw_banner(img, "PUT MERCY (TEST) TO SLEEP",
+                        _icon("ana_sleep_icon.png"), CYAN)
     for s0 in STUNS:
         if s0 <= t < s0 + BANNER_S:
-            draw_banner(img, "ORISA (TESTE) STUNNED BY ACCRETION",
-                        _icone("sigma_accretion_icon.png"), COR_VERDE)
-    for s0 in AVISOS_ISCA:
+            draw_banner(img, "ORISA (TEST) STUNNED BY ACCRETION",
+                        _icon("sigma_accretion_icon.png"), GREEN)
+    for s0 in DECOY_BANNERS:
         if s0 <= t < s0 + BANNER_S:
-            draw_banner(img, "ORB OF HARMONY FROM TESTE", None, COR_CIANO)
+            draw_banner(img, "ORB OF HARMONY FROM TEST", None, CYAN)
 
     for u in ULTS:
         if u <= t < u + 2.5:
@@ -469,31 +477,31 @@ def frame_at(t: float) -> np.ndarray:
             cv2.putText(img, "ULTIMATE", (int(W * 0.66), int(H * 0.20)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (240, 240, 240), 2)
 
-    draw_ult_button(img, ult_carregada(t))
+    draw_ult_button(img, ult_charged(t))
     for hs in HEADSHOTS:
         if hs <= t < hs + HEADSHOT_S:
             draw_crit_marker(img)
     for i, ak in enumerate(ABILITY_KILLS):
         if ak <= t < ak + ABILITY_ROW_S:
-            # vitimas diferentes, placas de comprimentos diferentes
-            draw_killfeed_row(img, vitima=-40 * i)
+            # different victims, plates of different lengths
+            draw_killfeed_row(img, victim=-40 * i)
     for i, tk in enumerate(TEAMMATE_KILLS):
         if tk <= t < tk + ABILITY_ROW_S:
-            # larguras que nao coincidem com as de ABILITY_KILLS: no jogo o
-            # comprimento da placa e o do nome escrito nela, e duas linhas so
-            # tem a mesma largura quando sao a mesma dupla. Desenhar duas
-            # eliminacoes diferentes com a mesma largura, a menos de `hold_s`
-            # uma da outra, faria o rastreador ve-las como uma linha so que
-            # sumiu e voltou -- que e o que ele existe para nao confundir.
-            draw_killfeed_row(img, vitima=-60 - 35 * i, killer=TEAMMATE_NAME)
+            # widths that do not coincide with ABILITY_KILLS': in the game the
+            # plate's length is that of the name on it, and two lines only have
+            # the same width when they are the same pair. Drawing two different
+            # kills with the same width, less than `hold_s` apart, would make
+            # the tracker see them as one line that vanished and came back --
+            # which is what it exists not to confuse.
+            draw_killfeed_row(img, victim=-60 - 35 * i, killer=TEAMMATE_NAME)
     return img
 
 
-def ult_carregada(t: float) -> bool:
-    """O botao fica carregado nos segundos que antecedem cada uso.
+def ult_charged(t: float) -> bool:
+    """The button stays charged for the seconds before each use.
 
-    E tambem nas piscadas de `ULT_FLASHES`, que nao sao uso nenhum: sao a
-    armadilha que o detector tem de recusar pela duracao.
+    And also during the `ULT_FLASHES` blinks, which are no use at all: they are
+    the trap the detector must refuse by duration.
     """
     if any(u - SELF_ULT_CHARGE_S <= t < u for u in SELF_ULTS):
         return True
@@ -515,7 +523,7 @@ def write_wav(path: Path, samples: np.ndarray) -> None:
 
 
 def game_audio(duration: float) -> np.ndarray:
-    """Ambiente baixo + estouros altos nas ults (pista de audio dos detectores)."""
+    """Low ambience + loud bursts at the ults (the detectors' audio source)."""
     n = int(duration * SR)
     t = np.arange(n) / SR
     rng = np.random.default_rng(7)
@@ -523,7 +531,7 @@ def game_audio(duration: float) -> np.ndarray:
     for u in ULTS:
         i0 = int(u * SR)
         if i0 >= n:
-            continue  # video mais curto que o gabarito completo
+            continue  # video shorter than the full ground truth
         i1 = min(n, i0 + int(1.2 * SR))
         env = np.exp(-np.linspace(0, 5, i1 - i0))
         sig[i0:i1] += 0.8 * env * np.sin(2 * np.pi * 220 * t[i0:i1])
@@ -531,7 +539,7 @@ def game_audio(duration: float) -> np.ndarray:
 
 
 def click_track(duration: float, bpm: float = 120.0) -> np.ndarray:
-    """Musica de teste: bumbo no tempo + baixo. BPM conhecido."""
+    """Test music: a kick on the beat + bass. Known BPM."""
     n = int(duration * SR)
     t = np.arange(n) / SR
     sig = 0.10 * np.sin(2 * np.pi * 55 * t)
@@ -548,7 +556,7 @@ def click_track(duration: float, bpm: float = 120.0) -> np.ndarray:
     return sig
 
 
-# ------------------------------- geracao ------------------------------------
+# ------------------------------ generation ----------------------------------
 
 
 def render(out: Path, duration: float, ffmpeg: str) -> None:
@@ -575,7 +583,7 @@ def render(out: Path, duration: float, ffmpeg: str) -> None:
             print(f"  {i / FPS:5.1f}s / {duration:.0f}s", file=sys.stderr)
     proc.stdin.close()
     if proc.wait() != 0:
-        raise SystemExit("ffmpeg falhou ao montar o video de exemplo")
+        raise SystemExit("ffmpeg failed to build the sample video")
     audio_path.unlink(missing_ok=True)
 
 
@@ -585,16 +593,16 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=DURATION)
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--music", type=Path, default=None,
-                    help="tambem gera uma musica de teste (bumbo em 120 BPM)")
+                    help="also generates test music (a kick at 120 BPM)")
     ap.add_argument("--ult-templates", type=Path, default=None,
-                    help="salva o icone de ult usado, para calibrar o detector")
+                    help="saves the ult icon used, to calibrate the detector")
     ap.add_argument("--ability-icons", type=Path, default=None,
-                    help="salva as marcas do botao de ult e do killfeed no "
-                         "formato de templates/abilities/, para o detector "
-                         "poder dizer QUAL habilidade era")
+                    help="saves the ult button and killfeed marks in the "
+                         "templates/abilities/ format, so the detector can "
+                         "say WHICH ability it was")
     args = ap.parse_args()
 
-    print(f"gerando {args.out} ({args.duration:.0f}s)...", file=sys.stderr)
+    print(f"generating {args.out} ({args.duration:.0f}s)...", file=sys.stderr)
     render(args.out, args.duration, args.ffmpeg)
 
     truth = {
@@ -607,13 +615,13 @@ def main() -> None:
         "ults": ULTS,
         "sleeps": SLEEPS,
         "stuns": STUNS,
-        "avisos_isca": AVISOS_ISCA,
+        "decoy_banners": DECOY_BANNERS,
         "self_ults": SELF_ULTS,
         "ult_flashes": ULT_FLASHES,
         "headshots": HEADSHOTS,
         "ability_kills": ABILITY_KILLS,
-        # as do colega de time: o killfeed as anuncia igual, e o detector tem
-        # de recusa-las pelo nome escrito na placa
+        # a teammate's: the killfeed announces them the same way, and the
+        # detector must refuse them by the name written on the plate
         "teammate_kills": TEAMMATE_KILLS,
         "player_name": PLAYER_NAME,
     }
@@ -623,22 +631,22 @@ def main() -> None:
     if args.music:
         args.music.parent.mkdir(parents=True, exist_ok=True)
         write_wav(args.music, click_track(args.duration, 120.0))
-        print(f"musica de teste: {args.music}", file=sys.stderr)
+        print(f"test music: {args.music}", file=sys.stderr)
 
     if args.ult_templates:
         args.ult_templates.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(args.ult_templates / "sample_ult.png"), ult_template())
-        print(f"template de ult: {args.ult_templates}", file=sys.stderr)
+        print(f"ult template: {args.ult_templates}", file=sys.stderr)
 
     if args.ability_icons:
-        # a estrutura e a mesma de templates/abilities/: uma pasta por heroi
-        heroi = args.ability_icons / "sample"
-        heroi.mkdir(parents=True, exist_ok=True)
-        for key in GLIFOS:
-            cv2.imwrite(str(heroi / f"{key}.png"), glyph_template(key))
-        print(f"icones de habilidade: {heroi}", file=sys.stderr)
+        # the structure is the same as templates/abilities/: one folder per hero
+        hero = args.ability_icons / "sample"
+        hero.mkdir(parents=True, exist_ok=True)
+        for key in GLYPHS:
+            cv2.imwrite(str(hero / f"{key}.png"), glyph_template(key))
+        print(f"ability icons: {hero}", file=sys.stderr)
 
-    print(f"pronto. gabarito em {truth_path}", file=sys.stderr)
+    print(f"done. ground truth in {truth_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

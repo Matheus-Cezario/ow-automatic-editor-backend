@@ -37,7 +37,7 @@ class TimelineItem:
     """
 
     timeline: Timeline
-    title: str = "Montagem"
+    title: str = "Montage"
     #: only to name the video in the list: the music is in the blocks, as media
     music_name: str | None = None
     #: the library items this montage uses, already on disk
@@ -46,7 +46,7 @@ class TimelineItem:
 
 @dataclass(slots=True)
 class RenderedClip:
-    """Um video pronto (ou os cortes dele, quando a juncao falhou).
+    """A finished video (or its cuts, when joining them failed).
 
     It carried a `Highlight` while the system generated videos by rule: that was
     what said the kind, the title and the score of the proposed video. Now every
@@ -86,7 +86,7 @@ def render_all(
         except ffmpeg.FFmpegError:
             # a problematic clip must not cost the rest of the delivery
             log.exception(
-                "falha ao renderizar '%s'; sigo com os demais", item.title
+                "failed to render '%s'; carrying on with the rest", item.title
             )
             continue
         rendered.append(clip)
@@ -121,7 +121,7 @@ def _render_timeline(
     pieces = tl.plan(spec.cuts, source_duration_s=media.duration_s)
     if not any(p.is_cut for p in pieces):
         raise ffmpeg.FFmpegError(
-            "nenhum dos cortes cai dentro da gravacao"
+            "none of the cuts falls inside the recording"
         )
 
     # this path only takes montages with no music -- a sound layer already
@@ -150,7 +150,7 @@ def _render_timeline(
                 # keeps every following block at the point of the music where
                 # the user put it
                 log.warning(
-                    "corte em %.1fs falhou; o lugar dele fica preto", piece.start_s
+                    "cut at %.1fs failed; its slot stays black", piece.start_s
                 )
         try:
             ffmpeg.black_clip(
@@ -159,12 +159,12 @@ def _render_timeline(
                 audio_rate=audio_rate,
             )
         except ffmpeg.FFmpegError:
-            log.warning("nao consegui gerar o preto de %.2fs", piece.duration_s)
+            log.warning("could not generate the %.2fs of black", piece.duration_s)
             continue
         parts.append(part)
 
     if not cut_files:
-        raise ffmpeg.FFmpegError("nenhum corte pode ser feito")
+        raise ffmpeg.FFmpegError("no cut could be made")
 
     # the zip comes out BEFORE the assembly: if joining or adding the
     # soundtrack fails, the cut material is not lost. Only the cuts go in -- the
@@ -182,7 +182,7 @@ def _render_timeline(
         ffmpeg.concat(parts, joined, mute=muted)
         joined.replace(dest)
     except ffmpeg.FFmpegError as exc:
-        log.exception("montagem de '%s' falhou; entrego so os cortes", item.title)
+        log.exception("montage '%s' failed; delivering only the cuts", item.title)
         assembly_error = str(exc)[:500]
         dest = None
 
@@ -202,7 +202,7 @@ def _render_timeline(
         if dest is not None else None
     )
     return RenderedClip(
-        title=item.title or "Montagem",
+        title=item.title or "Montage",
         start_s=min(c.start_s for c in spec.cuts),
         end_s=max(c.end_s for c in spec.cuts),
         video=dest,
@@ -256,7 +256,7 @@ def _render_composition(
     try:
         ffmpeg.compose(comp, dest)
     except ffmpeg.FFmpegError as exc:
-        log.exception("composicao de '%s' falhou", item.title)
+        log.exception("composition of '%s' failed", item.title)
         error_text = str(exc)[:500]
         dest = None
 
@@ -264,7 +264,7 @@ def _render_composition(
     layers = [l for l in spec.layers if not l.hidden]
     thumb = _thumb(dest, out_dir, index) if dest is not None else None
     return RenderedClip(
-        title=item.title or "Montagem",
+        title=item.title or "Montage",
         start_s=min((c.start_s for c in clips), default=0.0),
         end_s=max((c.end_s for c in clips), default=0.0),
         video=dest,
@@ -315,7 +315,7 @@ def _zip_segments(
                 seconds = start - minutes * 60
                 zf.write(part, f"{i:02d}_{minutes:02d}m{seconds:04.1f}s.mp4")
     except OSError:
-        log.warning("nao consegui montar o zip dos cortes em %s", dest)
+        log.warning("could not build the cuts zip at %s", dest)
         return None
     return dest
 
@@ -325,5 +325,5 @@ def _thumb(video: Path, out_dir: Path, index: int, at: float = 0.2) -> Path | No
         dest = out_dir / f"{index:02d}.jpg"
         return ffmpeg.thumbnail(video, dest, at=at)
     except ffmpeg.FFmpegError:
-        log.warning("sem miniatura para %s", video.name)
+        log.warning("no thumbnail for %s", video.name)
         return None

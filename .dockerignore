@@ -1,4 +1,4 @@
-# O contexto de build e ./backend; o frontend nem entra aqui.
+# The build context is this repository; the frontend does not come in here.
 .venv/
 data/
 **/__pycache__/

@@ -59,8 +59,8 @@ def _detect_from_killfeed(
     bank = TemplateBank.from_dir(templates_dir)
     if not bank:
         log.warning(
-            "nenhum template em %s -- a via de killfeed fica desligada. "
-            "Recorte os icones de ultimate do seu proprio gameplay e salve ali.",
+            "no template in %s -- the killfeed path is off. "
+            "Crop the ultimate icons from your own gameplay and save them there.",
             templates_dir,
         )
         return []
@@ -121,7 +121,7 @@ def _detect_from_audio(audio_path: Path, profile: Profile) -> list[DetectionEven
     if data.size == 0:
         return []
 
-    fps = 20  # janelas de 50 ms
+    fps = 20  # 50 ms windows
     hop = max(1, sr // fps)
     n_frames = data.size // hop
     if n_frames < 4 * fps:
@@ -174,19 +174,19 @@ def detect_ults(
     if not bool(cfg.get("audio_enabled", False)):
         if audio_path:
             log.info(
-                "via de audio desligada (ults.audio_enabled=false): em partida "
-                "real ela confunde tiro e explosao com fala de ultimate"
+                "audio path off (ults.audio_enabled=false): in a real match "
+                "it mistakes gunfire and explosions for ultimate voice lines"
             )
     elif audio_path and Path(audio_path).exists():
         try:
             events += _detect_from_audio(Path(audio_path), profile)
-        except Exception as exc:  # audio ruim nao pode derrubar o detector
-            log.warning("via de audio indisponivel: %s", exc)
+        except Exception as exc:  # bad audio must not bring the detector down
+            log.warning("audio path unavailable: %s", exc)
 
     events.sort(key=lambda e: e.t)
     merged = _merge_sources(events, float(cfg.get("min_gap_s", 3.0)))
     log.info(
-        "%d ultimate(s) inimiga(s) -- %d apos fundir as duas pistas",
+        "%d enemy ultimate(s) -- %d after merging both sources",
         len(events),
         len(merged),
     )
@@ -275,11 +275,11 @@ def detect_self_ults(
 
     bank = IconBank.from_dir(icons_dir)
     if bank:
-        log.info("%d icone(s) de habilidade carregado(s)", len(bank))
+        log.info("%d ability icon(s) loaded", len(bank))
     else:
         log.warning(
-            "sem icones em %s -- as ultimates continuam sendo detectadas, mas "
-            "sem dizer de qual heroi. Rode tools/fetch_ability_icons.py",
+            "no icons in %s -- ultimates are still detected, but "
+            "without saying which hero. Run tools/fetch_ability_icons.py",
             icons_dir,
         )
 
@@ -333,7 +333,7 @@ def detect_self_ults(
 
     min_after = float(cfg.get("min_after_s", 6.0))
     min_charged = float(cfg.get("min_charged_s", 2.0))
-    limiar_icone = float(cfg.get("icon_threshold", 0.55))
+    icon_threshold = float(cfg.get("icon_threshold", 0.55))
 
     events: list[DetectionEvent] = []
     for i, p in enumerate(pulses):
@@ -351,8 +351,8 @@ def detect_self_ults(
             # the video ends. With no way to tell them apart, no event is
             # invented.
             continue
-        proxima = pulses[i + 1].start if i + 1 < len(pulses) else float("inf")
-        if proxima - p.end < min_after:
+        next_start = pulses[i + 1].start if i + 1 < len(pulses) else float("inf")
+        if next_start - p.end < min_after:
             # it recharged far too quickly to have been spent: that was the
             # HUD disappearing (killcam, scoreboard) and not an ultimate
             continue
@@ -360,13 +360,13 @@ def detect_self_ults(
         meta: dict = {"side": "self", "charged_s": round(p.duration, 2)}
         confidence = 0.9
         if bank:
-            janela = [g for g in glyphs if p.start <= g[0] <= p.end]
-            if janela:
+            window = [g for g in glyphs if p.start <= g[0] <= p.end]
+            if window:
                 # the frame with the largest disc: the best-framed of the stretch
-                _t, _disc, glyph = max(janela, key=lambda g: g[1])
+                _t, _disc, glyph = max(window, key=lambda g: g[1])
                 key, score = bank.best_match(glyph)
                 meta["icon_score"] = round(score, 3)
-                if key and score >= limiar_icone:
+                if key and score >= icon_threshold:
                     hero, _, ability = key.partition("/")
                     meta["hero"], meta["ability"] = hero, ability
                     confidence = round(min(1.0, 0.8 + 0.2 * score), 3)

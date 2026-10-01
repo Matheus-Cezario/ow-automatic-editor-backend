@@ -109,13 +109,13 @@ LOG = logging.getLogger("gateway")
 
 app = FastAPI(
     title="OW Editor",
-    description="Melhores momentos de partidas de Overwatch 2, automaticamente.",
+    description="Overwatch 2 match editor with automatic event detection.",
     version="0.1.0",
     lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # o app Flutter web roda em outra porta durante o dev
+    allow_origins=["*"],  # the Flutter web app runs on another port during dev
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -130,19 +130,19 @@ def _safe_suffix(filename: str | None, allowed: set[str], default: str) -> str:
 
 
 def _store_upload(key: str, upload: UploadFile, expected_bytes: int) -> str:
-    """Grava o upload conferindo se ele chegou inteiro.
+    """Stores the upload, checking that it arrived whole.
 
-    Um upload truncado nao se parece com erro nenhum: o multipart fecha
-    direito, o `Content-Length` bate com o que de fato chegou, e o que sobra e
-    meia gravacao guardada como se estivesse inteira. O estrago so aparecia
-    fases depois, no preprocessador, como um `ffprobe saiu com 1` -- longe da
-    tela de envio e sem dizer o que fazer.
+    A truncated upload looks like no error at all: the multipart closes
+    properly, the `Content-Length` matches what actually arrived, and what is
+    left is half a recording stored as if it were whole. The damage only
+    showed up stages later, in the preprocessor, as an `ffprobe exited with 1`
+    -- far from the upload screen and without saying what to do.
 
-    Conferir aqui custa um `stat` e devolve o problema onde ele nasceu, com a
-    unica acao que resolve: enviar de novo.
+    Checking here costs one `stat` and returns the problem where it was born,
+    with the only action that fixes it: upload again.
 
-    `expected_bytes` zero desliga a conferencia -- e um cliente antigo, que
-    nao manda o tamanho.
+    `expected_bytes` of zero turns the check off -- it is an old client that
+    does not send the size.
     """
     storage = get_storage()
     stored = storage.put_stream(key, upload.file)
@@ -151,8 +151,8 @@ def _store_upload(key: str, upload: UploadFile, expected_bytes: int) -> str:
         storage.delete(stored)
         raise HTTPException(
             400,
-            f"o arquivo chegou incompleto: {got} de {expected_bytes} bytes. "
-            "Envie de novo.",
+            f"the file arrived incomplete: {got} of {expected_bytes} bytes. "
+            "Upload it again.",
         )
     return stored
 
@@ -162,14 +162,14 @@ def _json_list(raw: Any, field: str) -> list:
     if raw is None or raw == "":
         return []
     if not isinstance(raw, str):
-        raise HTTPException(422, f"'{field}' tem de ser um JSON em texto")
+        raise HTTPException(422, f"'{field}' must be JSON as text")
     try:
-        valor = json.loads(raw)
+        value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise HTTPException(422, f"'{field}' nao e JSON valido: {exc}") from exc
-    if not isinstance(valor, list):
-        raise HTTPException(422, f"'{field}' tem de ser uma lista")
-    return valor
+        raise HTTPException(422, f"'{field}' is not valid JSON: {exc}") from exc
+    if not isinstance(value, list):
+        raise HTTPException(422, f"'{field}' must be a list")
+    return value
 
 
 def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
@@ -201,13 +201,13 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
             for r in job.renders
         ),
         "n_clips": len(job.clips),
-        # a gravacao em si: o preview da montage busca dentro dela
+        # the recording itself: the montage preview seeks inside it
         "video_url": f"/api/jobs/{job.id}/video",
         # the reduced copy, when it exists. Jobs analysed before it came into
         # the world answer `null`, and the app falls back to the recording
         "proxy_url": f"/api/jobs/{job.id}/proxy" if job.proxy_key else None,
         # the whole match's package: it requires opening no video at all
-        "zip_url": f"/api/jobs/{job.id}/cortes.zip" if job.clips else None,
+        "zip_url": f"/api/jobs/{job.id}/cuts.zip" if job.clips else None,
         "has_cuts": has_cuts,
         #: clips whose assembly failed but whose cuts survived
         "clips_only_cuts": without_video,
@@ -242,7 +242,7 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         data["tracks"] = [_media_dict(m) for m in library if m.is_audio]
         # the montages come back with the job: that is how the screen rebuilds
         # itself after an F5, and it is the list the picker shows
-        montages = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
+        montages = sorted(job.montages, key=lambda m: _as_aware(m.updated_at), reverse=True)
         data["montages"] = [_montage_dict(m, full=True) for m in montages]
         # `draft` is still the most recent one, for an app older than Phase 8
         data["draft"] = (montages[0].data if montages else job.draft) or {}
@@ -267,7 +267,7 @@ def _render_dict(r: Render, all_clips: list[Clip]) -> dict[str, Any]:
             {
                 "title": tl.get("title") or "",
                 "track_id": tl.get("track_id"),
-                # um pedido antigo guarda `cuts`; um novo, camadas
+                # an old request stores `cuts`; a new one, layers
                 "n_cuts": len(tl.get("cuts") or []) or sum(
                     len(c.get("clips") or []) for c in (tl.get("layers") or [])
                 ),
@@ -294,7 +294,7 @@ def _clip_dict(c: Clip) -> dict[str, Any]:
         "video_url": f"/api/clips/{c.id}/video" if c.key else None,
         "thumb_url": f"/api/clips/{c.id}/thumb" if c.meta.get("thumb_key") else None,
         "segments_zip_url": (
-            f"/api/clips/{c.id}/cortes.zip"
+            f"/api/clips/{c.id}/cuts.zip"
             if c.meta.get("segments_zip_key")
             else None
         ),
@@ -308,7 +308,7 @@ def _serve_blob(key: str, request: Request, media_type: str) -> Response:
     """Serves a blob with Range support, so the player can seek."""
     storage = get_storage()
     if not storage.exists(key):
-        raise HTTPException(404, "upload nao encontrado")
+        raise HTTPException(404, "upload not found")
     total = storage.size(key)
 
     range_header = request.headers.get("range")
@@ -357,7 +357,7 @@ def _serve_blob(key: str, request: Request, media_type: str) -> Response:
     )
 
 
-# ──────────────────────────────── rotas ─────────────────────────────────────
+# ──────────────────────────────── routes ────────────────────────────────────
 
 
 @app.get("/api/health")
@@ -368,20 +368,20 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/jobs", status_code=201)
 def create_job(
-    video: UploadFile = File(..., description="gravacao da partida"),
-    params: str = Form("{}", description="JobParams em JSON"),
-    size: int = Form(0, description="tamanho do arquivo, para conferir o envio"),
+    video: UploadFile = File(..., description="match recording"),
+    params: str = Form("{}", description="JobParams as JSON"),
+    size: int = Form(0, description="file size, to verify the upload"),
 ) -> dict[str, Any]:
-    """Primeira fase: so a gravacao.
+    """First phase: the recording alone.
 
-    Nenhuma musica entra aqui. A analise descobre os momentos e monta a lista
-    de videos possiveis; a escolha -- e a trilha de cada video -- vem depois,
-    em `POST /api/jobs/{id}/renders`, quantas vezes o usuario quiser.
+    No music comes in here. The analysis finds the moments; what becomes a
+    video -- and with which music -- is decided in the editor afterwards, and
+    sent to `POST /api/jobs/{id}/renders` as many times as the user wants.
     """
     try:
         parsed = JobParams(**json.loads(params or "{}"))
     except (json.JSONDecodeError, ValidationError, TypeError) as exc:
-        raise HTTPException(422, f"parametros invalidos: {exc}") from exc
+        raise HTTPException(422, f"invalid parameters: {exc}") from exc
 
     job_id = new_id()
 
@@ -392,9 +392,9 @@ def create_job(
         job = Job(
             id=job_id,
             status=JobStatus.PENDING,
-            stage="na fila",
+            stage="queued",
             video_key=video_key,
-            video_name=video.filename or "gravacao",
+            video_name=video.filename or "recording",
             params=parsed.model_dump(),
         )
         s.add(job)
@@ -405,32 +405,33 @@ def create_job(
 
 @app.post("/api/jobs/{job_id}/renders", status_code=201)
 async def create_render(job_id: str, request: Request) -> dict[str, Any]:
-    """Segunda fase: gerar os videos que o usuario montou.
+    """Second phase: render the videos the user assembled.
 
-    Recebe um multipart com o field `timelines` (JSON): cada montage com os
-    seus blocos ja posicionados e, se tiver trilha, apontando para uma musica
-    ja enviada a este job pela library.
+    Takes a multipart with the `timelines` field (JSON): each montage with its
+    blocks already placed and, if it has music, pointing at a track already
+    uploaded to this job's library.
 
-    Ja houve um segundo field, `selections`, com as propostas que o sistema
-    oferecia prontas. Nao ha mais propostas: o que vira video sai do editor.
+    There used to be a second field, `selections`, with the proposals the
+    system offered ready-made. There are no proposals any more: what becomes a
+    video comes out of the editor.
 
-    Pode ser chamado quantas vezes se quiser sobre o mesmo job -- usar um
-    momento num video nao o consome para os outros.
+    It can be called as many times as wanted on the same job -- using a moment
+    in one video does not use it up for the others.
     """
     form = await request.form()
     raw_timelines = _json_list(form.get("timelines"), "timelines")
     if not raw_timelines:
-        raise HTTPException(422, "monte pelo menos uma linha do tempo")
+        raise HTTPException(422, "build at least one timeline")
 
     render_id = new_id()
 
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
         if job.status != JobStatus.READY:
             raise HTTPException(
-                409, f"a analise deste job ainda nao terminou (status: {job.status})"
+                409, f"this job's analysis has not finished yet (status: {job.status})"
             )
         # a montage points at music; the library holds more than that
         music_ids = {m.id: m.status for m in job.media if m.is_audio}
@@ -439,18 +440,18 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
     montages: list[Timeline] = []
     for item in raw_timelines:
         if not isinstance(item, dict):
-            raise HTTPException(422, "cada linha do tempo tem de ser um objeto")
+            raise HTTPException(422, "each timeline must be an object")
         try:
             spec = Timeline(**item)
         except ValidationError as exc:
-            raise HTTPException(422, f"linha do tempo invalida: {exc}") from exc
+            raise HTTPException(422, f"invalid timeline: {exc}") from exc
         # a clip pointing at another job's media does not go in: the montage
         # would come out without it, and with no warning
         for clip in spec.clips:
             if clip.media_id and clip.media_id not in library:
                 raise HTTPException(
                     422,
-                    f"midia desconhecida neste job: {clip.media_id!r}",
+                    f"unknown media in this job: {clip.media_id!r}",
                 )
         _check_layers(spec, music_ids)
         # the watermark comes from the same library, and refusing it here is
@@ -458,7 +459,7 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
         if spec.export.watermark_id and spec.export.watermark_id not in library:
             raise HTTPException(
                 422,
-                f"marca desconhecida neste job: {spec.export.watermark_id!r}",
+                f"unknown watermark in this job: {spec.export.watermark_id!r}",
             )
         montages.append(spec)
 
@@ -468,7 +469,7 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                 id=render_id,
                 job_id=job_id,
                 status=RenderStatus.PENDING,
-                stage="na fila",
+                stage="queued",
                 timelines=[m.model_dump() for m in montages],
             )
         )
@@ -484,10 +485,10 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
 @app.get("/api/renders/{render_id}")
 def get_render(render_id: str) -> dict[str, Any]:
     with session() as s:
-        pedido = s.get(Render, render_id)
-        if pedido is None:
-            raise HTTPException(404, "pedido nao encontrado")
-        return _render_dict(pedido, list(pedido.clips))
+        request_ = s.get(Render, render_id)
+        if request_ is None:
+            raise HTTPException(404, "request not found")
+        return _render_dict(request_, list(request_.clips))
 
 
 @app.delete("/api/renders/{render_id}", status_code=204)
@@ -495,14 +496,14 @@ def delete_render(render_id: str) -> Response:
     """Deletes a request and its videos. The montage stays saved: it can be
     requested again, with different music."""
     with session() as s:
-        pedido = s.get(Render, render_id)
-        if pedido is None:
-            raise HTTPException(404, "pedido nao encontrado")
-        s.delete(pedido)
+        request_ = s.get(Render, render_id)
+        if request_ is None:
+            raise HTTPException(404, "request not found")
+        s.delete(request_)
     return Response(status_code=204)
 
 
-# ── music_ids do job: sobem antes de existir video ────────────────────────────
+# ── the job's music: uploaded before any video exists ───────────────────────
 #
 # In the montage the music comes first. You cannot place a cut "on the turn of
 # the chorus" without hearing the chorus, and you cannot snap a cut to the beat
@@ -514,13 +515,13 @@ def delete_render(render_id: str) -> Response:
 
 
 def _media_dict(m: Media) -> dict[str, Any]:
-    """Um item da library de midia da partida.
+    """One item of the match's media library.
 
-    Audio vai completo -- batidas e forma de onda inclusive --, porque e com
-    isso que a tela de montage desenha a musica e gruda os cortes na batida.
-    Video e imagem vao com dimensions e os enderecos da miniatura e do proxy.
+    Audio goes in full -- beats and waveform included -- because that is what
+    the montage screen uses to draw the music and snap cuts to the beat. Video
+    and image go with their dimensions and the thumbnail and proxy addresses.
     """
-    dados = {
+    data = {
         "id": m.id,
         "job_id": m.job_id,
         "kind": m.kind,
@@ -534,7 +535,7 @@ def _media_dict(m: Media) -> dict[str, Any]:
         "created_at": _iso(m.created_at),
     }
     if m.is_audio:
-        dados |= {
+        data |= {
             "bpm": round(m.bpm, 2),
             "beats": m.beats or [],
             "peaks": m.peaks or [],
@@ -542,14 +543,14 @@ def _media_dict(m: Media) -> dict[str, Any]:
             "audio_url": f"/api/media/{m.id}/file",
         }
     else:
-        dados |= {"width": m.width, "height": m.height, "fps": round(m.fps, 3)}
-    return dados
+        data |= {"width": m.width, "height": m.height, "fps": round(m.fps, 3)}
+    return data
 
 
-def _guardar_media(
+def _store_media(
     job_id: str, upload: UploadFile, kind: MediaKind, expected_bytes: int = 0
 ) -> str:
-    """Grava o upload e manda analisa-lo. Devolve o id."""
+    """Stores the upload and asks for it to be analysed. Returns the id."""
     media_id = new_id()
     defaults = {
         MediaKind.AUDIO: (AUDIO_EXTS, ".mp3"),
@@ -574,12 +575,12 @@ def _guardar_media(
     return media_id
 
 
-def _tipo_de(filename: str | None) -> MediaKind | None:
+def _kind_of(filename: str | None) -> MediaKind | None:
     """What kind the file is, from its extension.
 
-    Pela extensao e nao pelo `content-type` porque o navegador mente com
-    frequencia -- manda `application/octet-stream` para tudo quando o upload
-    veio de um lugar que ele nao conhece.
+    By extension and not by `content-type` because the browser often lies --
+    it sends `application/octet-stream` for everything when the upload came
+    from a place it does not know.
     """
     ext = Path(filename or "").suffix.lower()
     if ext in AUDIO_EXTS:
@@ -594,27 +595,27 @@ def _tipo_de(filename: str | None) -> MediaKind | None:
 @app.post("/api/jobs/{job_id}/media", status_code=201)
 def add_media(
     job_id: str,
-    file: UploadFile = File(..., description="video, imagem ou audio"),
-    size: int = Form(0, description="tamanho do arquivo, para conferir o envio"),
+    file: UploadFile = File(..., description="video, image or audio"),
+    size: int = Form(0, description="file size, to verify the upload"),
 ) -> dict[str, Any]:
     """Brings a file into the match's library.
 
-    Responde na hora, com o item ainda `pending`: a analise (dimensions,
-    miniatura, proxy; batidas quando for audio) roda no worker, e o app
-    acompanha por `GET /api/media/{id}`.
+    Answers right away, with the item still `pending`: the analysis
+    (dimensions, thumbnail, proxy; beats for audio) runs in the worker, and the
+    app follows it through `GET /api/media/{id}`.
     """
     with session() as s:
         if s.get(Job, job_id) is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
 
-    kind = _tipo_de(file.filename)
+    kind = _kind_of(file.filename)
     if kind is None:
         raise HTTPException(
             422,
-            f"nao sei o que fazer com {file.filename!r}: aceito video, imagem "
-            "e audio",
+            f"don't know what to do with {file.filename!r}: video, image and "
+            "audio are accepted",
         )
-    media_id = _guardar_media(job_id, file, kind, size)
+    media_id = _store_media(job_id, file, kind, size)
     return {"id": media_id, "job_id": job_id, "kind": kind,
             "status": TrackStatus.PENDING}
 
@@ -624,7 +625,7 @@ def get_media(media_id: str) -> dict[str, Any]:
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
-            raise HTTPException(404, "midia nao encontrada")
+            raise HTTPException(404, "media not found")
         return _media_dict(item)
 
 
@@ -635,7 +636,7 @@ def delete_media(media_id: str) -> Response:
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
-            raise HTTPException(404, "midia nao encontrada")
+            raise HTTPException(404, "media not found")
         s.delete(item)
     return Response(status_code=204)
 
@@ -646,7 +647,7 @@ def media_file(media_id: str, request: Request) -> Response:
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
-            raise HTTPException(404, "midia nao encontrada")
+            raise HTTPException(404, "media not found")
         key, kind = item.key, item.kind
     ext = Path(key).suffix.lower()
     mime = (
@@ -664,13 +665,13 @@ def media_thumb(media_id: str, request: Request) -> Response:
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
-            raise HTTPException(404, "midia nao encontrada")
+            raise HTTPException(404, "media not found")
         key = item.thumb_key
     if not key:
-        raise HTTPException(404, "sem miniatura")
-    resposta = _serve_blob(key, request, "image/jpeg")
-    resposta.headers["cache-control"] = "public, max-age=86400"
-    return resposta
+        raise HTTPException(404, "no thumbnail")
+    response = _serve_blob(key, request, "image/jpeg")
+    response.headers["cache-control"] = "public, max-age=86400"
+    return response
 
 
 @app.get("/api/media/{media_id}/proxy")
@@ -679,30 +680,30 @@ def media_proxy(media_id: str, request: Request) -> Response:
     with session() as s:
         item = s.get(Media, media_id)
         if item is None:
-            raise HTTPException(404, "midia nao encontrada")
+            raise HTTPException(404, "media not found")
         key = item.proxy_key
     if not key:
-        raise HTTPException(404, "este item nao tem proxy")
+        raise HTTPException(404, "this item has no proxy")
     return _serve_blob(key, request, "video/mp4")
 
 
-# ── as rotas de musica, agora cascas sobre a library ─────────────────────
+# ── the music routes, now thin shells over the library ──────────────────────
 #
-# Elas continuam existindo porque o app as usa e porque "a musica do job" e um
-# nome util. Por baixo e tudo `Media` de tipo audio.
+# They still exist because the app uses them and because "the job's music" is
+# a useful name. Underneath it is all `Media` of kind audio.
 
 
 @app.post("/api/jobs/{job_id}/tracks", status_code=201)
 def add_track(
     job_id: str,
-    audio: UploadFile = File(..., description="musica para montar em cima"),
-    size: int = Form(0, description="tamanho do arquivo, para conferir o envio"),
+    audio: UploadFile = File(..., description="music to build the montage on"),
+    size: int = Form(0, description="file size, to verify the upload"),
 ) -> dict[str, Any]:
     """Uploads a track and has the system listen to it."""
     with session() as s:
         if s.get(Job, job_id) is None:
-            raise HTTPException(404, "job nao encontrado")
-    media_id = _guardar_media(job_id, audio, MediaKind.AUDIO, size)
+            raise HTTPException(404, "job not found")
+    media_id = _store_media(job_id, audio, MediaKind.AUDIO, size)
     return {"id": media_id, "job_id": job_id, "status": TrackStatus.PENDING}
 
 
@@ -733,35 +734,35 @@ def list_jobs(limit: int = 50, offset: int = 0) -> dict[str, Any]:
 
 #: while the analysis is not finished, the preprocessor is still going to
 #: write the recording's fields -- there is nothing to patch up
-_ANALISANDO = frozenset(
+_ANALYSING = frozenset(
     {JobStatus.PENDING, JobStatus.PREPROCESSING, JobStatus.DETECTING}
 )
 
 
-def _remendar_o_tamanho(job: Job) -> None:
+def _backfill_size(job: Job) -> None:
     """Finds the size of a recording analysed before this column existed.
 
-    O reconciliador de esquema poe a coluna, mas nao tem como saber o que ela
-    deveria valer -- so o upload sabe. Uma partida antiga abriria o editor sem
-    poder dizer se um 9:16 corta o quadro dela. Custa um `ffprobe`, uma vez na
-    vida de cada job. O ffmpeg le o upload onde ele esta -- por `Range`, se
-    estiver no S3 --, entao medir uma gravacao de dois gigas custa o cabecalho
-    dela, e nao os dois gigas.
+    The schema reconciler adds the column, but has no way of knowing what it
+    should hold -- only the upload knows. An old match would open the editor
+    unable to say whether a 9:16 crops its frame. It costs one `ffprobe`, once
+    in each job's life. ffmpeg reads the upload where it is -- via `Range`, if
+    it is on S3 -- so measuring a two-gigabyte recording costs its header, not
+    the two gigabytes.
 
-    Nao vale a pena enquanto a analise esta rodando, e por dois motivos. Um:
-    uma partida *sendo analisada agora* nao e uma partida antiga -- o
-    preprocessador vai gravar o tamanho de verdade em segundos. Dois: o
-    cabecalho e barato, mas le-lo pela rede enquanto o preprocessador baixa o
-    mesmo upload disputa a mesma banda, e a tela consulta de dois em dois
-    segundos. Medido: uma consulta que responde em 0,5s passou de 30s nessa
-    janela, o que a tela mostra como "nao consegui falar com o servidor".
+    It is not worth it while the analysis is running, for two reasons. One: a
+    match *being analysed now* is not an old match -- the preprocessor will
+    write the real size within seconds. Two: the header is cheap, but reading
+    it over the network while the preprocessor downloads the same upload
+    competes for the same bandwidth, and the screen polls every two seconds.
+    Measured: a query that answers in 0.5s went past 30s in that window, which
+    the screen shows as "could not reach the server".
     """
-    if job.width or not job.video_key or job.status in _ANALISANDO:
+    if job.width or not job.video_key or job.status in _ANALYSING:
         return
     try:
         info = probe(get_storage().url(job.video_key))
-    except Exception:  # noqa: BLE001 - um remendo nao derruba a tela do editor
-        LOG.warning("nao deu para medir a gravacao de %s", job.id, exc_info=True)
+    except Exception:  # noqa: BLE001 - a backfill must not bring the editor down
+        LOG.warning("could not measure the recording of %s", job.id, exc_info=True)
         return
     job.width, job.height = info.width, info.height
     if not job.fps:
@@ -773,9 +774,9 @@ def get_job(job_id: str) -> dict[str, Any]:
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
-        _remendar_o_tamanho(job)
-        _adotar_o_rascunho_antigo(s, job)
+            raise HTTPException(404, "job not found")
+        _backfill_size(job)
+        _adopt_old_draft(s, job)
         return _job_dict(job, full=True)
 
 
@@ -783,16 +784,16 @@ def get_job(job_id: str) -> dict[str, Any]:
 def job_video(job_id: str, request: Request) -> Response:
     """The original recording, with `Range`.
 
-    E o que o preview da tela de montage toca: em vez de renderizar o video a
-    cada ajuste -- o que custaria uma volta inteira pelo ffmpeg por arrasto --,
-    o app abre a propria gravacao e busca o instante do bloco sob a cabeca de
-    leitura. O corte de verdade continua acontecendo no servidor; isto aqui e
-    so para ver antes de pedir.
+    It is what the montage screen's preview plays: instead of rendering the
+    video on every adjustment -- which would cost a full trip through ffmpeg
+    per drag -- the app opens the recording itself and seeks to the instant of
+    the block under the playhead. The real cut still happens on the server;
+    this is only for seeing before asking.
     """
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
         key = job.video_key
     mime = VIDEO_MIME.get(Path(key).suffix.lower(), "video/mp4")
     return _serve_blob(key, request, mime)
@@ -800,35 +801,35 @@ def job_video(job_id: str, request: Request) -> Response:
 
 @app.put("/api/jobs/{job_id}/draft")
 def save_draft(job_id: str, draft: dict = Body(...)) -> dict[str, Any]:
-    """Guarda a montage em andamento. **Legado da V1.**
+    """Stores the montage in progress. **V1 legacy.**
 
-    Desde a Fase 8 uma partida tem varias montages nomeadas, e o app salva pelo
-    id de uma delas. Esta rota escreve na mais recente -- e cria a primeira, se
-    nao houver nenhuma --, para que um app anterior continue funcionando em vez
-    de perder o trabalho em silencio.
+    Since Phase 8 a match has several named montages, and the app saves by the
+    id of one of them. This route writes to the most recent one -- and creates
+    the first one if there is none -- so an older app keeps working instead of
+    silently losing work.
     """
-    rascunho = _validate_montage(draft)
+    draft_tl = _validate_montage(draft)
 
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
-        _adotar_o_rascunho_antigo(s, job)
-        atual = max(job.montages, key=lambda m: _hora(m.updated_at), default=None)
-        if atual is None:
-            atual = MontageModel(job_id=job_id, name="Montagem 1")
-            s.add(atual)
-        atual.data = rascunho.model_dump()
-    return {"job_id": job_id, "n_cuts": len(rascunho.clips)}
+            raise HTTPException(404, "job not found")
+        _adopt_old_draft(s, job)
+        current = max(job.montages, key=lambda m: _as_aware(m.updated_at), default=None)
+        if current is None:
+            current = MontageModel(job_id=job_id, name="Montage 1")
+            s.add(current)
+        current.data = draft_tl.model_dump()
+    return {"job_id": job_id, "n_cuts": len(draft_tl.clips)}
 
 
 @app.delete("/api/jobs/{job_id}/draft", status_code=204)
 def delete_draft(job_id: str) -> Response:
-    """Joga as montages desta partida fora e comeca do zero. **Legado da V1.**"""
+    """Throws this match's montages away and starts from scratch. **V1 legacy.**"""
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
         job.draft = {}
         for m in list(job.montages):
             s.delete(m)
@@ -839,20 +840,20 @@ def delete_draft(job_id: str) -> Response:
 def job_proxy(job_id: str, request: Request) -> Response:
     """The reduced copy of the recording, with `Range`.
 
-    E o que o monitor do editor abre. A gravacao original tem centenas de
-    megabytes, e buscar dentro dela dezenas de vezes por segundo enquanto se
-    arrasta chegou a derrubar o elemento de video do navegador. Esta copia sai
-    da mesma decodificacao dos recortes -- custa quase nada -- e o corte final
-    continua vindo do upload original.
+    It is what the editor's monitor opens. The original recording is hundreds
+    of megabytes, and seeking inside it dozens of times a second while dragging
+    used to bring the browser's video element down. This copy comes out of the
+    same decode as the crops -- it costs almost nothing -- and the final cut
+    still comes from the original upload.
     """
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
         key = job.proxy_key
     if not key:
         raise HTTPException(
-            404, "esta partida foi analisada antes do proxy existir"
+            404, "this match was analysed before proxies existed"
         )
     return _serve_blob(key, request, "video/mp4")
 
@@ -861,32 +862,32 @@ def job_proxy(job_id: str, request: Request) -> Response:
 def job_frame(job_id: str, t: float, request: Request) -> Response:
     """A frame of the match at instant `t`, for the editor's sidebar.
 
-    So entrega o que ja existe: quem extrai e o servico `thumbs`. Um 404 aqui
-    quer dizer "ainda nao foi extraida", e o app mostra o lugar dela em vez de
-    ficar sem item.
+    It only delivers what already exists: the `thumbs` service extracts. A 404
+    here means "not extracted yet", and the app shows its placeholder instead
+    of going without the item.
     """
     key = frame_key(job_id, t)
     if not get_storage().exists(key):
-        raise HTTPException(404, "miniatura ainda nao extraida")
-    resposta = _serve_blob(key, request, "image/jpeg")
-    # o quadro de um instante nunca muda: vale a pena o navegador guardar
-    resposta.headers["cache-control"] = "public, max-age=86400"
-    return resposta
+        raise HTTPException(404, "thumbnail not extracted yet")
+    response = _serve_blob(key, request, "image/jpeg")
+    # an instant's frame never changes: worth letting the browser cache it
+    response.headers["cache-control"] = "public, max-age=86400"
+    return response
 
 
 @app.post("/api/jobs/{job_id}/frames", status_code=202)
 def request_frames(job_id: str) -> dict[str, Any]:
     """Requests extraction of the missing thumbnails.
 
-    Jobs novos ja saem com elas -- o planejador pede assim que a analise
-    termina. Isto aqui e para os antigos, e para o caso de alguma ter falhado:
-    o app chama ao abrir o editor, e o servico pula o que ja esta no lugar.
+    New jobs already come with them -- the planner asks as soon as the analysis
+    ends. This is for old ones, and for when one has failed: the app calls it
+    when opening the editor, and the service skips what is already there.
     """
     with session() as s:
         if s.get(Job, job_id) is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
     get_bus().publish(STREAM_THUMBS, ThumbsRequested(job_id=job_id).model_dump())
-    return {"job_id": job_id, "status": "pedido"}
+    return {"job_id": job_id, "status": "requested"}
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)
@@ -894,7 +895,7 @@ def delete_job(job_id: str) -> Response:
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
         s.delete(job)
     return Response(status_code=204)
 
@@ -904,11 +905,11 @@ def clip_video(clip_id: str, request: Request) -> Response:
     with session() as s:
         clip = s.get(Clip, clip_id)
         if clip is None:
-            raise HTTPException(404, "clipe nao encontrado")
+            raise HTTPException(404, "clip not found")
         key = clip.key
     if not key:
         raise HTTPException(
-            404, "a montagem deste clipe falhou; baixe os cortes em cortes.zip"
+            404, "this clip's montage failed; download the cuts from cuts.zip"
         )
     return _serve_blob(key, request, "video/mp4")
 
@@ -918,31 +919,31 @@ def clip_thumb(clip_id: str, request: Request) -> Response:
     with session() as s:
         clip = s.get(Clip, clip_id)
         if clip is None:
-            raise HTTPException(404, "clipe nao encontrado")
+            raise HTTPException(404, "clip not found")
         key = (clip.meta or {}).get("thumb_key")
     if not key:
-        raise HTTPException(404, "sem miniatura")
+        raise HTTPException(404, "no thumbnail")
     return _serve_blob(key, request, "image/jpeg")
 
 
-@app.get("/api/jobs/{job_id}/cortes.zip")
+@app.get("/api/jobs/{job_id}/cuts.zip")
 def job_zip(job_id: str, request: Request) -> Response:
     """Everything the match generated, in a single file.
 
-    Montado na hora a partir do que ja esta no storage -- os videos finais e os
-    cortes avulsos de cada montage --, em vez de guardar um terceiro package
-    com os mesmos bytes. Como o zip so empacota (os mp4 ja estao comprimidos),
-    o custo e basicamente o de copiar.
+    Built on the spot from what is already in storage -- the final videos and
+    each montage's loose cuts -- instead of keeping a third package with the
+    same bytes. Since the zip only packs (the mp4s are already compressed), the
+    cost is basically that of copying.
     """
     storage = get_storage()
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
+            raise HTTPException(404, "job not found")
         if not job.clips:
-            raise HTTPException(404, "esta partida ainda nao tem videos")
-        base_name = Path(job.video_name or "partida").stem
-        # um job rende varios pedidos ao longo do tempo; o package traz todos,
+            raise HTTPException(404, "this match has no videos yet")
+        base_name = Path(job.video_name or "match").stem
+        # a job yields several requests over time; the package brings them all,
         # each in its own folder, so the same kind of video generated twice
         # with different music does not overwrite itself
         order = {r.id: n for n, r in enumerate(
@@ -961,22 +962,22 @@ def job_zip(job_id: str, request: Request) -> Response:
     package = tmp / "package.zip"
     try:
         with zipfile.ZipFile(package, "w", zipfile.ZIP_STORED) as zf:
-            for i, n_pedido, kind, video_key, cortes_key in items:
-                folder = f"pedido_{n_pedido:02d}" if n_pedido else "videos"
+            for i, n_request, kind, video_key, cuts_key in items:
+                folder = f"request_{n_request:02d}" if n_request else "videos"
                 if video_key and storage.exists(video_key):
                     local = storage.get_file(video_key, tmp / f"v{i}.mp4")
                     zf.write(local, f"{folder}/videos/{i:02d}_{kind}.mp4")
                     local.unlink(missing_ok=True)
-                if not cortes_key or not storage.exists(cortes_key):
+                if not cuts_key or not storage.exists(cuts_key):
                     continue
-                local = storage.get_file(cortes_key, tmp / f"c{i}.zip")
-                with zipfile.ZipFile(local) as origem:
-                    for info in origem.infolist():
-                        destino = f"{folder}/cortes/{i:02d}_{kind}/{info.filename}"
-                        # copia chunk a chunk: `origem.read(nome)` punha um
-                        # a whole cut in memory at a time
-                        with origem.open(info) as entrada,                                 zf.open(destino, "w") as saida:
-                            shutil.copyfileobj(entrada, saida, CHUNK)
+                local = storage.get_file(cuts_key, tmp / f"c{i}.zip")
+                with zipfile.ZipFile(local) as source:
+                    for info in source.infolist():
+                        dest = f"{folder}/cuts/{i:02d}_{kind}/{info.filename}"
+                        # copy chunk by chunk: `source.read(name)` put a whole
+                        # cut in memory at a time
+                        with source.open(info) as src_fh, zf.open(dest, "w") as dst_fh:
+                            shutil.copyfileobj(src_fh, dst_fh, CHUNK)
                 local.unlink(missing_ok=True)
         total = package.stat().st_size
     except BaseException:
@@ -986,11 +987,11 @@ def job_zip(job_id: str, request: Request) -> Response:
     def send_chunks() -> Iterator[bytes]:
         """Delivers the package in chunks and only then deletes the temp dir.
 
-        O `read_bytes()` que estava aqui punha o package **inteiro** na memoria
-        do gateway -- uma partida com alguns pedidos sao centenas de MB, por
-        requisicao simultanea, e o processo que serve a API e o mesmo que serve
-        o app. Streaming mantem o custo em um chunk de cada vez, e o upload
-        temporario ja estava em disco de qualquer forma.
+        The `read_bytes()` that used to be here put the **whole** package in the
+        gateway's memory -- a match with a few requests is hundreds of MB, per
+        concurrent request, and the process serving the API is the same one
+        serving the app. Streaming keeps the cost at one chunk at a time, and
+        the temporary file was on disk anyway.
         """
         try:
             with open(package, "rb") as fh:
@@ -1006,29 +1007,29 @@ def job_zip(job_id: str, request: Request) -> Response:
         send_chunks(),
         media_type="application/zip",
         headers={
-            "content-disposition": f'attachment; filename="{base_name}_cortes.zip"',
+            "content-disposition": f'attachment; filename="{base_name}_cuts.zip"',
             "content-length": str(total),
         },
     )
 
 
-@app.get("/api/clips/{clip_id}/cortes.zip")
+@app.get("/api/clips/{clip_id}/cuts.zip")
 def clip_segments_zip(clip_id: str, request: Request) -> Response:
-    """Os cortes individuais da montage, num zip.
+    """The montage's individual cuts, in a zip.
 
-    Serve para reeditar por fora: cada upload e um trecho, nomeado pelo
-    instante de onde saiu na gravacao original.
+    For re-editing elsewhere: each file is a stretch, named after the instant
+    it came from in the original recording.
     """
     with session() as s:
         clip = s.get(Clip, clip_id)
         if clip is None:
-            raise HTTPException(404, "clipe nao encontrado")
+            raise HTTPException(404, "clip not found")
         key = (clip.meta or {}).get("segments_zip_key")
-        nome = f"cortes_{clip.kind}_{clip.id}.zip"
+        name = f"cuts_{clip.kind}_{clip.id}.zip"
     if not key:
-        raise HTTPException(404, "este clipe nao tem cortes separados")
+        raise HTTPException(404, "this clip has no separate cuts")
     response = _serve_blob(key, request, "application/zip")
-    response.headers["content-disposition"] = f'attachment; filename="{nome}"'
+    response.headers["content-disposition"] = f'attachment; filename="{name}"'
     return response
 
 
@@ -1040,16 +1041,16 @@ def profile() -> dict[str, Any]:
     return load_profile(get_settings().profile).data
 
 
-# ── montages nomeadas ──────────────────────────────────────────────────────
+# ── named montages ─────────────────────────────────────────────────────────
 
 
-def _hora(t: datetime | None) -> datetime:
+def _as_aware(t: datetime | None) -> datetime:
     """A record's timestamp, always with a timezone.
 
-    O SQLite guarda `datetime` sem fuso, entao uma linha lida do banco volta
-    ingenua enquanto uma criada nesta mesma requisicao ainda esta com o fuso que
-    `utcnow()` deu. Ordenar as duas juntas estoura -- e e exatamente o que
-    acontece ao listar as montages logo depois de criar uma.
+    SQLite stores `datetime` without a timezone, so a row read from the
+    database comes back naive while one created in this same request still has
+    the timezone `utcnow()` gave it. Sorting both together blows up -- which is
+    exactly what happens when listing the montages right after creating one.
     """
     if t is None:
         return utcnow()
@@ -1059,12 +1060,12 @@ def _hora(t: datetime | None) -> datetime:
 def _iso(t: datetime | None) -> str:
     """The timestamp as text, **with the timezone written out**.
 
-    Sem o sufixo de fuso, quem le do outro lado trata a data como hora local --
-    e o Dart faz exatamente isso. Como o que sai daqui e UTC, o app mostrava
-    todo horario adiantado pelo fuso do usuario, e qualquer conta de "quanto
-    falta" a partir de `created_at` dava tempo negativo.
+    Without the timezone suffix, the reader on the other side treats the date
+    as local time -- and Dart does exactly that. Since what leaves here is UTC,
+    the app showed every time shifted by the user's timezone, and any "time
+    left" computed from `created_at` came out negative.
     """
-    return _hora(t).isoformat()
+    return _as_aware(t).isoformat()
 
 
 def _montage_dict(m: MontageModel, *, full: bool = False) -> dict[str, Any]:
@@ -1082,76 +1083,77 @@ def _montage_dict(m: MontageModel, *, full: bool = False) -> dict[str, Any]:
     return d
 
 
-def _adotar_o_rascunho_antigo(s: Any, job: Job) -> None:
+def _adopt_old_draft(s: Any, job: Job) -> None:
     """Brings the job's single montage into the list of named montages.
 
-    Ate a Fase 8 havia uma so, numa coluna do proprio job. Fazer isto na
-    leitura, e nao numa migracao de banco, e a mesma escolha do resto do
-    sistema: quem sabe converter o formato velho e o codigo que le, e assim uma
-    partida parada ha meses continua abrindo.
+    Until Phase 8 there was a single one, in a column of the job itself. Doing
+    this on read, and not in a database migration, is the same choice as the
+    rest of the system: the code that reads is what knows how to convert the
+    old format, and so a match untouched for months still opens.
     """
     if not job.draft or job.montages:
         return
     # through the relationship, not through `s.add`: that way `job.montages`
     # already sees it within this same request, which is where it must appear
     job.montages.append(
-        MontageModel(name=job.draft.get("title") or "Montagem 1", data=job.draft)
+        MontageModel(name=job.draft.get("title") or "Montage 1", data=job.draft)
     )
     # the column is cleared so there are not two truths about the same montage
     job.draft = {}
     s.flush()
 
 
-def _nome_livre(existentes: Sequence[Any], base: str) -> str:
+def _free_name(existing: Sequence[Any], base: str) -> str:
     """A name that is not on the list yet.
 
-    Nomes repetidos numa lista de escolher e o mesmo que nome nenhum.
+    Repeated names in a list to pick from are as good as no names at all.
     """
-    nomes = {m.name for m in existentes}
-    if base not in nomes:
+    names = {m.name for m in existing}
+    if base not in names:
         return base
     for i in range(2, 100):
-        tentativa = f"{base} {i}"
-        if tentativa not in nomes:
-            return tentativa
+        attempt = f"{base} {i}"
+        if attempt not in names:
+            return attempt
     return f"{base} {new_id()[:4]}"
 
 
 def _get_montage(s: Any, job_id: str, montage_id: str) -> MontageModel:
     m = s.get(MontageModel, montage_id)
     if m is None or m.job_id != job_id:
-        raise HTTPException(404, "montagem nao encontrada nesta partida")
+        raise HTTPException(404, "montage not found in this match")
     return m
 
 
 def _check_layers(spec: Any, sounds: dict[str, str]) -> None:
     """A layer either draws or plays -- and its content must match its kind.
 
-    Uma musica numa camada de video faria o ffmpeg tentar redimensionar um fluxo
-    de audio, e o render inteiro morreria com uma mensagem que nao explica nada.
-    Uma imagem numa camada de audio seria pior: ela nao tem som, entao sairia em
-    silencio, sem erro nenhum, e o usuario procuraria o problema na mixagem.
+    Music on a video layer would make ffmpeg try to resize an audio stream, and
+    the whole render would die with a message that explains nothing. An image
+    on an audio layer would be worse: it has no sound, so it would come out
+    silent, with no error at all, and the user would look for the problem in
+    the mix.
     """
-    for camada in spec.layers:
-        for clip in camada.clips:
-            e_som = bool(clip.media_id) and clip.media_id in sounds
-            if camada.is_audio and not e_som:
+    for layer in spec.layers:
+        for clip in layer.clips:
+            is_sound = bool(clip.media_id) and clip.media_id in sounds
+            if layer.is_audio and not is_sound:
                 raise HTTPException(
                     422,
-                    "uma camada de audio so aceita musica da biblioteca",
+                    "an audio layer only accepts music from the library",
                 )
-            if not camada.is_audio and e_som:
+            if not layer.is_audio and is_sound:
                 raise HTTPException(
                     422,
-                    f"a midia {clip.media_id!r} e som: ela vai numa camada "
-                    "de audio",
+                    f"media {clip.media_id!r} is sound: it goes on an audio "
+                    "layer",
                 )
             # without the analysis finished there is neither beat nor
             # duration; it is also a sign the app sent it too early
-            if e_som and sounds[clip.media_id] != TrackStatus.READY:
+            if is_sound and sounds[clip.media_id] != TrackStatus.READY:
                 raise HTTPException(
                     409,
-                    f"a musica {clip.media_id} ainda nao foi analisada "
+                    f"music {clip.media_id} has not been analysed yet "
                     f"(status: {sounds[clip.media_id]})",
                 )
 
@@ -1160,7 +1162,7 @@ def _validate_montage(data: dict) -> MontageDraft:
     try:
         return MontageDraft(**(data or {}))
     except ValidationError as exc:
-        raise HTTPException(422, f"montagem invalida: {exc}") from exc
+        raise HTTPException(422, f"invalid montage: {exc}") from exc
 
 
 @app.get("/api/jobs/{job_id}/montages")
@@ -1169,9 +1171,9 @@ def list_montages(job_id: str) -> dict[str, Any]:
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
-        _adotar_o_rascunho_antigo(s, job)
-        montages = sorted(job.montages, key=lambda m: _hora(m.updated_at), reverse=True)
+            raise HTTPException(404, "job not found")
+        _adopt_old_draft(s, job)
+        montages = sorted(job.montages, key=lambda m: _as_aware(m.updated_at), reverse=True)
         return {
             "job_id": job_id,
             "items": [_montage_dict(m, full=True) for m in montages],
@@ -1179,24 +1181,24 @@ def list_montages(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/jobs/{job_id}/montages", status_code=201)
-def create_montage(job_id: str, corpo: dict = Body(default={})) -> dict[str, Any]:
+def create_montage(job_id: str, body: dict = Body(default={})) -> dict[str, Any]:
     """Starts a new montage, empty or from given content.
 
-    Sao trabalhos diferentes sobre o mesmo material -- o corte de 30 s para o
-    Shorts e a montage longa --, e ate aqui era preciso escolher um.
+    They are different jobs over the same material -- the 30 s cut for Shorts
+    and the long montage -- and until now one had to be chosen.
     """
-    dados = corpo.get("data") or {}
-    _validate_montage(dados)
+    data = body.get("data") or {}
+    _validate_montage(data)
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
-            raise HTTPException(404, "job nao encontrado")
-        _adotar_o_rascunho_antigo(s, job)
-        nome = str(corpo.get("name") or "").strip()
+            raise HTTPException(404, "job not found")
+        _adopt_old_draft(s, job)
+        name = str(body.get("name") or "").strip()
         m = MontageModel(
             job_id=job_id,
-            name=_nome_livre(job.montages, nome or f"Montagem {len(job.montages) + 1}"),
-            data=dados,
+            name=_free_name(job.montages, name or f"Montage {len(job.montages) + 1}"),
+            data=data,
         )
         s.add(m)
         s.flush()
@@ -1205,24 +1207,24 @@ def create_montage(job_id: str, corpo: dict = Body(default={})) -> dict[str, Any
 
 @app.put("/api/jobs/{job_id}/montages/{montage_id}")
 def save_montage(
-    job_id: str, montage_id: str, corpo: dict = Body(...)
+    job_id: str, montage_id: str, body: dict = Body(...)
 ) -> dict[str, Any]:
     """Stores the montage. It is what the app calls by itself while editing.
 
-    Um corte invalido e recusado aqui: guardar lixo agora seria devolver lixo na
-    proxima abertura.
+    An invalid cut is refused here: storing garbage now would mean handing
+    garbage back on the next opening.
     """
     with session() as s:
         m = _get_montage(s, job_id, montage_id)
-        if "data" in corpo:
-            rascunho = _validate_montage(corpo["data"])
-            m.data = rascunho.model_dump()
-        if "name" in corpo:
-            nome = str(corpo["name"] or "").strip()
-            if not nome:
-                raise HTTPException(422, "uma montagem sem nome nao da para achar")
-            outras = [o for o in m.job.montages if o.id != m.id]
-            m.name = _nome_livre(outras, nome)
+        if "data" in body:
+            draft_tl = _validate_montage(body["data"])
+            m.data = draft_tl.model_dump()
+        if "name" in body:
+            name = str(body["name"] or "").strip()
+            if not name:
+                raise HTTPException(422, "a montage without a name cannot be found")
+            others = [o for o in m.job.montages if o.id != m.id]
+            m.name = _free_name(others, name)
         s.flush()
         return _montage_dict(m)
 
@@ -1231,19 +1233,19 @@ def save_montage(
 def duplicate_montage(job_id: str, montage_id: str) -> dict[str, Any]:
     """A copy, to experiment without risking the one that is already good.
 
-    A copia nao leva o historico da original: as snapshots dizem por onde *aquela*
-    montage passou, e a copia ainda nao passou por lugar nenhum.
+    The copy does not take the original's history: the snapshots say where
+    *that* montage has been, and the copy has not been anywhere yet.
     """
     with session() as s:
         original = _get_montage(s, job_id, montage_id)
-        copia = MontageModel(
+        copy = MontageModel(
             job_id=job_id,
-            name=_nome_livre(original.job.montages, f"{original.name} (copia)"),
+            name=_free_name(original.job.montages, f"{original.name} (copy)"),
             data=dict(original.data or {}),
         )
-        s.add(copia)
+        s.add(copy)
         s.flush()
-        return _montage_dict(copia, full=True)
+        return _montage_dict(copy, full=True)
 
 
 @app.delete("/api/jobs/{job_id}/montages/{montage_id}", status_code=204)
@@ -1253,13 +1255,13 @@ def delete_montage(job_id: str, montage_id: str) -> Response:
     return Response(status_code=204)
 
 
-# ── historico de versoes ────────────────────────────────────────────────────
+# ── version history ─────────────────────────────────────────────────────────
 
 #: how many snapshots each montage keeps. Past that, the oldest goes.
 #:
 #: This is not undo -- that lives in the app. These are markers, and twenty
 #: markers is already more history than anyone scrolls through in a list.
-MAX_VERSOES = 20
+MAX_VERSIONS = 20
 
 
 def _version_dict(v: MontageVersion, *, full: bool = False) -> dict[str, Any]:
@@ -1275,17 +1277,17 @@ def _version_dict(v: MontageVersion, *, full: bool = False) -> dict[str, Any]:
     return d
 
 
-def _guardar_foto(m: MontageModel, label: str) -> MontageVersion | None:
+def _take_snapshot(m: MontageModel, label: str) -> MontageVersion | None:
     """Takes a snapshot of the montage as it stands now.
 
-    Recusa a snapshot identica a ultima: gerar o mesmo video duas vezes seguidas
-    nao produziu version nenhuma, e uma lista de estados iguais nao ajuda
-    ninguem a achar o "estava bom ontem".
+    Refuses a snapshot identical to the last one: rendering the same video twice
+    in a row produced no new version, and a list of identical states helps
+    nobody find the "it was good yesterday".
     """
     if not m.data:
         return None
-    ultima = max(m.versions, key=lambda v: _hora(v.created_at), default=None)
-    if ultima is not None and ultima.data == m.data:
+    latest = max(m.versions, key=lambda v: _as_aware(v.created_at), default=None)
+    if latest is not None and latest.data == m.data:
         return None
 
     # the timestamp comes from here, and not from the column's `default`:
@@ -1293,8 +1295,8 @@ def _guardar_foto(m: MontageModel, label: str) -> MontageVersion | None:
     # cannot even be sorted
     snapshot = MontageVersion(label=label, data=dict(m.data), created_at=utcnow())
     m.versions.append(snapshot)
-    velhas = sorted(m.versions, key=lambda v: _hora(v.created_at), reverse=True)
-    for v in velhas[MAX_VERSOES:]:
+    newest_first = sorted(m.versions, key=lambda v: _as_aware(v.created_at), reverse=True)
+    for v in newest_first[MAX_VERSIONS:]:
         m.versions.remove(v)
     return snapshot
 
@@ -1304,20 +1306,20 @@ def list_versions(job_id: str, montage_id: str) -> dict[str, Any]:
     """This montage's snapshots, most recent first."""
     with session() as s:
         m = _get_montage(s, job_id, montage_id)
-        snapshots = sorted(m.versions, key=lambda v: _hora(v.created_at), reverse=True)
+        snapshots = sorted(m.versions, key=lambda v: _as_aware(v.created_at), reverse=True)
         return {"montage_id": montage_id, "items": [_version_dict(v) for v in snapshots]}
 
 
 @app.post("/api/jobs/{job_id}/montages/{montage_id}/versions", status_code=201)
 def create_version(
-    job_id: str, montage_id: str, corpo: dict = Body(default={})
+    job_id: str, montage_id: str, body: dict = Body(default={})
 ) -> dict[str, Any]:
     """Marks the montage as it stands: the "it was good like this"."""
     with session() as s:
         m = _get_montage(s, job_id, montage_id)
-        snapshot = _guardar_foto(m, str(corpo.get("label") or "marcada a mao"))
+        snapshot = _take_snapshot(m, str(body.get("label") or "marked by hand"))
         if snapshot is None:
-            raise HTTPException(409, "nao ha nada de novo para marcar")
+            raise HTTPException(409, "there is nothing new to mark")
         s.flush()
         return _version_dict(snapshot, full=True)
 
@@ -1326,15 +1328,15 @@ def create_version(
 def restore_version(job_id: str, montage_id: str, version_id: str) -> dict[str, Any]:
     """Rolls the montage back to a snapshot.
 
-    O estado de agora vira snapshot antes -- restaurar nunca apaga trabalho, so
-    troca o que esta na frente.
+    The current state becomes a snapshot first -- restoring never deletes work,
+    it only swaps what is in front.
     """
     with session() as s:
         m = _get_montage(s, job_id, montage_id)
         snapshot = s.get(MontageVersion, version_id)
         if snapshot is None or snapshot.montage_id != montage_id:
-            raise HTTPException(404, "versao nao encontrada nesta montagem")
-        _guardar_foto(m, "antes de restaurar")
+            raise HTTPException(404, "version not found in this montage")
+        _take_snapshot(m, "before restoring")
         m.data = dict(snapshot.data or {})
         s.flush()
         return _montage_dict(m, full=True)
@@ -1348,12 +1350,12 @@ def delete_version(job_id: str, montage_id: str, version_id: str) -> Response:
         m = _get_montage(s, job_id, montage_id)
         snapshot = s.get(MontageVersion, version_id)
         if snapshot is None or snapshot.montage_id != montage_id:
-            raise HTTPException(404, "versao nao encontrada nesta montagem")
+            raise HTTPException(404, "version not found in this montage")
         m.versions.remove(snapshot)
     return Response(status_code=204)
 
 
-# ── predefinicoes ───────────────────────────────────────────────────────────
+# ── presets ─────────────────────────────────────────────────────────────────
 
 
 def _preset_dict(p: Preset) -> dict[str, Any]:
@@ -1370,7 +1372,7 @@ def _validate_recipe(data: dict) -> Recipe:
     try:
         return Recipe(**(data or {}))
     except ValidationError as exc:
-        raise HTTPException(422, f"receita invalida: {exc}") from exc
+        raise HTTPException(422, f"invalid recipe: {exc}") from exc
 
 
 @app.get("/api/presets")
@@ -1383,15 +1385,15 @@ def list_presets() -> dict[str, Any]:
 
 
 @app.post("/api/presets", status_code=201)
-def create_preset(corpo: dict = Body(...)) -> dict[str, Any]:
-    nome = str(corpo.get("name") or "").strip()
-    if not nome:
-        raise HTTPException(422, "uma predefinicao sem nome nao da para achar")
-    receita = _validate_recipe(corpo.get("data") or {})
+def create_preset(body: dict = Body(...)) -> dict[str, Any]:
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(422, "a preset without a name cannot be found")
+    recipe = _validate_recipe(body.get("data") or {})
     with session() as s:
-        existentes = s.execute(select(Preset)).scalars().all()
+        existing = s.execute(select(Preset)).scalars().all()
         p = Preset(
-            name=_nome_livre(existentes, nome), data=receita.model_dump(mode="json")
+            name=_free_name(existing, name), data=recipe.model_dump(mode="json")
         )
         s.add(p)
         s.flush()
@@ -1399,21 +1401,21 @@ def create_preset(corpo: dict = Body(...)) -> dict[str, Any]:
 
 
 @app.put("/api/presets/{preset_id}")
-def update_preset(preset_id: str, corpo: dict = Body(...)) -> dict[str, Any]:
+def update_preset(preset_id: str, body: dict = Body(...)) -> dict[str, Any]:
     with session() as s:
         p = s.get(Preset, preset_id)
         if p is None:
-            raise HTTPException(404, "predefinicao nao encontrada")
-        if "data" in corpo:
-            p.data = _validate_recipe(corpo["data"]).model_dump(mode="json")
-        if "name" in corpo:
-            nome = str(corpo["name"] or "").strip()
-            if not nome:
-                raise HTTPException(422, "uma predefinicao sem nome nao da para achar")
-            outros = [
+            raise HTTPException(404, "preset not found")
+        if "data" in body:
+            p.data = _validate_recipe(body["data"]).model_dump(mode="json")
+        if "name" in body:
+            name = str(body["name"] or "").strip()
+            if not name:
+                raise HTTPException(422, "a preset without a name cannot be found")
+            others = [
                 o for o in s.execute(select(Preset)).scalars().all() if o.id != p.id
             ]
-            p.name = _nome_livre(outros, nome)
+            p.name = _free_name(others, name)
         s.flush()
         return _preset_dict(p)
 
@@ -1423,7 +1425,7 @@ def delete_preset(preset_id: str) -> Response:
     with session() as s:
         p = s.get(Preset, preset_id)
         if p is None:
-            raise HTTPException(404, "predefinicao nao encontrada")
+            raise HTTPException(404, "preset not found")
         s.delete(p)
     return Response(status_code=204)
 
@@ -1432,11 +1434,11 @@ def delete_preset(preset_id: str) -> Response:
 #
 # With the app served by the gateway itself, Flutter calls the API on a
 # relative path and the same build works on any host, with no recompiling and
-# configurar CORS. Se ninguem rodou `flutter build web`, o mount simplesmente
-# does not happen and the API stays available on its own. The check is on
-# `index.html`, and not on the directory: in Docker the bind mount creates the
-# folder empty even when nobody compiled the app, and mounting StaticFiles on
-# transformaria a raiz do site em 404.
+# no CORS setup. If nobody ran `flutter build web`, the mount simply does not
+# happen and the API stays available on its own. The check is on `index.html`,
+# and not on the directory: in Docker the bind mount creates the folder empty
+# even when nobody compiled the app, and mounting StaticFiles on it would turn
+# the site root into a 404.
 
 _web = Path(get_settings().web_dir)
 if (_web / "index.html").is_file():
@@ -1445,6 +1447,6 @@ if (_web / "index.html").is_file():
     app.mount("/", StaticFiles(directory=str(_web), html=True), name="web")
 
 
-# O mount fica **por ultimo** de proposito: ele casa com qualquer caminho, e
-# toda rota registrada depois dele fica inalcancavel -- um `POST` numa delas
-# volta 405, porque quem responde e o servidor de arquivos.
+# The mount comes **last** on purpose: it matches any path, and every route
+# registered after it becomes unreachable -- a `POST` to one of them returns
+# 405, because the file server is what answers.

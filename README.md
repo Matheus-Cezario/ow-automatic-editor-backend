@@ -1,29 +1,29 @@
 # OW Editor — backend
 
-Microsserviços Python que recebem a gravação de uma partida, separam os
-momentos importantes e — quando o usuário escolhe — montam os vídeos. Roda
-sozinho: o frontend é opcional, e a API é navegável em
+Python microservices that take a match recording, find the key moments in it
+and — when the user asks — render the videos they assembled. It runs on its
+own: the frontend is optional, and the API is browsable at
 <http://localhost:8000/docs>.
 
-> Todos os comandos abaixo assumem que você está **na raiz deste repositório**.
+> All commands below assume you are **at the root of this repository**.
 
-**A documentação do sistema mora aqui:**
+**The system's documentation lives here:**
 
-| Documento | O que tem |
+| Document | What it has |
 |---|---|
-| [`docs/PRODUTO.md`](docs/PRODUTO.md) | o produto inteiro: as duas fases, os dois caminhos para virar vídeo, e o que está verificado e o que não está |
-| [`docs/PLAN.md`](docs/PLAN.md) | arquitetura, detecção, regras dos melhores momentos, montagem manual e o contrato REST |
-| [`docs/V2.md`](docs/V2.md) | o editor completo, em oito fases — **todas feitas**, cada uma com o que ficou de fora e por quê |
+| [`docs/PRODUCT.md`](docs/PRODUCT.md) | the whole product: the two phases, how a video comes out, and what is verified and what is not |
+| [`docs/PLAN.md`](docs/PLAN.md) | architecture, detection, manual montage and the REST contract |
+| [`docs/V2.md`](docs/V2.md) | the full editor, in phases — **all done**, each with what was left out and why |
 
-O app Flutter é um repositório à parte, e o `docker-compose.yml` (que orquestra
-os dois) vive com ele. Em disco os dois ficam lado a lado — `ow_editor/backend`
-e `ow_editor/frontend` —, e é assim que o compose os encontra.
+The Flutter app is a separate repository. On disk the two sit side by side —
+`ow-automatic-editor-backend` and `ow-automatic-editor-frontend` — and that is
+how the `docker-compose.yml` here finds the compiled app.
 
 ---
 
-## Rodando
+## Running
 
-### Sem Docker (só Python + ffmpeg)
+### Without Docker (just Python + ffmpeg)
 
 ```bash
 python -m venv .venv && .venv/Scripts/activate    # Linux/macOS: source .venv/bin/activate
@@ -32,235 +32,240 @@ pip install -r requirements-dev.txt
 python tools/dev.py
 ```
 
-Sobe os dez processos usando fila em disco, storage em pasta e SQLite —
-nenhum servidor externo. Cada microsserviço continua sendo um processo à
-parte falando pelo barramento; o que muda é só a implementação por trás das
-interfaces.
+Starts the processes using a disk queue, folder storage and SQLite — no
+external server. Each microservice is still a separate process talking over the
+bus; only the implementation behind the interfaces changes.
 
-### Com Docker
+### With Docker
 
-O `docker-compose.yml` fica na raiz do repositório, porque também monta o app
-Flutter no gateway:
+The `docker-compose.yml` sits at the root of this repository:
 
 ```bash
-cd .. && docker compose up --build
+docker compose up --build
 ```
+
+- App + API → <http://localhost:8000>
+- S3 console → <http://localhost:9001> (`minioadmin` / `minioadmin`)
+
+The gateway serves the compiled Flutter app from
+`../ow-automatic-editor-frontend/build/web` (another folder can be given with
+`OW_FRONTEND_WEB`). Without a build the folder is empty and the gateway serves
+only the API.
 
 ---
 
-## Testando
+## Testing
 
 ```bash
-# gera o vídeo sintético que os testes de precisão usam (uma vez só)
+# generates the synthetic video the accuracy tests use (once)
 python tools/make_sample.py --out data/sample/match.mp4 \
-    --music data/sample/music.wav --ult-templates data/sample/ult_templates \n    --ability-icons data/sample/ability_icons
+    --music data/sample/music.wav --ult-templates data/sample/ult_templates \
+    --ability-icons data/sample/ability_icons
 
 pytest tests/ -q
 ```
 
-São 261 testes em cinco camadas:
+About 250 tests in five layers:
 
-| Arquivo | O que cobre |
+| File | What it covers |
 |---|---|
-| `test_rules.py` | as regras de highlight e o encaixe da montagem na janela de música — função pura, sem tocar em vídeo |
-| `test_infra.py` | barramento (fan-out entre grupos, competição dentro do grupo), storage, primitivas de visão, marcação de cor dos recortes |
-| `test_detectors.py` | precisão de cada detector contra o gabarito do vídeo sintético: as duas habilidades do rodapé não se confundirem, o acerto crítico não sair da caveira de eliminação, a ultimate do jogador ser marcada no instante em que **é usada** e não enquanto o botão está carregado, e a linha do killfeed valer **uma** eliminação por mais tempo que ela fique na tela |
-| `test_pipeline.py` | as duas fases atravessando todos os serviços — é o que verifica os *contratos* das mensagens, mais músicas diferentes por vídeo, a janela de música, o áudio original e o zip dos cortes |
-| `test_timeline.py` | a montagem manual e o editor da V2: a matemática da linha do tempo (buraco vira preto, corte aparado não move o vizinho), camadas, efeitos e texto conferidos **no pixel** do mp4 que saiu, a exportação (dimensão, fps e trecho por `ffprobe`; `cover` contra `contain`), o reaproveitamento da imagem ao trocar de música, as várias montagens nomeadas com histórico e predefinições, a música na régua (camada de som, blocos cortados e posicionados, o silêncio entre eles) e a conversão da faixa contínua antiga em bloco na leitura, mais as entregas com `Range` que o app usa para tocar a música e mostrar o preview |
+| `test_rules.py` | the rule that crosses two detectors' events (negated ultimates) — a pure function, without touching video |
+| `test_infra.py` | bus (fan-out across groups, competition within a group), storage, vision primitives, colour tagging of the crops |
+| `test_detectors.py` | each detector's accuracy against the synthetic video's ground truth: the two footer abilities not being confused, critical hits not coming out of the kill skull, the player's ultimate being marked at the instant it **is used** and not while the button is charged, and a killfeed line counting as **one** kill however long it stays on screen |
+| `test_pipeline.py` | both phases going through every service — this is what checks the messages' *contracts*, plus the original audio and the cuts zip |
+| `test_timeline.py` | manual montage and the V2 editor: the timeline maths (a gap becomes black, a trimmed cut does not move its neighbour), layers, effects, text and transitions checked **on the pixels** of the output mp4, export (size, fps and range via `ffprobe`; `cover` versus `contain`), several named montages with history and presets, music on the ruler (an audio layer, trimmed and positioned blocks, the silence between them) and converting the old continuous track into a block on read, plus the `Range` deliveries the app uses to play the music and show the preview |
 
-Os testes que dependem do vídeo sintético se auto-pulam se ele não existir,
-dizendo como gerá-lo.
+Tests that depend on the synthetic video skip themselves if it does not exist,
+saying how to generate it.
 
 ---
 
-## Arquitetura
+## Architecture
 
-O sistema tem **duas fases**, e elas não se misturam.
+The system has **two phases**, and they do not mix.
 
-**Fase 1 — análise.** Roda uma vez por gravação, sozinha, e termina em `ready`
-com a linha do tempo da partida — o que aconteceu, e quando:
+**Phase 1 — analysis.** Runs once per recording, on its own, and ends at
+`ready` with the match's timeline — what happened, and when:
 
 ```
 gateway ──▶ preprocessor ──▶ detector_kills    ──┐
  (API)      (1 decode,       detector_survival   │
-            N recortes)      detector_ults       ├──▶ planner ──▶ eventos
-                             detector_banner     │  (fecha e     + `ready`
-                             detector_killfeed ──┘   cruza)
+            N crops)         detector_ults       ├──▶ planner ──▶ events
+                             detector_banner     │  (closes and   + `ready`
+                             detector_killfeed ──┘   crosses)
 ```
 
-**Fase 2 — edição.** O usuário monta na linha do tempo e manda gerar, quantas
-vezes quiser:
+**Phase 2 — editing.** The user assembles on the timeline and asks for a
+render, as many times as they like:
 
 ```
-gateway ──▶ editor ──▶ clipes
- (API)     (cortes,
-            camadas,
-            trilha)
+gateway ──▶ editor ──▶ clips
+ (API)     (cuts,
+            layers,
+            music)
 ```
 
-O sistema **não propõe vídeos prontos**. Já propôs: o planner aplicava regras
-(rajada, "sozinho contra todos", montagem no ritmo) e o app oferecia a lista
-para escolher. Isso saiu. O que a análise entrega são os momentos, e o que se
-faz com eles é do editor.
+The system **does not propose ready-made videos**. It used to: the planner
+applied rules (kill streak, "solo wipe", beat montage) and the app offered the
+list to pick from. That is gone. What the analysis delivers is the moments, and
+what is done with them belongs to the editor.
 
-Barramento com *consumer groups*: o preprocessor publica uma vez e cada
-detector recebe a sua mensagem. Um mesmo recorte pode ir para dois detectores
-— a tira do killfeed vai para `ults` e para `killfeed` —, e isso não custa
-decodificação nenhuma: o recorte é feito uma vez e o mesmo blob é endereçado
-aos dois. As perguntas é que são diferentes. O planner só age quando todos os
-esperados reportaram — e a transição para `ready` é reivindicada atomicamente no
-banco, para vários avisos chegando juntos não cruzarem os eventos em dobro.
+A bus with *consumer groups*: the preprocessor publishes once and each detector
+receives its own message. The same crop can go to two detectors — the killfeed
+strip goes to `ults` and to `killfeed` — and that costs no extra decoding: the
+crop is made once and the same blob is addressed to both. It is the questions
+that differ. The planner only acts when every expected detector has reported —
+and the transition to `ready` is claimed atomically in the database, so several
+reports arriving together do not cross the events twice.
 
-É nesse fechamento que nascem os eventos que **nenhum detector vê sozinho**: uma
-ultimate anulada é ultimate inimiga seguida de eliminação, e só quem tem os dois
-tipos na mesma lista a enxerga.
+It is in that closing step that the events **no detector sees alone** are born:
+a negated ultimate is an enemy ultimate followed by a kill, and only whoever has
+both kinds in the same list can see it.
 
-O `thumbs` extrai um quadro de cada momento para a barra lateral do editor.
-Escuta o fim da análise num *consumer group* próprio — recebe o mesmo aviso
-que ela e trabalha em paralelo, sem segurar o job em `ready`. A chave de
-cada quadro sai do instante, então não há tabela nem coluna para eles.
+`thumbs` extracts one frame per moment for the editor's sidebar. It listens to
+the end of the analysis in its own *consumer group* — it receives the same
+notice and works in parallel, without holding the job at `ready`. Each frame's
+key comes from its instant, so there is no table or column for them.
 
-Um detector que falha **não derruba o job**: ele registra o erro no relatório
-e libera o fim da análise, que entrega o que os outros acharam.
+A detector that fails **does not bring the job down**: it records the error in
+its report and releases the end of the analysis, which delivers what the others
+found.
 
-O `beats` **não é um detector**: ele não olha a partida e não entra na análise.
-Ele ouve o que o usuário traz para a biblioteca do editor — música, clipe ou
-imagem — e devolve o que a tela de montagem precisa para deixar montar com
-aquilo: duração, BPM, batidas e um envelope reduzido a ~40 pontos por segundo
-para a música; miniatura, dimensões e um proxy para vídeo e imagem.
+`beats` **is not a detector**: it does not look at the match and takes no part
+in the analysis. It listens to what the user brings into the editor's library —
+music, clip or image — and returns what the montage screen needs to assemble
+with it: duration, BPM, beats and an envelope reduced to ~40 points per second
+for music; thumbnail, dimensions and a proxy for video and image.
 
-A música chega antes de existir vídeo nenhum: é ouvindo-a, com as batidas e a
-forma de onda na tela, que se decide onde cada corte cai. Vídeo sem música na
-régua sai com o **áudio original** da partida.
+The music arrives before any video exists: it is by listening to it, with the
+beats and the waveform on screen, that one decides where each cut falls. A video
+with no music on the ruler comes out with the match's **original audio**.
 
-> Este serviço já tinha um segundo laço, no começo da geração: quando o app
-> escolhia propostas prontas, cada uma podia vir com a sua música, e alguém
-> tinha de analisá-las antes de o editor cortar. Sem propostas, o pedido nasce
-> pronto e vai direto ao editor.
+### The two modes
 
-### Os dois modos
+Each infrastructure dependency has two implementations behind the same
+interface, chosen by `OW_MODE`:
 
-Cada dependência de infra tem duas implementações atrás da mesma interface,
-escolhidas por `OW_MODE`:
-
-| | `local` (padrão) | `docker` |
+| | `local` (default) | `docker` |
 |---|---|---|
-| Fila | arquivos em `data/bus` | Redis Streams |
-| Storage | pasta `data/blobs` | MinIO (S3) |
-| Banco | SQLite | PostgreSQL |
+| Queue | files in `data/bus` | Redis Streams |
+| Storage | folder `data/blobs` | S3 (RustFS in the compose) |
+| Database | SQLite | PostgreSQL |
 
-### Estrutura
+### Layout
 
 ```
-packages/owcore/   núcleo compartilhado, instalado em cada serviço
-  bus.py           barramento (Redis Streams | fila em disco)
-  storage.py       blobs (MinIO/S3 | pasta)
+packages/owcore/   shared core, installed in each service
+  bus.py           bus (Redis Streams | disk queue)
+  storage.py       blobs (S3 | folder)
   db.py            SQLAlchemy (Postgres | SQLite)
-  models.py        domínio + tabelas + mensagens do barramento
-  rules.py         regras de highlight (função pura)
-  timeline.py      montagem manual: blocos → pedaços a cortar (função pura)
-  vision.py        primitivas de visão computacional — inclui o banco de
-                   ícones de habilidade e o glifo que o alimenta
-  ffmpeg.py        recorte, corte, concatenação, trilha
-  audio.py         leitura de WAV e forma de onda (música e partida)
-  compose.py       linha do tempo em camadas -> grafo de filtros (função pura)
-  textfx.py        texto -> `drawtext`, com o escape que o filtergraph exige
-  fonts.py         onde está a fonte; falha alto quando não há nenhuma
-  detector.py      base dos microsserviços detectores
-  worker.py        laço de consumo, ack, encerramento limpo
-services/          um diretório por microsserviço
-config/profiles/   posições e cores da HUD
-templates/         ícones de referência — veja templates/README.md
-tools/             gerador de exemplo, calibração, runner local,
-                   baixador dos ícones de habilidade
+  models.py        domain + tables + bus messages
+  rules.py         rules that cross detectors (pure function)
+  timeline.py      manual montage: blocks → pieces to cut (pure function)
+  vision.py        computer vision primitives — includes the ability icon
+                   bank and the glyph that feeds it
+  ffmpeg.py        cropping, cutting, concatenation, music
+  audio.py         WAV reading and waveform (music and match)
+  compose.py       layered timeline -> filter graph (pure function)
+  textfx.py        text -> `drawtext`, with the escaping the filtergraph needs
+  fonts.py         where the font is; fails loudly when there is none
+  detector.py      base of the detector microservices
+  worker.py        consume loop, ack, clean shutdown
+services/          one directory per microservice
+config/profiles/   HUD positions and colours
+templates/         reference icons — see templates/README.md
+tools/             sample generator, calibration, local runner,
+                   ability icon downloader
 tests/
 ```
 
 ---
 
-## Calibração — leia antes de usar com gameplay real
+## Calibration — read before using real gameplay
 
-Os detectores procuram elementos da HUD em posições e cores definidas em
-`config/profiles/ow2_default.json`. O perfil que vem no repositório foi
-calibrado contra gameplay real de Overwatch 2 em 16:9 (medido em 360p; a HUD do
-OW2 escala com a resolução, então os valores normalizados valem de 360p a 4K).
+The detectors look for HUD elements at positions and colours defined in
+`config/profiles/ow2_default.json`. The profile in the repository was
+calibrated against real Overwatch 2 gameplay at 16:9 (measured at 360p; the OW2
+HUD scales with resolution, so the normalised values hold from 360p to 4K).
 
-Ainda assim, **idioma, modo daltônico, proporção fora de 16:9 e patches do jogo
-mudam posições e cores**. Se o sistema não achar nada na sua gravação, comece
-por aqui.
+Even so, **language, colour-blind mode, aspect ratios other than 16:9 and game
+patches change positions and colours**. If the system finds nothing in your
+recording, start here.
 
-> **Nota sobre cor.** O preprocessor grava os recortes com tags de cor BT.601
-> explícitas, e isso não é cosmético: os detectores decidem por saturação, e a
-> matriz YUV→RGB muda exatamente a saturação. Sem essas tags, o mesmo arquivo
-> era lido com saturação 231 na máquina host e 205 dentro do container — e o
-> detector achava 20 eliminações num lugar e 10 no outro, com o mesmo código.
-> `tests/test_infra.py` trava essa marcação.
+> **A note on colour.** The preprocessor writes the crops with explicit BT.601
+> colour tags, and that is not cosmetic: the detectors decide by saturation, and
+> the YUV→RGB matrix changes exactly the saturation. Without those tags, the
+> same file was read with saturation 231 on the host and 205 inside the
+> container — and the detector found 20 kills in one place and 10 in the other,
+> with the same code. `tests/test_infra.py` pins that tagging.
 
 ```bash
-# 1. As regiões estão no lugar certo? Desenha os retângulos sobre quadros reais.
-python tools/calibrate.py preview --video partida.mp4 --at 30 90 150
+# 1. Are the regions in the right place? Draws the rectangles over real frames.
+python tools/calibrate.py preview --video match.mp4 --at 30 90 150
 
-# 2. Que limiar usar? Mede a região quadro a quadro e sugere os números.
-python tools/calibrate.py scan --video partida.mp4 --roi kills
+# 2. Which threshold? Measures the region frame by frame and suggests numbers.
+python tools/calibrate.py scan --video match.mp4 --roi kills
 ```
 
-Depois copie o perfil, ajuste e rode com `OW_PROFILE=meu_perfil`.
+Then copy the profile, adjust it and run with `OW_PROFILE=my_profile`.
 
-### Os ícones de habilidade
+### The ability icons
 
-Dois detectores dizem **qual** habilidade apareceu comparando o desenho da HUD
-com o ícone oficial dela: o de ultimates (o disco do botão do rodapé) e o de
-killfeed (a caixinha entre as duas placas). Os ícones são assets do jogo e não
-acompanham o repositório — baixe uma vez:
+Two detectors say **which** ability showed up by comparing the HUD drawing with
+its official icon: the ultimates one (the footer button's disc) and the
+killfeed one (the small box between the two plates). The icons are game assets
+and are not shipped with the repository — download them once:
 
 ```bash
 python tools/fetch_ability_icons.py
 ```
 
-São ~270 arquivos, um por habilidade de cada herói, em
-`templates/abilities/<herói>/<habilidade>.png`. A lista sai da página oficial
-de heróis da Blizzard (via a OverFast API), então herói novo entra rodando o
-comando de novo — não há lista escrita no repositório para envelhecer.
+That is ~270 files, one per ability of each hero, in
+`templates/abilities/<hero>/<ability>.png`. The list comes from Blizzard's
+official heroes page (via the OverFast API), so a new hero comes in by running
+the command again — there is no list written in the repository to go stale.
 
-Sem eles o sistema **continua funcionando**: a ultimate do jogador continua
-sendo detectada, só sem dizer de quem era; o detector de killfeed, esse fica
-calado, porque uma eliminação sem saber com que habilidade foi é o que o
-detector da mira já reporta.
+Without them the system **keeps working**: the player's ultimate is still
+detected, just without saying whose it was; the killfeed detector stays quiet,
+because a kill without knowing which ability made it is what the crosshair
+detector already reports.
 
 ---
 
-## Configuração
+## Configuration
 
-Tudo por variável de ambiente com prefixo `OW_` (veja `.env.example`):
+Everything through environment variables prefixed `OW_` (see `.env.example`):
 
-| Variável | Padrão | Para quê |
+| Variable | Default | What for |
 |---|---|---|
-| `OW_MODE` | `local` | `local` ou `docker` |
-| `OW_PROFILE` | `ow2_default` | perfil da HUD |
-| `OW_DATA_DIR` | `./data` | uploads, recortes, clipes, fila |
-| `OW_WEB_DIR` | `../frontend/build/web` | app Flutter compilado, se houver |
-| `OW_DATABASE_URL` | derivado do modo | SQLite ou Postgres |
-| `OW_REDIS_URL` | `redis://localhost:6379/0` | barramento no modo docker |
-| `OW_S3_*` | MinIO local | storage no modo docker |
-| `OW_DETECTOR_TIMEOUT_S` | `900` | quando o planner desiste de um detector mudo |
-| `OW_STREAM_MAXLEN` | `10000` | teto de mensagens por stream do Redis. Sem ele a RAM do Redis cresce com o número de partidas já processadas: `XACK` não apaga a entrada |
-| `OW_BUS_RETENTION_S` | `3600` | quanto uma mensagem já concluída por todos os grupos fica na fila em disco antes de ser varrida (modo local) |
-| `OW_DB_POOL_SIZE` / `OW_DB_MAX_OVERFLOW` | `2` / `3` | conexões por processo. O padrão serve a um worker de uma thread; o gateway sobe para `10`/`10` no compose |
+| `OW_MODE` | `local` | `local` or `docker` |
+| `OW_PROFILE` | `ow2_default` | HUD profile |
+| `OW_DATA_DIR` | `./data` | uploads, crops, clips, queue |
+| `OW_WEB_DIR` | `../frontend/build/web` | the compiled Flutter app, if any |
+| `OW_DATABASE_URL` | derived from the mode | SQLite or Postgres |
+| `OW_REDIS_URL` | `redis://localhost:6379/0` | bus in docker mode |
+| `OW_S3_*` | local S3 | storage in docker mode |
+| `OW_DETECTOR_TIMEOUT_S` | `900` | when the planner gives up on a silent detector |
+| `OW_STREAM_MAXLEN` | `10000` | cap on messages per Redis stream. Without it Redis RAM grows with the number of matches already processed: `XACK` does not delete the entry |
+| `OW_BUS_RETENTION_S` | `3600` | how long a message already finished by every group stays in the disk queue before being swept (local mode) |
+| `OW_DB_POOL_SIZE` / `OW_DB_MAX_OVERFLOW` | `2` / `3` | connections per process. The default suits a single-threaded worker; the gateway raises it to `10`/`10` in the compose |
 
-### Memória
+### Memory
 
-O sistema tem um **piso** de uns 700 MB só para existir: são onze processos
-Python, e os cinco detectores carregam OpenCV e numpy cada um (~80 MB de RSS
-antes de processar qualquer coisa). É o preço da separação em microsserviços —
-não há vazamento aí, e reduzi-lo de verdade significaria juntar detectores num
-processo só.
+The system has a **floor** of about 700 MB just to exist: it is eleven Python
+processes, and the five detectors each load OpenCV and numpy (~80 MB of RSS
+before processing anything). That is the price of splitting into microservices
+— there is no leak there, and really reducing it would mean merging detectors
+into a single process.
 
-O que **não** é piso, e por isso foi corrigido:
+What is **not** floor, and was therefore fixed:
 
-* a onda do áudio era calculada carregando o WAV inteiro na memória três vezes
-  (~370 MB de pico numa partida de 20 min, para produzir 6000 números). Hoje é
-  lida em blocos, com teto fixo de ~11 MB independente da duração;
-* o pacote `cortes.zip` da partida era montado em disco e depois lido **inteiro**
-  para a memória do gateway antes de sair. Hoje é transmitido em pedaços;
-* os streams do Redis não eram aparados e a fila em disco não apagava nada;
-* o ffmpeg tinha a saída de erro acumulada sem teto, para no fim usar 25 linhas.
+* the audio waveform used to be computed by loading the whole WAV into memory
+  three times (~370 MB peak on a 20-min match, to produce 6000 numbers). Today
+  it is read in blocks, with a fixed ceiling of ~11 MB regardless of duration;
+* the match's `cuts.zip` package used to be built on disk and then read
+  **whole** into the gateway's memory before going out. Today it is streamed in
+  chunks;
+* the Redis streams were not trimmed and the disk queue deleted nothing;
+* ffmpeg's error output was accumulated without a cap, only to use 25 lines in
+  the end.

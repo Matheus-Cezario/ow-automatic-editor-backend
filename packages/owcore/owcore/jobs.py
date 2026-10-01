@@ -43,7 +43,7 @@ def set_status(
 
 
 def fail(job_id: str, message: str) -> None:
-    set_status(job_id, JobStatus.FAILED, stage="erro", error=message[:4000])
+    set_status(job_id, JobStatus.FAILED, stage="error", error=message[:4000])
 
 
 def get_params(job_id: str) -> JobParams:
@@ -126,7 +126,7 @@ def claim_for_planning(job_id: str) -> bool:
         result = s.execute(
             update(Job)
             .where(Job.id == job_id, Job.status == JobStatus.DETECTING)
-            .values(status=JobStatus.READY, stage="analise concluida", progress=1.0)
+            .values(status=JobStatus.READY, stage="analysis complete", progress=1.0)
         )
         return bool(result.rowcount)
 
@@ -155,7 +155,7 @@ def set_render_status(
 
 def fail_render(render_id: str, message: str) -> None:
     set_render_status(
-        render_id, RenderStatus.FAILED, stage="erro", error=message[:4000]
+        render_id, RenderStatus.FAILED, stage="error", error=message[:4000]
     )
 
 

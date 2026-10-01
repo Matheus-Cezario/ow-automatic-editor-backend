@@ -66,7 +66,7 @@ def detect_kills(
 
     bank = TemplateBank.from_dir(templates_dir) if templates_dir else TemplateBank({})
     if bank:
-        log.info("%d template(s) de caveira carregado(s)", len(bank))
+        log.info("%d skull template(s) loaded", len(bank))
 
     times: list[float] = []
     scores: list[float] = []
@@ -128,7 +128,7 @@ def detect_kills(
                 meta=meta,
             )
         )
-    log.info("%d eliminacao(oes) detectada(s)", len(events))
+    log.info("%d kill(s) detected", len(events))
     return events
 
 
@@ -253,5 +253,5 @@ def detect_headshots(roi_video: Path, profile: Profile) -> list[DetectionEvent]:
         )
         for p in pulses
     ]
-    log.info("%d acerto(s) critico(s)", len(events))
+    log.info("%d critical hit(s)", len(events))
     return events

@@ -57,7 +57,7 @@ class Worker(ABC):
                 signal.signal(sig, self.stop)
             except (ValueError, OSError):  # no signals outside the main thread
                 pass
-        self.log.info("ouvindo '%s' como grupo '%s'", self.stream, self.group)
+        self.log.info("listening on '%s' as group '%s'", self.stream, self.group)
         while self._running:
             try:
                 got = False
@@ -70,7 +70,7 @@ class Worker(ABC):
             except KeyboardInterrupt:
                 self.stop()
             except Exception:
-                self.log.exception("erro no laço do worker; tentando de novo em 2s")
+                self.log.exception("error in the worker loop; retrying in 2s")
                 time.sleep(2.0)
         self.log.info("parado.")
 

@@ -1,4 +1,4 @@
-# dependencias comuns a todos os microsservicos python
+# dependencies shared by every Python microservice
 pydantic>=2.6
 pydantic-settings>=2.2
 sqlalchemy>=2.0

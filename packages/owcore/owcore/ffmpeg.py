@@ -28,13 +28,13 @@ def _run(cmd: Sequence[str]) -> str:
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-25:]
         raise FFmpegError(
-            f"{cmd[0]} saiu com {proc.returncode}:\n" + "\n".join(tail)
+            f"{cmd[0]} exited with {proc.returncode}:\n" + "\n".join(tail)
         )
     return proc.stdout
 
 
-def _run_acompanhado(
-    cmd: Sequence[str], duracao_s: float, avanco: Callable[[float], None]
+def _run_with_progress(
+    cmd: Sequence[str], duration_s: float, on_progress: Callable[[float], None]
 ) -> None:
     """Runs ffmpeg reporting how far along it is, from 0 to 1.
 
@@ -56,20 +56,20 @@ def _run_acompanhado(
     # only the last lines matter, and only they are kept: a damaged recording
     # makes ffmpeg complain **per frame**, and an uncapped list grew with the
     # video duration only to hand over 25 lines in the end
-    resto: deque[str] = deque(maxlen=25)
+    rest: deque[str] = deque(maxlen=25)
     assert proc.stdout is not None
-    for linha in proc.stdout:
-        linha = linha.strip()
-        chave, _, valor = linha.partition("=")
-        if chave == "out_time_us" and valor.lstrip("-").isdigit():
-            if duracao_s > 0:
-                avanco(max(0.0, min(1.0, int(valor) / 1e6 / duracao_s)))
-        elif "=" not in linha and linha:
+    for line in proc.stdout:
+        line = line.strip()
+        key, _, value = line.partition("=")
+        if key == "out_time_us" and value.lstrip("-").isdigit():
+            if duration_s > 0:
+                on_progress(max(0.0, min(1.0, int(value) / 1e6 / duration_s)))
+        elif "=" not in line and line:
             # not a progress line: this is ffmpeg complaining
-            resto.append(linha)
+            rest.append(line)
     if proc.wait() != 0:
         raise FFmpegError(
-            f"{cmd[0]} saiu com {proc.returncode}:\n" + "\n".join(resto)
+            f"{cmd[0]} exited with {proc.returncode}:\n" + "\n".join(rest)
         )
 
 
@@ -103,15 +103,15 @@ def probe(path: Path | str) -> MediaInfo:
         # here is what turns a report nobody can act on into one that names the
         # thing to do.
         raise FFmpegError(
-            f"nao consegui ler o video em {path}: o arquivo parece corrompido "
-            f"ou incompleto.\n{exc}"
+            f"could not read the video at {path}: the file looks corrupted "
+            f"or incomplete.\n{exc}"
         ) from exc
     data = json.loads(out)
     streams = data.get("streams", [])
     video = next((x for x in streams if x.get("codec_type") == "video"), None)
     audio = next((x for x in streams if x.get("codec_type") == "audio"), None)
     if video is None:
-        raise FFmpegError(f"nenhum stream de vídeo em {path}")
+        raise FFmpegError(f"no video stream in {path}")
 
     num, _, den = (video.get("avg_frame_rate") or "0/1").partition("/")
     try:
@@ -146,7 +146,7 @@ def extract_rois(
     and each detector receives only the band of pixels that matters, already at
     low resolution and low FPS.
 
-    `on_progress` recebe 0..1 conforme o recorte anda. Vale passar: numa
+    `on_progress` receives 0..1 as the cropping advances. Worth passing: on a
     match recording this call alone is ~3/4 of the total analysis time, and
     without it the screen sits on the same number for minutes.
     """
@@ -172,7 +172,7 @@ def extract_rois(
         # `min(width_px, iw)`: never *upscale*. On a 360p recording the
         # native crop is ~100px wide, and stretching it to 320 only invents
         # pixels and triples the file without adding information.
-        # (a virgula precisa de escape: no filtergraph ela separa filtros)
+        # (the comma needs escaping: in a filtergraph it separates filters)
         chains.append(
             f"[{label}]{crop}scale=min({roi.width_px}\\,iw):-2:flags=bilinear,"
             f"fps={roi.fps}[o{i}]"
@@ -207,7 +207,7 @@ def extract_rois(
     if on_progress is None:
         _run(cmd)
     else:
-        _run_acompanhado(cmd, probe(src).duration_s, on_progress)
+        _run_with_progress(cmd, probe(src).duration_s, on_progress)
     return outputs
 
 
@@ -262,7 +262,7 @@ def cut(
 def concat(parts: Sequence[Path], dest: Path, *, mute: bool = False) -> Path:
     """Concatenates via the `concat` demuxer, re-encoding (immune to PTS drift)."""
     if not parts:
-        raise FFmpegError("nada para concatenar")
+        raise FFmpegError("nothing to concatenate")
     s = get_settings()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -347,9 +347,8 @@ def proxy(src: Path, dest: Path, *, width: int = 640, fps: float = 24.0) -> Path
 
     The match recording gets its own for free, inside the decode that already
     extracts the crops. An **imported** video does not go through that pass,
-    and
-    por isso precisa da sua aqui — ainda vale a pena: buscar dentro do arquivo
-    dragging the full file on every seek is what brings the player down.
+    and so needs its own here -- still worth it: seeking inside the full file
+    on every drag is what brings the player down.
     """
     s = get_settings()
     dest = Path(dest)

@@ -100,7 +100,7 @@ class RedisBus(Bus):
         self.r.xack(stream, group, msg_id)
 
 
-# ────────────────────────────── fila em disco ───────────────────────────────
+# ──────────────────────────────── disk queue ────────────────────────────────
 
 
 #: Marker of a finished message. Delivered-but-unfinished carries the

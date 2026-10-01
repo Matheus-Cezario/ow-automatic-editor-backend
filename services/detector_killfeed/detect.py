@@ -150,16 +150,16 @@ def _line_icon(
 
 
 def _read_killer(bgr: np.ndarray, killer: Plate, line: "_Line") -> None:
-    """Guarda o nome escrito na placa de quem matou.
+    """Stores the name written on the killer's plate.
 
-    So le quando a placa esta mais larga do que ja se viu nesta linha. A linha
-    entra deslizando e a placa vai se abrindo: nos primeiros quadros o nome
-    ainda esta pela metade, e comparar meia palavra com o nome inteiro do
-    jogador so responde "nao". A placa mais larga e a do nome inteiro.
+    It only reads when the plate is wider than anything seen so far on this
+    line. The line slides in and the plate opens up: in the first frames the
+    name is still half shown, and comparing half a word with the player's full
+    name only ever answers "no". The widest plate is the one with the full name.
 
-    Enquanto nao houver leitura nenhuma insiste-se a cada quadro: a placa mais
-    larga pode ter calhado de ser a que uma explosao cobriu, e desistir dela
-    seria descartar a linha por um quadro ruim.
+    While there is no reading at all, it tries again on every frame: the widest
+    plate may happen to be the one an explosion covered, and giving up on it
+    would throw the line away over one bad frame.
     """
     if killer.w <= line.plate_w and line.killer_name is not None:
         return
@@ -182,27 +182,27 @@ def detect_ability_kills(
     bank = IconBank.from_dir(icons_dir)
     if not bank:
         log.warning(
-            "sem icones em %s -- este detector fica desligado. "
-            "Rode tools/fetch_ability_icons.py para baixa-los.",
+            "no icons in %s -- this detector is off. "
+            "Run tools/fetch_ability_icons.py to download them.",
             icons_dir,
         )
         return []
-    log.info("%d icone(s) de habilidade carregado(s)", len(bank))
+    log.info("%d ability icon(s) loaded", len(bank))
 
-    # Sem saber quem e o jogador nao ha eliminacao a reportar: o killfeed
-    # anuncia as dez, e escolher as do jogador exige o nome dele. Devolver
-    # tudo seria voltar ao que estava errado -- eliminacao de colega de time
-    # entrando na montagem como se fosse do usuario.
+    # Without knowing who the player is there is no kill to report: the
+    # killfeed announces all ten players', and picking the player's needs their
+    # name. Returning everything would go back to what was wrong -- a
+    # teammate's kill entering the montage as if it were the user's.
     player = read_player_name(player_video, profile.roi("player").fps) if player_video else None
     if player is None:
         log.warning(
-            "nao consegui ler o nome do jogador na placa do rodape -- sem ele "
-            "nao da para saber de quem foi cada eliminacao, e este detector "
-            "fica desligado"
+            "could not read the player's name on the footer plate -- without it "
+            "there is no telling whose each kill was, and this detector "
+            "stays off"
         )
         return []
     log.info(
-        "nome do jogador lido: %d letra(s), em %.0f%% dos quadros",
+        "player name read: %d letter(s), in %.0f%% of frames",
         len(player.letters), 100 * player.agreement,
     )
 
@@ -281,12 +281,12 @@ def detect_ability_kills(
 
     events: list[DetectionEvent] = []
     per_ability: dict[str, int] = {}
-    dos_outros = 0
+    by_others = 0
     for ln in lines:
         if not player.matches(ln.killer_name, name_threshold):
-            # a linha existe e a habilidade foi reconhecida, mas quem matou foi
-            # outra pessoa: nao e material do usuario
-            dos_outros += 1
+            # the line exists and the ability was recognised, but the killer
+            # was someone else: not the user's material
+            by_others += 1
             continue
         hero, _, ability = ln.key.partition("/")
         per_ability[ln.key] = per_ability.get(ln.key, 0) + 1
@@ -305,10 +305,10 @@ def detect_ability_kills(
             )
         )
     for key, n in sorted(per_ability.items()):
-        log.info("%s: %d eliminacao(oes)", key, n)
-    if dos_outros:
-        log.info("%d linha(s) descartada(s): quem matou nao foi o jogador",
-                 dos_outros)
+        log.info("%s: %d kill(s)", key, n)
+    if by_others:
+        log.info("%d line(s) discarded: the killer was not the player",
+                 by_others)
 
     events.sort(key=lambda e: e.t)
     return events
@@ -337,10 +337,10 @@ class _Line:
     key: str
     score: float
     style: str
-    #: o nome escrito na placa de quem matou, letra a letra. E o que separa a
-    #: eliminacao do jogador da do colega de time.
+    #: the name written on the killer's plate, letter by letter. It is what
+    #: separates the player's kill from a teammate's.
     killer_name: list[np.ndarray] | None = None
-    #: a maior largura ja vista da placa de quem matou -- ver `_read_killer`
+    #: the widest the killer's plate has been seen -- see `_read_killer`
     plate_w: int = 0
 
     def same_as(self, killer: Plate, victim: Plate, t: float, slide: float) -> bool:

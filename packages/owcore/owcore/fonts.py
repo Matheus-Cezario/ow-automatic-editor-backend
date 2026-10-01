@@ -40,7 +40,7 @@ def default_font() -> str:
         if Path(path).is_file():
             return path
     raise FileNotFoundError(
-        "nenhuma fonte encontrada para o texto; aponte uma em OW_FONT"
+        "no font found for text; point one at OW_FONT"
     )
 
 

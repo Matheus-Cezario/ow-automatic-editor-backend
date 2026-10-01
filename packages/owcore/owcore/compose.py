@@ -518,7 +518,7 @@ def _clip_input(
         item = library.get(clip.media_id or "")
         if item is None:
             raise ValueError(
-                f"a midia {clip.media_id!r} nao esta na biblioteca deste job"
+                f"media {clip.media_id!r} is not in this job's library"
             )
         if item.is_image:
             # an image does not run in time: it goes in on a loop and lasts
@@ -546,7 +546,7 @@ def _clip_input(
 
     # solid colour arrives when it is missed; ignoring it silently would be
     # worse than refusing it
-    raise ValueError(f"fonte '{clip.source}' ainda nao e montavel")
+    raise ValueError(f"source '{clip.source}' cannot be rendered yet")
 
 
 def compose_graph(
@@ -585,7 +585,7 @@ def compose_graph(
     end = min(exp.to_s, timeline.duration_s) if exp.to_s else timeline.duration_s
     duration = max(0.0, end - start)
     if duration <= 0:
-        raise ValueError("o trecho pedido para exportar esta vazio")
+        raise ValueError("the requested export range is empty")
     c = Composition(duration_s=duration, crf=exp.crf)
 
     # the background canvas: it is what shows at every instant nobody covered
@@ -716,13 +716,13 @@ def compose_graph(
                     (music_audio if layer.is_audio else cut_audio).append(f"a{n}")
 
     if n == 0:
-        raise ValueError("nenhum clipe cai dentro da gravacao")
+        raise ValueError("no clip falls inside the recording")
 
     if exp.watermark_id:
         mark = (library or {}).get(exp.watermark_id)
         if mark is None:
             raise ValueError(
-                f"a marca d'agua {exp.watermark_id!r} nao esta na biblioteca"
+                f"watermark {exp.watermark_id!r} is not in the library"
             )
         c.inputs.append(Input(path=str(mark.path), loop=mark.is_image,
                               duration=duration if mark.is_image else None))

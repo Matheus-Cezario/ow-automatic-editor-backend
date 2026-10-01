@@ -33,7 +33,7 @@ def iter_frames(path: Path, fps_hint: float | None = None) -> Iterator[Frame]:
     ``fps`` filter, i.e. CFR -- so ``t = index / fps``."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
-        raise RuntimeError(f"não consegui abrir {path}")
+        raise RuntimeError(f"could not open {path}")
     fps = fps_hint or cap.get(cv2.CAP_PROP_FPS) or 10.0
     if fps <= 0:
         fps = fps_hint or 10.0
@@ -231,11 +231,12 @@ def find_icon(
 
     * it is a **compact blob with a near-square aspect** -- the damage
       indicator is a wide, flattened arc;
-    * nasce **centrado na mira** -- o indicador de dano fica num raio acima dela;
+    * it is born **centred on the crosshair** -- the damage indicator sits on a
+      radius above it;
     * it has a **characteristic size**. That last one was the missing filter:
       with the minimum at 0.4% of the region, any 20-pixel red splash got
       through, and that is what made "all red become a kill". The skull
-      ocupa de 5% a 14% da ROI; respingos ficam abaixo de 2.5%.
+      takes 5% to 14% of the ROI; splashes stay below 2.5%.
 
     Returns None when nothing in the ROI looks like an icon.
     """
@@ -324,7 +325,7 @@ class TemplateBank:
                 continue
             img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
             if img is None:
-                log.warning("template ilegível, ignorando: %s", f.name)
+                log.warning("unreadable template, skipping: %s", f.name)
                 continue
             if img.shape[1] > max_width:
                 scale = max_width / img.shape[1]
@@ -333,13 +334,13 @@ class TemplateBank:
             out[f.stem] = img
         return cls(out)
 
-    #: o template vem de um recorte do usuario, que raramente esta na mesma
-    #: escala do que o pipeline entrega; testar algumas escalas evita que um
-    #: template correto passe batido por ser 20% maior ou menor
+    #: the template comes from a user's crop, which is rarely at the same scale
+    #: the pipeline delivers; trying a few scales keeps a correct template from
+    #: being missed for being 20% larger or smaller
     SCALES = (0.7, 0.85, 1.0, 1.2, 1.45)
 
     def best_match(self, bgr: np.ndarray) -> tuple[str | None, float]:
-        """Melhor (nome, score) entre todos os templates, em varias escalas."""
+        """Best (name, score) across all templates, at several scales."""
         if not self.templates:
             return None, 0.0
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -386,7 +387,7 @@ def find_pulses(
     min_duration: float = 0.0,
     min_gap: float = 0.0,
 ) -> list[Pulse]:
-    """Histerese de Schmitt: sobe acima de ``rise``, só termina abaixo de
+    """Schmitt hysteresis: rises above ``rise``, only ends below
     ``fall``. That avoids counting a flickering icon as several occurrences."""
     pulses: list[Pulse] = []
     active = False
@@ -419,19 +420,19 @@ def find_pulses(
 
 # --------------------- glyphs: the mark inside an icon ---------------------
 #
-# O casamento de template de `TemplateBank` desliza o molde pela imagem em
+# `TemplateBank`'s template matching slides the template across the image at
 # several scales. It works when you do not know *where* the icon is -- but
 # when you do (the ultimate button, the killfeed box), it is expensive and
 # fragile: the game icon shows up sometimes black on a white disc, sometimes
 # white on a dark box, at sizes that change with the recording's resolution.
 #
-# Para esse caso vale mais recortar a **marca** — os pixels que formam o
-# drawing, without background -- fit it into a square and always compare at
+# For that case it is better to cut out the **mark** -- the pixels that form
+# the drawing, without background -- fit it into a square and always compare at
 # the same size. Position, scale and polarity then stop mattering, and the
 # comparison becomes an inner product: the whole bank fits in one matrix.
 
-#: lado do glifo normalizado, em pixels. 56 separa bem as ~270 habilidades do
-#: jogo e ainda deixa o banco inteiro numa matriz de poucos megabytes.
+#: side of the normalised glyph, in pixels. 56 separates the game's ~270
+#: abilities well and still keeps the whole bank in a matrix of a few MB.
 GLYPH_SIDE = 56
 
 
@@ -466,8 +467,8 @@ def normalized_glyph(mask: np.ndarray) -> np.ndarray | None:
 def glyph_on_dark(bgr: np.ndarray, *, max_sat: int = 90, min_val: int = 170) -> np.ndarray | None:
     """The bright mark of an icon drawn over a dark background.
 
-    É assim que o killfeed mostra a habilidade que matou: desenho branco numa
-    caixinha cinza.
+    That is how the killfeed shows the ability that killed: a white drawing in a
+    small grey box.
     """
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     return normalized_glyph((hsv[:, :, 1] < max_sat) & (hsv[:, :, 2] > min_val))
@@ -481,7 +482,7 @@ def glyph_in_disc(
     max_sat: int = 70,
     min_val: int = 185,
 ) -> np.ndarray | None:
-    """A marca escura desenhada dentro de um disco branco.
+    """The dark mark drawn inside a white disc.
 
     It is the shape the game uses for *ultimates*: in the footer button and in
     the killfeed box, an ultimate comes as a white disc with the drawing in
@@ -510,7 +511,7 @@ def glyph_in_disc(
 
 
 class IconBank:
-    """Ícones de habilidade do jogo, prontos para comparar com um glifo.
+    """The game's ability icons, ready to compare with a glyph.
 
     Each file is a black mark on a white background, and its name -- hero
     folder plus ability name -- becomes the event's label. The templates sit in
@@ -545,11 +546,11 @@ class IconBank:
             for f in sorted(path.rglob("*.png")):
                 img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
                 if img is None:
-                    log.warning("ícone ilegível, ignorando: %s", f)
+                    log.warning("unreadable icon, skipping: %s", f)
                     continue
                 glyph = normalized_glyph(img < 128)
                 if glyph is None:
-                    log.warning("ícone sem marca legível, ignorando: %s", f)
+                    log.warning("icon without a readable mark, skipping: %s", f)
                     continue
                 keys.append(f"{f.parent.name}/{f.stem}")
                 vectors.append(cls._vector(glyph))

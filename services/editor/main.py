@@ -49,30 +49,30 @@ class Editor(Worker):
         storage = get_storage()
 
         with session() as s:
-            pedido = s.get(Render, render_id)
-            if pedido is None:
-                self.log.warning("pedido %s sumiu; ignorando", render_id)
+            request = s.get(Render, render_id)
+            if request is None:
+                self.log.warning("request %s is gone; skipping", render_id)
                 return
-            if pedido.clips:
-                self.log.info("pedido %s ja foi gerado; ignorando", render_id)
+            if request.clips:
+                self.log.info("request %s was already rendered; skipping", render_id)
                 return
-            job = s.get(Job, pedido.job_id)
+            job = s.get(Job, request.job_id)
             if job is None:
                 return
             job_id, video_key = job.id, job.video_key
-            timelines = [Timeline(**d) for d in (pedido.timelines or [])]
+            timelines = [Timeline(**d) for d in (request.timelines or [])]
 
         if not timelines:
             set_render_status(
                 render_id, RenderStatus.FAILED,
-                stage="nada escolhido",
-                error="o pedido nao trouxe linha do tempo nenhuma",
+                stage="nothing chosen",
+                error="the request brought no timeline at all",
             )
             return
 
         set_render_status(
             render_id, RenderStatus.RENDERING,
-            stage="preparando os cortes", progress=0.1,
+            stage="preparing the cuts", progress=0.1,
         )
 
         work = Path(settings.work_dir) / job_id / "renders" / render_id
@@ -83,15 +83,15 @@ class Editor(Worker):
         if not items:
             set_render_status(
                 render_id, RenderStatus.FAILED,
-                stage="montagens nao encontradas",
-                error="o pedido nao trouxe nenhuma montagem que se possa cortar",
+                stage="montages not found",
+                error="the request brought no montage that can be cut",
             )
             return
 
         def progress(done: float) -> None:
             set_render_status(
                 render_id, progress=0.1 + 0.85 * done,
-                stage=f"renderizando ({int(done * 100)}%)",
+                stage=f"rendering ({int(done * 100)}%)",
             )
 
         clips = render.render_all(
@@ -136,17 +136,17 @@ class Editor(Worker):
         if not clips:
             set_render_status(
                 render_id, RenderStatus.FAILED,
-                stage="nada pode ser cortado", progress=1.0,
-                error="nenhum dos videos pedidos pode ser gerado",
+                stage="nothing can be cut", progress=1.0,
+                error="none of the requested videos can be rendered",
             )
             return
 
-        stage_text = f"{with_video} video(s) prontos"
+        stage_text = f"{with_video} video(s) ready"
         if cuts_only:
-            stage_text += f" + {cuts_only} so com os cortes"
+            stage_text += f" + {cuts_only} with cuts only"
         set_render_status(render_id, RenderStatus.DONE, stage=stage_text, progress=1.0)
         self.log.info(
-            "pedido %s concluido: %d video(s), %d apenas com os cortes",
+            "request %s done: %d video(s), %d with cuts only",
             render_id, with_video, cuts_only,
         )
 
@@ -168,7 +168,7 @@ class Editor(Worker):
                     item = s.get(Media, clip.media_id)
                     if item is None or item.job_id != job_id:
                         self.log.warning(
-                            "midia %s nao e deste job; a montagem vai sem ela",
+                            "media %s is not from this job; the montage goes without it",
                             clip.media_id,
                         )
                         continue
@@ -180,10 +180,10 @@ class Editor(Worker):
                 # which music that one came out with. It comes from the first
                 # sound block, which is the one that starts playing
                 music_name = None
-                for camada in spec.layers:
-                    if not camada.is_audio:
+                for layer in spec.layers:
+                    if not layer.is_audio:
                         continue
-                    for clip in camada.clips:
+                    for clip in layer.clips:
                         item = s.get(Media, clip.media_id) if clip.media_id else None
                         if item is not None:
                             music_name = item.name
@@ -194,7 +194,7 @@ class Editor(Worker):
                 items.append(
                     render.TimelineItem(
                         timeline=spec,
-                        title=spec.title or f"Montagem {i}",
+                        title=spec.title or f"Montage {i}",
                         music_name=music_name,
                         library=library,
                     )

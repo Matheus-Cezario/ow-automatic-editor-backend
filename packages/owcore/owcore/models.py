@@ -258,11 +258,11 @@ class TimelineCut(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "TimelineCut":
         if self.start_s < 0:
-            raise ValueError("start_s nao pode ser negativo")
+            raise ValueError("start_s cannot be negative")
         if self.at_s < 0:
-            raise ValueError("at_s nao pode ser negativo")
+            raise ValueError("at_s cannot be negative")
         if self.duration_s < MIN_CUT_S:
-            raise ValueError(f"um corte tem de durar ao menos {MIN_CUT_S}s")
+            raise ValueError(f"a cut must last at least {MIN_CUT_S}s")
         return self
 
     @property
@@ -312,9 +312,9 @@ class Transform(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "Transform":
         if self.scale <= 0:
-            raise ValueError("scale tem de ser maior que zero")
+            raise ValueError("scale must be greater than zero")
         if not 0.0 <= self.opacity <= 1.0:
-            raise ValueError("opacity fica entre 0 e 1")
+            raise ValueError("opacity must be between 0 and 1")
         return self
 
     @property
@@ -339,9 +339,9 @@ class ClipAudio(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "ClipAudio":
         if self.volume < 0:
-            raise ValueError("volume nao pode ser negativo")
+            raise ValueError("volume cannot be negative")
         if self.fade_in_s < 0 or self.fade_out_s < 0:
-            raise ValueError("fade nao pode ser negativo")
+            raise ValueError("fade cannot be negative")
         return self
 
     @property
@@ -369,11 +369,11 @@ class ClipColor(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "ClipColor":
         if not -1.0 <= self.brightness <= 1.0:
-            raise ValueError("brightness fica entre -1 e 1")
+            raise ValueError("brightness must be between -1 and 1")
         if not 0.0 <= self.contrast <= 3.0:
-            raise ValueError("contrast fica entre 0 e 3")
+            raise ValueError("contrast must be between 0 and 3")
         if not 0.0 <= self.saturation <= 3.0:
-            raise ValueError("saturation fica entre 0 e 3")
+            raise ValueError("saturation must be between 0 and 3")
         return self
 
     @property
@@ -400,7 +400,7 @@ class ClipFade(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "ClipFade":
         if self.in_s < 0 or self.out_s < 0:
-            raise ValueError("fade nao pode ser negativo")
+            raise ValueError("fade cannot be negative")
         return self
 
     @property
@@ -503,15 +503,15 @@ class ExportSpec(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "ExportSpec":
         if self.width < 0 or self.height < 0:
-            raise ValueError("as dimensoes nao podem ser negativas")
+            raise ValueError("dimensions cannot be negative")
         if (self.width > 0) != (self.height > 0):
-            raise ValueError("de as duas dimensoes ou nenhuma")
+            raise ValueError("give both dimensions or neither")
         if not 0 <= self.crf <= 51:
             raise ValueError("crf vai de 0 a 51")
         if self.from_s < 0:
-            raise ValueError("from_s nao pode ser negativo")
+            raise ValueError("from_s cannot be negative")
         if self.to_s is not None and self.to_s <= self.from_s:
-            raise ValueError("to_s tem de ser maior que from_s")
+            raise ValueError("to_s must be greater than from_s")
         if not 0.0 <= self.watermark_opacity <= 1.0:
             raise ValueError("watermark_opacity vai de 0 a 1")
         if not 0.01 <= self.watermark_scale <= 1.0:
@@ -563,9 +563,9 @@ class TextStyle(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "TextStyle":
         if not 0.01 <= self.size <= 0.5:
-            raise ValueError("size do texto vai de 0.01 a 0.5 da altura")
+            raise ValueError("text size goes from 0.01 to 0.5 of the height")
         if not 0.0 <= self.outline <= 1.0:
-            raise ValueError("outline vai de 0 a 1 do tamanho da letra")
+            raise ValueError("outline goes from 0 to 1 of the letter size")
         return self
 
 
@@ -587,10 +587,10 @@ class ZoomKey(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "ZoomKey":
         if not 0.0 <= self.t <= 1.0:
-            raise ValueError("t de um quadro-chave vai de 0 a 1")
+            raise ValueError("a keyframe's t goes from 0 to 1")
         if not 1.0 <= self.scale <= 8.0:
             raise ValueError(
-                "scale de zoom vai de 1 a 8: menos que 1 mostraria fora do quadro"
+                "zoom scale goes from 1 to 8: below 1 would show outside the frame"
             )
         return self
 
@@ -655,25 +655,25 @@ class TimelineClip(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "TimelineClip":
         if self.start_s < 0:
-            raise ValueError("start_s nao pode ser negativo")
+            raise ValueError("start_s cannot be negative")
         if self.at_s < 0:
-            raise ValueError("at_s nao pode ser negativo")
+            raise ValueError("at_s cannot be negative")
         if self.duration_s < MIN_CUT_S:
-            raise ValueError(f"um clipe tem de durar ao menos {MIN_CUT_S}s")
+            raise ValueError(f"a clip must last at least {MIN_CUT_S}s")
         if not 0.1 <= self.speed <= 10.0:
-            raise ValueError("speed fica entre 0.1 e 10")
+            raise ValueError("speed must be between 0.1 and 10")
         if self.fade.in_s + self.fade.out_s > self.duration_s + 1e-6:
-            raise ValueError("os fades somados passam da duracao do clipe")
+            raise ValueError("the fades together exceed the clip duration")
         if self.zoom:
             if len(self.zoom) < 2:
-                raise ValueError("uma animacao de zoom precisa de dois pontos")
+                raise ValueError("a zoom animation needs two points")
             ts = [k.t for k in self.zoom]
             if ts != sorted(ts):
-                raise ValueError("os quadros-chave tem de estar em ordem")
+                raise ValueError("keyframes must be in order")
         if self.freeze and self.reverse:
-            raise ValueError("congelar e inverter ao mesmo tempo nao faz sentido")
+            raise ValueError("freezing and reversing at the same time makes no sense")
         if self.source is ClipSource.TEXT and not self.text.strip():
-            raise ValueError("um clipe de texto precisa de texto")
+            raise ValueError("a text clip needs text")
         if self.transition and self.transition.duration_s > self.duration_s + 1e-6:
             raise ValueError("the transition is longer than the clip")
         return self
@@ -770,13 +770,13 @@ class Layer(BaseModel):
 
     @model_validator(mode="after")
     def _no_overlap(self) -> "Layer":
-        ordenados = sorted(self.clips, key=lambda c: c.at_s)
-        for anterior, seguinte in zip(ordenados, ordenados[1:]):
-            if seguinte.at_s < anterior.until_s - 1e-6:
+        ordered = sorted(self.clips, key=lambda c: c.at_s)
+        for previous, following in zip(ordered, ordered[1:]):
+            if following.at_s < previous.until_s - 1e-6:
                 raise ValueError(
-                    f"dois clipes se sobrepoem em {seguinte.at_s:.2f}s da camada"
+                    f"two clips overlap at {following.at_s:.2f}s of the layer"
                 )
-        self.clips = ordenados
+        self.clips = ordered
         return self
 
     @property
@@ -829,19 +829,19 @@ class Recipe(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "Recipe":
         if self.lead_s < 0:
-            raise ValueError("lead_s nao pode ser negativo")
+            raise ValueError("lead_s cannot be negative")
         if self.duration_s < MIN_CUT_S:
-            raise ValueError(f"cada corte tem de ter ao menos {MIN_CUT_S}s")
+            raise ValueError(f"each cut must last at least {MIN_CUT_S}s")
         if self.beats_per_cut < 0:
-            raise ValueError("beats_per_cut nao pode ser negativo")
+            raise ValueError("beats_per_cut cannot be negative")
         if self.gap_s < 0:
-            raise ValueError("gap_s nao pode ser negativo")
+            raise ValueError("gap_s cannot be negative")
         if self.max_cuts < 0:
-            raise ValueError("max_cuts nao pode ser negativo")
+            raise ValueError("max_cuts cannot be negative")
         if not 0.1 <= self.speed <= 8.0:
             raise ValueError("speed vai de 0.1 a 8")
         if self.fade_s < 0:
-            raise ValueError("fade_s nao pode ser negativo")
+            raise ValueError("fade_s cannot be negative")
         for nome, v in (("music_volume", self.music_volume),
                         ("game_volume", self.game_volume)):
             if not 0.0 <= v <= 2.0:
@@ -920,11 +920,11 @@ class MontageDraft(BaseModel):
                 Layer(clips=[TimelineClip.from_cut(c) for c in self.cuts])
             ]
             self.cuts = []
-        fim = max((c.until_s for c in self.clips), default=0.0)
-        if fim >= MIN_CUT_S:
+        end = max((c.until_s for c in self.clips), default=0.0)
+        if end >= MIN_CUT_S:
             self.layers = [
                 *self.layers,
-                _track_as_block(self.track_id, self.music_start_s, fim),
+                _track_as_block(self.track_id, self.music_start_s, end),
             ]
         self.track_id = None
         self.music_start_s = 0.0
@@ -978,41 +978,41 @@ class Timeline(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _accept_v1_format(cls, dados: Any) -> Any:
-        if not isinstance(dados, dict):
-            return dados
-        if dados.get("layers") or "cuts" not in dados:
-            return dados
-        cortes = dados.pop("cuts") or []
-        dados["layers"] = [{"clips": [
+    def _accept_v1_format(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("layers") or "cuts" not in data:
+            return data
+        cuts = data.pop("cuts") or []
+        data["layers"] = [{"clips": [
             TimelineClip.from_cut(
                 c if isinstance(c, TimelineCut) else TimelineCut(**c)
             ).model_dump()
-            for c in cortes
+            for c in cuts
         ]}]
-        return dados
+        return data
 
     @model_validator(mode="after")
     def _has_something_to_build(self) -> "Timeline":
         if self.music_start_s < 0:
-            raise ValueError("music_start_s nao pode ser negativo")
+            raise ValueError("music_start_s cannot be negative")
         for nome, v in (("music_volume", self.music_volume),
                         ("game_volume", self.game_volume)):
             if not 0.0 <= v <= 2.0:
                 raise ValueError(f"{nome} fica entre 0 e 2")
         if not any(l.clips for l in self.layers):
-            raise ValueError("uma linha do tempo vazia nao vira video")
+            raise ValueError("an empty timeline does not make a video")
         return self
 
     @model_validator(mode="after")
     def _track_becomes_block(self) -> "Timeline":
         if not self.track_id:
             return self
-        fim = max((l.duration_s for l in self.layers), default=0.0)
-        if fim >= MIN_CUT_S:
+        end = max((l.duration_s for l in self.layers), default=0.0)
+        if end >= MIN_CUT_S:
             self.layers = [
                 *self.layers,
-                _track_as_block(self.track_id, self.music_start_s, fim),
+                _track_as_block(self.track_id, self.music_start_s, end),
             ]
         self.track_id = None
         self.music_start_s = 0.0
@@ -1047,10 +1047,10 @@ class Timeline(BaseModel):
             return False
         if any(l.is_audio for l in self.layers):
             return False
-        visiveis = [l for l in self.layers if not l.hidden]
-        if len(visiveis) != 1:
+        visible = [l for l in self.layers if not l.hidden]
+        if len(visible) != 1:
             return False
-        return all(c.is_simple for c in visiveis[0].clips)
+        return all(c.is_simple for c in visible[0].clips)
 
     @property
     def has_music(self) -> bool:
@@ -1143,8 +1143,8 @@ class Job(Base):
     video_name: Mapped[str] = mapped_column(String(255), default="")
 
     duration_s: Mapped[float] = mapped_column(Float, default=0.0)
-    #: frames per second of the recording -- the editor needs it for the step
-    #: um quadro fazer sentido
+    #: frames per second of the recording -- the editor needs it for a
+    #: one-frame step to make sense
     fps: Mapped[float] = mapped_column(Float, default=0.0)
     #: size of the recording. It is the export default -- and what lets the
     #: editor say whether the requested output crops the frame or leaves bars
@@ -1157,7 +1157,7 @@ class Job(Base):
     #: waveform of the match audio, already reduced -- it is what shows the
     #: shot and the explosion on the ruler
     waveform: Mapped[list] = mapped_column(JSON, default=list)
-    #: montagem em andamento, salva sozinha enquanto o usuario edita
+    #: montage in progress, saved automatically while the user edits
     draft: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -1402,7 +1402,7 @@ class Preset(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(120), default="")
-    #: a receita, no formato de `Recipe`
+    #: the recipe, in the `Recipe` format
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

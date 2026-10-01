@@ -1,12 +1,13 @@
-"""A montagem que o **usuario** faz: blocos posicionados a mao na musica.
+"""The montage the **user** makes: blocks placed by hand on the music.
 
-Duas camadas, como no resto do projeto:
+Two layers, as in the rest of the project:
 
-* a matematica da linha do tempo (`owcore.timeline`), sem ffmpeg e sem banco --
-  e onde se verifica a promessa central da tela: um bloco sai exatamente no
-  ponto onde foi posto, custe o que custar aos vizinhos;
-* o caminho inteiro pelos microsservicos, do upload da musica ao mp4 -- e onde
-  se verifica que gateway, ritmo e editor concordam sobre o formato.
+* the timeline maths (`owcore.timeline`), with no ffmpeg and no database --
+  this is where the screen's central promise is checked: a block comes out
+  exactly where it was placed, whatever it costs its neighbours;
+* the whole path through the microservices, from the music upload to the mp4
+  -- this is where gateway, rhythm and editor are checked to agree on the
+  format.
 """
 
 from __future__ import annotations
@@ -31,101 +32,102 @@ from owcore.models import (
 from owcore.timeline import plan, snap, total_duration_s
 from test_pipeline import api, drain, run_analysis
 
-# ── a matematica, sozinha ───────────────────────────────────────────────────
+# ── the maths, on its own ───────────────────────────────────────────────────
 
 
-def corte(at: float, dur: float, start: float = 10.0, **kw) -> TimelineCut:
+def cut(at: float, dur: float, start: float = 10.0, **kw) -> TimelineCut:
     return TimelineCut(at_s=at, duration_s=dur, start_s=start, **kw)
 
 
-def test_blocos_encostados_viram_so_cortes():
-    pecas = plan([corte(0, 2, start=5), corte(2, 1.5, start=30)])
+def test_adjacent_blocks_become_cuts_only():
+    pieces = plan([cut(0, 2, start=5), cut(2, 1.5, start=30)])
 
-    assert [p.is_cut for p in pecas] == [True, True]
-    assert [(p.start_s, p.end_s) for p in pecas] == [(5.0, 7.0), (30.0, 31.5)]
-    assert total_duration_s(pecas) == pytest.approx(3.5)
+    assert [p.is_cut for p in pieces] == [True, True]
+    assert [(p.start_s, p.end_s) for p in pieces] == [(5.0, 7.0), (30.0, 31.5)]
+    assert total_duration_s(pieces) == pytest.approx(3.5)
 
 
-def test_buraco_entre_dois_blocos_vira_preto():
-    """O buraco NAO encurta o video.
+def test_a_gap_between_two_blocks_becomes_black():
+    """The gap does NOT shorten the video.
 
-    E a promessa da tela: o segundo bloco foi posto aos 5s da musica e tem de
-    sair aos 5s do video. Emendar os blocos economizaria uma codificacao e
-    moveria o corte para longe da batida onde o usuario o encaixou.
+    It is the screen's promise: the second block was placed at 5s of the music
+    and must come out at 5s of the video. Splicing the blocks would save an
+    encode and move the cut away from the beat the user fitted it to.
     """
-    pecas = plan([corte(0, 2), corte(5, 1)])
+    pieces = plan([cut(0, 2), cut(5, 1)])
 
-    assert [p.black for p in pecas] == [False, True, False]
-    assert pecas[1].duration_s == pytest.approx(3.0)
-    assert total_duration_s(pecas) == pytest.approx(6.0)
-
-
-def test_espaco_antes_do_primeiro_bloco_tambem_vira_preto():
-    """Comecar o video com a musica sozinha e uma escolha legitima."""
-    pecas = plan([corte(4, 2)])
-
-    assert pecas[0].black and pecas[0].duration_s == pytest.approx(4.0)
-    assert total_duration_s(pecas) == pytest.approx(6.0)
+    assert [p.black for p in pieces] == [False, True, False]
+    assert pieces[1].duration_s == pytest.approx(3.0)
+    assert total_duration_s(pieces) == pytest.approx(6.0)
 
 
-def test_preto_no_fim_nao_entra():
-    """O video acaba no ultimo corte: ninguem quer 8s de tela preta no fim."""
-    pecas = plan([corte(0, 2)])
+def test_space_before_the_first_block_also_becomes_black():
+    """Starting the video with the music alone is a legitimate choice."""
+    pieces = plan([cut(4, 2)])
 
-    assert len(pecas) == 1 and pecas[0].is_cut
+    assert pieces[0].black and pieces[0].duration_s == pytest.approx(4.0)
+    assert total_duration_s(pieces) == pytest.approx(6.0)
 
 
-def test_corte_que_passa_do_fim_da_gravacao_e_aparado_sem_mover_os_outros():
-    pecas = plan(
-        [corte(0, 3, start=59), corte(4, 1, start=1)], source_duration_s=60
+def test_black_at_the_end_is_left_out():
+    """The video ends at the last cut: nobody wants 8s of black at the end."""
+    pieces = plan([cut(0, 2)])
+
+    assert len(pieces) == 1 and pieces[0].is_cut
+
+
+def test_a_cut_past_the_end_of_the_recording_is_trimmed_without_moving_the_others():
+    pieces = plan(
+        [cut(0, 3, start=59), cut(4, 1, start=1)], source_duration_s=60
     )
 
-    assert pecas[0].is_cut and pecas[0].duration_s == pytest.approx(1.0)
-    # os 2s aparados viram preto, e nao um adiantamento do bloco seguinte
-    assert pecas[1].black and pecas[1].duration_s == pytest.approx(3.0)
-    assert total_duration_s(pecas[:2]) == pytest.approx(4.0)
+    assert pieces[0].is_cut and pieces[0].duration_s == pytest.approx(1.0)
+    # the 2s trimmed become black, not an advance of the next block
+    assert pieces[1].black and pieces[1].duration_s == pytest.approx(3.0)
+    assert total_duration_s(pieces[:2]) == pytest.approx(4.0)
 
 
-def test_buraco_de_menos_de_um_quadro_nao_vira_peca():
-    """Emendar 20ms custaria uma codificacao inteira para ninguem ver nada."""
-    pecas = plan([corte(0, 2), corte(2.02, 1)])
+def test_a_gap_shorter_than_a_frame_is_not_a_piece():
+    """Splicing 20ms would cost a whole encode for nobody to see anything."""
+    pieces = plan([cut(0, 2), cut(2.02, 1)])
 
-    assert [p.is_cut for p in pecas] == [True, True]
+    assert [p.is_cut for p in pieces] == [True, True]
 
 
-def test_pretos_seguidos_viram_um_so():
-    """Cada peca custa uma codificacao; duas de preto seguidas sao desperdicio."""
-    pecas = plan(
-        [corte(0, 3, start=59), corte(5, 1, start=1)], source_duration_s=60
+def test_consecutive_blacks_become_one():
+    """Each piece costs an encode; two blacks in a row are a waste."""
+    pieces = plan(
+        [cut(0, 3, start=59), cut(5, 1, start=1)], source_duration_s=60
     )
 
-    assert [p.black for p in pecas] == [False, True, False]
+    assert [p.black for p in pieces] == [False, True, False]
 
 
-def test_ima_gruda_na_batida_perto_e_ignora_a_longe():
-    batidas = [0.0, 0.5, 1.0, 1.5]
+def test_the_magnet_snaps_to_a_near_beat_and_ignores_a_far_one():
+    beats = [0.0, 0.5, 1.0, 1.5]
 
-    assert snap(0.52, batidas) == 0.5
-    assert snap(0.75, batidas) == 0.75  # equidistante das duas, longe demais
+    assert snap(0.52, beats) == 0.5
+    assert snap(0.75, beats) == 0.75  # equidistant from both, too far
 
 
-def test_linha_do_tempo_ordena_e_recusa_sobreposicao():
-    spec = Timeline(cuts=[corte(4, 1), corte(0, 2)])
+def test_the_timeline_sorts_and_refuses_overlap():
+    spec = Timeline(cuts=[cut(4, 1), cut(0, 2)])
     assert [c.at_s for c in spec.cuts] == [0.0, 4.0]
     assert spec.duration_s == pytest.approx(5.0)
 
-    with pytest.raises(ValueError, match="sobrep"):
-        Timeline(cuts=[corte(0, 2), corte(1, 1)])
+    with pytest.raises(ValueError, match="overlap"):
+        Timeline(cuts=[cut(0, 2), cut(1, 1)])
 
     with pytest.raises(ValueError):
-        Timeline(cuts=[corte(0, MIN_CUT_S / 2)])
+        Timeline(cuts=[cut(0, MIN_CUT_S / 2)])
 
 
-# ── o caminho inteiro ───────────────────────────────────────────────────────
+# ── the whole path ──────────────────────────────────────────────────────────
 
 
-def subir_musica(job_id: str, music: Path = MUSIC) -> str:
-    """Manda a musica e roda o worker que a ouve, como acontece em producao."""
+def upload_music(job_id: str, music: Path = MUSIC) -> str:
+    """Sends the music and runs the worker that listens to it, as happens in
+    production."""
     resp = api().post(
         f"/api/jobs/{job_id}/tracks",
         files={"audio": ("music.wav", music.read_bytes(), "audio/wav")},
@@ -134,13 +136,13 @@ def subir_musica(job_id: str, music: Path = MUSIC) -> str:
     track_id = resp.json()["id"]
     assert resp.json()["status"] == "pending"
 
-    analisador = service_module("beats", "main").MediaAnalyzer()
+    analyzer = service_module("beats", "main").MediaAnalyzer()
     for payload in drain(STREAM_MEDIA, "media"):
-        analisador.handle(payload)
+        analyzer.handle(payload)
     return track_id
 
 
-def montar(job_id: str, timelines: list[dict]) -> str:
+def render_montage(job_id: str, timelines: list[dict]) -> str:
     resp = api().post(
         f"/api/jobs/{job_id}/renders",
         data={"timelines": json.dumps(timelines)},
@@ -155,38 +157,38 @@ def run_render() -> None:
         editor.handle(payload)
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_musica_sobe_antes_de_existir_video_e_volta_pronta_para_desenhar(
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_music_is_uploaded_before_any_video_and_comes_back_ready_to_draw(
     isolated, short_sample
 ):
-    """O app precisa da musica *analisada* para desenhar a tela de montagem."""
+    """The app needs the *analysed* music to draw the montage screen."""
     job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
+    track_id = upload_music(job_id)
 
     track = api().get(f"/api/tracks/{track_id}").json()
     assert track["status"] == "ready", track["error"]
     assert track["duration_s"] > 5
     assert track["bpm"] > 0
-    assert len(track["beats"]) > 4, "sem batidas nao da para grudar corte nenhum"
-    assert len(track["peaks"]) > 100, "sem forma de onda nao da para achar o refrao"
+    assert len(track["beats"]) > 4, "without beats no cut can snap anywhere"
+    assert len(track["peaks"]) > 100, "without a waveform the chorus cannot be found"
     assert all(0.0 <= v <= 1.0 for v in track["peaks"])
-    # a URL canonica agora e a da biblioteca; a musica e um item dela
+    # the canonical URL is now the library's; the music is one of its items
     assert track["audio_url"].endswith(f"/api/media/{track_id}/file")
     assert track["kind"] == "audio"
-    # e a rota antiga continua respondendo, porque o app ainda a usa
+    # and the old route still answers, because the app still uses it
     assert api().get(f"/api/tracks/{track_id}/audio",
                      headers={"range": "bytes=0-31"}).status_code == 206
 
-    # e ela aparece no job, para o app nao ter de guardar id nenhum
+    # and it shows up in the job, so the app does not have to keep any id
     detail = api().get(f"/api/jobs/{job_id}").json()
     assert [t["id"] for t in detail["tracks"]] == [track_id]
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_o_audio_da_musica_e_servido_com_range_para_o_player(isolated, short_sample):
-    """Sem Range o player nao consegue pular para o refrao."""
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_the_music_audio_is_served_with_range_for_the_player(isolated, short_sample):
+    """Without Range the player cannot jump to the chorus."""
     job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
+    track_id = upload_music(job_id)
 
     resp = api().get(f"/api/tracks/{track_id}/audio", headers={"range": "bytes=0-99"})
     assert resp.status_code == 206
@@ -194,12 +196,12 @@ def test_o_audio_da_musica_e_servido_com_range_para_o_player(isolated, short_sam
     assert resp.headers["content-range"].startswith("bytes 0-99/")
 
 
-def test_a_gravacao_e_servida_com_range_para_o_preview(isolated, short_sample):
-    """O monitor da tela de montagem busca dentro da gravacao original.
+def test_the_recording_is_served_with_range_for_the_preview(isolated, short_sample):
+    """The montage screen's monitor seeks inside the original recording.
 
-    Sem `Range` ele teria de baixar a partida inteira para mostrar um quadro
-    dos 3 minutos -- e renderizar de verdade a cada ajuste custaria uma volta
-    pelo ffmpeg por arrasto.
+    Without `Range` it would have to download the whole match to show a frame
+    at 3 minutes -- and really rendering on every adjustment would cost a trip
+    through ffmpeg per drag.
     """
     job_id = run_analysis(short_sample)
 
@@ -212,66 +214,67 @@ def test_a_gravacao_e_servida_com_range_para_o_preview(isolated, short_sample):
     assert resp.headers["content-type"] == "video/mp4"
     assert resp.headers["accept-ranges"] == "bytes"
 
-    inteiro = api().get(f"/api/jobs/{job_id}/video")
-    assert inteiro.status_code == 200
-    assert int(inteiro.headers["content-length"]) == short_sample.stat().st_size
+    whole = api().get(f"/api/jobs/{job_id}/video")
+    assert whole.status_code == 200
+    assert int(whole.headers["content-length"]) == short_sample.stat().st_size
 
 
-def test_preview_de_job_inexistente_e_404(isolated):
-    assert api().get("/api/jobs/naoexiste/video").status_code == 404
+def test_the_preview_of_a_missing_job_is_404(isolated):
+    assert api().get("/api/jobs/doesnotexist/video").status_code == 404
 
 
-# ── miniaturas dos momentos ─────────────────────────────────────────────────
+# ── moment thumbnails ───────────────────────────────────────────────────────
 
 
-def rodar_thumbs() -> int:
+def run_thumbs() -> int:
     worker = service_module("thumbs", "main").Thumbs()
-    quantos = 0
+    count = 0
     for payload in drain(STREAM_THUMBS, "thumbs"):
         worker.handle(payload)
-        quantos += 1
-    return quantos
+        count += 1
+    return count
 
 
-def test_a_analise_ja_pede_as_miniaturas_dos_momentos(isolated, short_sample):
-    """A barra lateral do editor precisa de imagem para escolher entre trinta
-    eliminacoes; sem ela, sao trinta relogios iguais."""
+def test_the_analysis_already_asks_for_the_moment_thumbnails(isolated, short_sample):
+    """The editor's sidebar needs a picture to choose among thirty kills;
+    without it, they are thirty identical clocks."""
     job_id = run_analysis(short_sample)
-    assert rodar_thumbs() >= 1, "o planejador nao pediu as miniaturas"
+    assert run_thumbs() >= 1, "the planner did not ask for the thumbnails"
 
     detail = api().get(f"/api/jobs/{job_id}").json()
-    momentos = [
+    moments = [
         e["t"] for e in detail["events"]
         if e["kind"] in {"kill", "sleep", "stun", "ult_negated", "escape"}
     ]
-    assert momentos, "a analise nao achou momento nenhum"
+    assert moments, "the analysis found no moment"
 
-    resp = api().get(f"/api/jobs/{job_id}/frame", params={"t": momentos[0]})
+    resp = api().get(f"/api/jobs/{job_id}/frame", params={"t": moments[0]})
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"] == "image/jpeg"
-    assert len(resp.content) > 500, "a miniatura saiu vazia"
-    # o quadro de um instante nunca muda
+    assert len(resp.content) > 500, "the thumbnail came out empty"
+    # an instant's frame never changes
     assert "max-age" in resp.headers.get("cache-control", "")
 
 
-def test_momento_sem_miniatura_responde_404_em_vez_de_quebrar(
+def test_a_moment_without_a_thumbnail_answers_404_instead_of_breaking(
     isolated, short_sample
 ):
-    """404 aqui quer dizer 'ainda nao extraida' -- o app mostra o lugar dela."""
+    """404 here means 'not extracted yet' -- the app shows its placeholder."""
     job_id = run_analysis(short_sample)
     assert api().get(f"/api/jobs/{job_id}/frame", params={"t": 999}).status_code == 404
 
 
-def test_pedir_de_novo_nao_reextrai_o_que_ja_existe(isolated, short_sample):
-    """O app pede ao abrir o editor; o servico tem de pular o que ja esta la."""
+def test_asking_again_does_not_re_extract_what_already_exists(isolated, short_sample):
+    """The app asks when opening the editor; the service must skip what is
+    already there."""
     job_id = run_analysis(short_sample)
-    rodar_thumbs()
+    run_thumbs()
 
     resp = api().post(f"/api/jobs/{job_id}/frames")
     assert resp.status_code == 202
 
     worker = service_module("thumbs", "main").Thumbs()
-    # o segundo pedido nao acha nada a extrair, e diz isso sem estourar
+    # the second request finds nothing to extract, and says so without blowing up
     for payload in drain(STREAM_THUMBS, "thumbs"):
         worker.handle(payload)
 
@@ -280,72 +283,73 @@ def test_pedir_de_novo_nao_reextrai_o_que_ja_existe(isolated, short_sample):
     assert api().get(f"/api/jobs/{job_id}/frame", params={"t": t}).status_code == 200
 
 
-def test_pedir_miniatura_de_job_inexistente_e_404(isolated):
-    assert api().post("/api/jobs/naoexiste/frames").status_code == 404
+def test_asking_thumbnails_for_a_missing_job_is_404(isolated):
+    assert api().post("/api/jobs/doesnotexist/frames").status_code == 404
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_montagem_manual_vira_video_com_os_blocos_onde_o_usuario_pos(
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_a_manual_montage_becomes_a_video_with_blocks_where_the_user_put_them(
     isolated, short_sample
 ):
     job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
+    track_id = upload_music(job_id)
 
     detail = api().get(f"/api/jobs/{job_id}").json()
-    momentos = [e["t"] for e in detail["events"] if e["kind"] == "kill"][:2]
-    assert momentos, "a analise nao achou eliminacao nenhuma para montar"
+    moments = [e["t"] for e in detail["events"] if e["kind"] == "kill"][:2]
+    assert moments, "the analysis found no kill to assemble"
 
-    # dois blocos com um buraco de 1s entre eles: o video tem de durar
-    # 1.5 + 1.0 + 1.5 = 4s, e nao os 3s dos cortes
+    # two blocks with a 1s gap between them: the video must last
+    # 1.5 + 1.0 + 1.5 = 4s, not the 3s of the cuts
     cuts = [
-        {"source_t": momentos[0], "start_s": max(0.0, momentos[0] - 1.0),
+        {"source_t": moments[0], "start_s": max(0.0, moments[0] - 1.0),
          "duration_s": 1.5, "at_s": 0.0, "kind": "kill"},
-        {"source_t": momentos[-1], "start_s": max(0.0, momentos[-1] - 1.0),
+        {"source_t": moments[-1], "start_s": max(0.0, moments[-1] - 1.0),
          "duration_s": 1.5, "at_s": 2.5, "kind": "kill"},
     ]
-    render_id = montar(
+    render_id = render_montage(
         job_id,
-        [{"title": "Minha montagem", "cuts": cuts}],
+        [{"title": "My montage", "cuts": cuts}],
     )
     run_render()
 
-    pedido = api().get(f"/api/renders/{render_id}").json()
-    assert pedido["status"] == "done", pedido["error"]
-    assert len(pedido["clips"]) == 1
-    clip = pedido["clips"][0]
+    request = api().get(f"/api/renders/{render_id}").json()
+    assert request["status"] == "done", request["error"]
+    assert len(request["clips"]) == 1
+    clip = request["clips"][0]
 
     assert clip["kind"] == "custom"
-    assert clip["title"] == "Minha montagem"
+    assert clip["title"] == "My montage"
     assert clip["meta"]["hand_made"] is True
     assert clip["meta"]["segments"] == 2
     assert clip["meta"]["blackfill_s"] == pytest.approx(1.0, abs=0.05)
-    assert clip["video_url"], "o video nao saiu"
-    assert clip["segments_zip_url"], "os cortes avulsos nao sairam"
+    assert clip["video_url"], "the video did not come out"
+    assert clip["segments_zip_url"], "the loose cuts did not come out"
 
-    # o arquivo mesmo: o buraco esta la, e a musica tocando por cima dele
+    # the file itself: the gap is there, with the music playing over it
     from owcore import ffmpeg
     from owcore.storage import local_copy
 
     with session() as s:
         key = next(c.key for c in s.get(Job, job_id).clips)
-    local = local_copy(key, Path(isolated.work_dir) / "conferencia")
+    local = local_copy(key, Path(isolated.work_dir) / "check")
     info = ffmpeg.probe(local)
     assert info.duration_s == pytest.approx(4.0, abs=0.35)
     assert info.has_audio
 
 
-def test_sem_musica_a_montagem_manual_fica_com_o_audio_da_partida(
+def test_without_music_a_manual_montage_keeps_the_match_audio(
     isolated, short_sample
 ):
-    """E o preto do buraco tem de sair com silencio *compativel*.
+    """And the gap's black must come out with *compatible* silence.
 
-    Sem trilha os cortes mantem o audio da partida, e o `concat` recusa juntar
-    pedacos cujo audio nao bate -- um trecho com som e um preto mudo nao
-    concatenam. O preto sai com silencio na mesma taxa, e e isto que este teste
-    guarda: um buraco no meio de uma montagem sem musica.
+    Without a track the cuts keep the match audio, and `concat` refuses to
+    join pieces whose audio does not match -- a stretch with sound and a mute
+    black do not concatenate. The black comes out with silence at the same
+    rate, and that is what this test guards: a gap in the middle of a montage
+    without music.
     """
     job_id = run_analysis(short_sample)
-    render_id = montar(
+    render_id = render_montage(
         job_id,
         [{"cuts": [
             {"start_s": 1.0, "duration_s": 1.5, "at_s": 0.0},
@@ -358,26 +362,26 @@ def test_sem_musica_a_montagem_manual_fica_com_o_audio_da_partida(
     assert clip["meta"]["original_audio"] is True
     assert clip["meta"]["music_name"] is None
     assert clip["meta"]["blackfill_s"] == pytest.approx(1.5, abs=0.05)
-    assert clip["video_url"], "a montagem com buraco e sem musica nao saiu"
+    assert clip["video_url"], "the montage with a gap and no music did not come out"
 
     from owcore import ffmpeg
     from owcore.storage import local_copy
 
     with session() as s:
         key = next(c.key for c in s.get(Job, job_id).clips)
-    info = ffmpeg.probe(local_copy(key, Path(isolated.work_dir) / "sem_musica"))
+    info = ffmpeg.probe(local_copy(key, Path(isolated.work_dir) / "no_music"))
     assert info.duration_s == pytest.approx(4.5, abs=0.35)
-    assert info.has_audio, "o audio da partida se perdeu na emenda com o preto"
+    assert info.has_audio, "the match audio got lost in the splice with the black"
 
 
-def test_pedido_vazio_e_recusado(isolated, short_sample):
+def test_an_empty_request_is_refused(isolated, short_sample):
     job_id = run_analysis(short_sample)
     resp = api().post(f"/api/jobs/{job_id}/renders", data={"timelines": "[]"})
     assert resp.status_code == 422
-    assert "linha do tempo" in resp.json()["detail"]
+    assert "timeline" in resp.json()["detail"]
 
 
-def test_musica_de_outro_job_e_recusada(isolated, short_sample):
+def test_music_from_another_job_is_refused(isolated, short_sample):
     job_id = run_analysis(short_sample)
     resp = api().post(
         f"/api/jobs/{job_id}/renders",
@@ -385,24 +389,24 @@ def test_musica_de_outro_job_e_recusada(isolated, short_sample):
             {"clips": [{"start_s": 1, "duration_s": 1, "at_s": 0}]},
             {"kind": "audio", "clips": [
                 {"at_s": 0, "duration_s": 1, "start_s": 0,
-                 "source": "media", "media_id": "naoexiste"},
+                 "source": "media", "media_id": "doesnotexist"},
             ]},
         ]}])},
     )
     assert resp.status_code == 422
-    assert "midia desconhecida" in resp.json()["detail"]
+    assert "unknown media" in resp.json()["detail"]
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_musica_ainda_nao_analisada_barra_o_pedido(isolated, short_sample):
-    """Sem batidas nem duracao a tela nao teria como ter posicionado nada --
-    um pedido assim so pode ser engano do app."""
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_music_not_analysed_yet_blocks_the_request(isolated, short_sample):
+    """Without beats or duration the screen could not have placed anything --
+    a request like that can only be the app's mistake."""
     job_id = run_analysis(short_sample)
     resp = api().post(
         f"/api/jobs/{job_id}/tracks",
         files={"audio": ("music.wav", MUSIC.read_bytes(), "audio/wav")},
     )
-    track_id = resp.json()["id"]  # de proposito: sem rodar o analisador
+    track_id = resp.json()["id"]  # on purpose: without running the analyzer
 
     resp = api().post(
         f"/api/jobs/{job_id}/renders",
@@ -412,42 +416,45 @@ def test_musica_ainda_nao_analisada_barra_o_pedido(isolated, short_sample):
         ])},
     )
     assert resp.status_code == 409
-    assert "ainda nao foi analisada" in resp.json()["detail"]
+    assert "has not been analysed yet" in resp.json()["detail"]
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_musica_ilegivel_falha_sozinha_sem_derrubar_o_job(isolated, short_sample):
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_unreadable_music_fails_alone_without_bringing_the_job_down(
+    isolated, short_sample
+):
     job_id = run_analysis(short_sample)
     resp = api().post(
         f"/api/jobs/{job_id}/tracks",
-        files={"audio": ("quebrada.mp3", b"isto nao e audio", "audio/mpeg")},
+        files={"audio": ("broken.mp3", b"this is not audio", "audio/mpeg")},
     )
     track_id = resp.json()["id"]
 
-    analisador = service_module("beats", "main").MediaAnalyzer()
+    analyzer = service_module("beats", "main").MediaAnalyzer()
     for payload in drain(STREAM_MEDIA, "media"):
         try:
-            analisador.handle(payload)
-        except Exception as exc:  # o worker real transforma isto em on_error
-            analisador.on_error(payload, exc)
+            analyzer.handle(payload)
+        except Exception as exc:  # the real worker turns this into on_error
+            analyzer.on_error(payload, exc)
 
     track = api().get(f"/api/tracks/{track_id}").json()
     assert track["status"] == "failed"
     assert track["error"]
-    # e a analise da partida continua valendo
+    # and the match analysis still stands
     assert api().get(f"/api/jobs/{job_id}").json()["status"] == "ready"
 
 
-# ── o rascunho: a montagem sobrevive a um F5 ────────────────────────────────
+# ── the draft: the montage survives an F5 ───────────────────────────────────
 
 
-def test_a_montagem_em_andamento_volta_junto_com_o_job(isolated, short_sample):
-    """Recarregar a pagina custava a montagem inteira; agora ela e do job."""
+def test_the_montage_in_progress_comes_back_with_the_job(isolated, short_sample):
+    """Reloading the page used to cost the whole montage; now it belongs to the
+    job."""
     job_id = run_analysis(short_sample)
     assert api().get(f"/api/jobs/{job_id}").json()["draft"] == {}
 
-    rascunho = {
-        "title": "Em construcao",
+    draft = {
+        "title": "Work in progress",
         "music_start_s": 12.5,
         "cuts": [
             {"source_t": 30.0, "start_s": 29.0, "duration_s": 1.5, "at_s": 0.0,
@@ -456,22 +463,22 @@ def test_a_montagem_em_andamento_volta_junto_com_o_job(isolated, short_sample):
              "kind": "sleep"},
         ],
     }
-    resp = api().put(f"/api/jobs/{job_id}/draft", json=rascunho)
+    resp = api().put(f"/api/jobs/{job_id}/draft", json=draft)
     assert resp.status_code == 200, resp.text
     assert resp.json()["n_cuts"] == 2
 
-    volta = api().get(f"/api/jobs/{job_id}").json()["draft"]
-    assert volta["title"] == "Em construcao"
-    assert volta["music_start_s"] == 12.5
-    assert [c["at_s"] for c in volta["cuts"]] == [0.0, 2.0]
-    assert volta["cuts"][0]["kind"] == "kill"
+    back = api().get(f"/api/jobs/{job_id}").json()["draft"]
+    assert back["title"] == "Work in progress"
+    assert back["music_start_s"] == 12.5
+    assert [c["at_s"] for c in back["cuts"]] == [0.0, 2.0]
+    assert back["cuts"][0]["kind"] == "kill"
 
 
-def test_o_rascunho_lembra_as_correcoes_da_grade_de_batidas(
+def test_the_draft_remembers_the_beat_grid_corrections(
     isolated, short_sample
 ):
-    """Elas nao mudam o video -- o corte guarda instantes absolutos --, mas
-    mudam onde o ima gruda. Consertar a grade duas vezes irrita."""
+    """They do not change the video -- the cut stores absolute instants -- but
+    they change where the magnet snaps. Fixing the grid twice is annoying."""
     job_id = run_analysis(short_sample)
     api().put(
         f"/api/jobs/{job_id}/draft",
@@ -485,11 +492,11 @@ def test_o_rascunho_lembra_as_correcoes_da_grade_de_batidas(
     assert draft["beat_bar"] == 4
 
 
-def test_o_rascunho_lembra_a_mistura_e_o_formato_de_saida(
+def test_the_draft_remembers_the_mix_and_the_output_format(
     isolated, short_sample
 ):
-    """Quem baixou o volume do jogo e escolheu 9:16 nao quer refazer as duas
-    coisas depois de um F5. Sao trabalho como qualquer outro."""
+    """Whoever lowered the game volume and picked 9:16 does not want to redo
+    both after an F5. That is work like any other."""
     job_id = run_analysis(short_sample)
     api().put(
         f"/api/jobs/{job_id}/draft",
@@ -512,8 +519,8 @@ def test_o_rascunho_lembra_a_mistura_e_o_formato_de_saida(
     assert draft["export"]["from_s"] == pytest.approx(1.0)
 
 
-def test_rascunho_com_saida_impossivel_e_recusado(isolated, short_sample):
-    """Guardar lixo agora e devolver lixo depois."""
+def test_a_draft_with_an_impossible_output_is_refused(isolated, short_sample):
+    """Storing garbage now means handing garbage back later."""
     job_id = run_analysis(short_sample)
     resp = api().put(
         f"/api/jobs/{job_id}/draft",
@@ -522,31 +529,32 @@ def test_rascunho_com_saida_impossivel_e_recusado(isolated, short_sample):
     assert resp.status_code == 422
 
 
-def test_rascunho_sem_corte_nenhum_e_valido(isolated, short_sample):
-    """Um rascunho existe desde antes de o primeiro bloco entrar -- salvar so a
-    musica escolhida tem de funcionar."""
+def test_a_draft_without_any_cut_is_valid(isolated, short_sample):
+    """A draft exists before the first block goes in -- saving just the chosen
+    music must work."""
     job_id = run_analysis(short_sample)
     resp = api().put(
         f"/api/jobs/{job_id}/draft",
-        json={"title": "so a musica por enquanto", "cuts": []},
+        json={"title": "just the music for now", "cuts": []},
     )
     assert resp.status_code == 200
     assert resp.json()["n_cuts"] == 0
 
 
-def test_rascunho_com_corte_impossivel_e_recusado(isolated, short_sample):
-    """Guardar lixo agora seria devolver lixo na proxima abertura."""
+def test_a_draft_with_an_impossible_cut_is_refused(isolated, short_sample):
+    """Storing garbage now would mean handing garbage back on the next
+    opening."""
     job_id = run_analysis(short_sample)
     resp = api().put(
         f"/api/jobs/{job_id}/draft",
         json={"cuts": [{"start_s": -5, "duration_s": 1, "at_s": 0}]},
     )
     assert resp.status_code == 422
-    # o nome mudou na Fase 8: um rascunho agora e uma montagem entre varias
-    assert "montagem invalida" in resp.json()["detail"]
+    # the name changed in Phase 8: a draft is now one montage among several
+    assert "invalid montage" in resp.json()["detail"]
 
 
-def test_salvar_de_novo_substitui_o_anterior(isolated, short_sample):
+def test_saving_again_replaces_the_previous_one(isolated, short_sample):
     job_id = run_analysis(short_sample)
     for n in (1, 2, 3):
         api().put(
@@ -559,7 +567,7 @@ def test_salvar_de_novo_substitui_o_anterior(isolated, short_sample):
     assert len(api().get(f"/api/jobs/{job_id}").json()["draft"]["cuts"]) == 3
 
 
-def test_descartar_o_rascunho(isolated, short_sample):
+def test_discarding_the_draft(isolated, short_sample):
     job_id = run_analysis(short_sample)
     api().put(f"/api/jobs/{job_id}/draft",
               json={"cuts": [{"start_s": 1, "duration_s": 1, "at_s": 0}]})
@@ -568,36 +576,36 @@ def test_descartar_o_rascunho(isolated, short_sample):
     assert api().get(f"/api/jobs/{job_id}").json()["draft"] == {}
 
 
-def test_rascunho_de_job_inexistente_e_404(isolated):
-    assert api().put("/api/jobs/naoexiste/draft", json={"cuts": []}).status_code == 404
-    assert api().delete("/api/jobs/naoexiste/draft").status_code == 404
+def test_the_draft_of_a_missing_job_is_404(isolated):
+    assert api().put("/api/jobs/doesnotexist/draft", json={"cuts": []}).status_code == 404
+    assert api().delete("/api/jobs/doesnotexist/draft").status_code == 404
 
 
-def test_gerar_nao_apaga_o_rascunho(isolated, short_sample):
-    """Depois de gerar, o normal e querer ajustar e gerar de novo -- perder a
-    montagem nesse ponto seria o mesmo estrago do F5."""
+def test_rendering_does_not_delete_the_draft(isolated, short_sample):
+    """After rendering, the normal thing is to want to adjust and render again
+    -- losing the montage at that point would be the same damage as the F5."""
     job_id = run_analysis(short_sample)
     cuts = [{"source_t": 3.0, "start_s": 1.0, "duration_s": 1.5, "at_s": 0.0}]
     api().put(f"/api/jobs/{job_id}/draft", json={"title": "v1", "cuts": cuts})
 
-    montar(job_id, [{"title": "v1", "cuts": cuts}])
+    render_montage(job_id, [{"title": "v1", "cuts": cuts}])
     run_render()
 
     assert api().get(f"/api/jobs/{job_id}").json()["draft"]["title"] == "v1"
 
 
-# ── o proxy e a onda da partida (Fase 2) ────────────────────────────────────
+# ── the proxy and the match waveform (Phase 2) ──────────────────────────────
 
 
-def test_o_proxy_sai_da_mesma_decodificacao_e_e_muito_menor(
+def test_the_proxy_comes_out_of_the_same_decode_and_is_much_smaller(
     isolated, short_sample
 ):
-    """A cópia reduzida existe para o monitor do editor.
+    """The reduced copy exists for the editor's monitor.
 
-    Buscar dentro da gravação original dezenas de vezes por segundo derrubava o
-    elemento de vídeo do navegador. O proxy sai como mais uma saída da
-    decodificação que já acontece, então o custo é perto de zero -- e é isso
-    que este teste guarda junto com o tamanho.
+    Seeking inside the original recording dozens of times a second used to
+    bring the browser's video element down. The proxy comes out as one more
+    output of the decode that already happens, so its cost is close to zero --
+    and that is what this test guards along with the size.
     """
     from owcore import ffmpeg
     from owcore.models import Job
@@ -607,18 +615,18 @@ def test_o_proxy_sai_da_mesma_decodificacao_e_e_muito_menor(
 
     with session() as s:
         job = s.get(Job, job_id)
-        assert job.proxy_key, "o preprocessador nao gerou o proxy"
+        assert job.proxy_key, "the preprocessor did not generate the proxy"
         key = job.proxy_key
     storage = get_storage()
     assert storage.exists(key)
 
-    proxy = local_copy(key, Path(isolated.work_dir) / "conferencia")
+    proxy = local_copy(key, Path(isolated.work_dir) / "check")
     info = ffmpeg.probe(proxy)
     original = ffmpeg.probe(short_sample)
 
-    # mesma partida: a duracao tem de bater
+    # same match: the duration must match
     assert info.duration_s == pytest.approx(original.duration_s, abs=0.5)
-    # e a tela inteira, nao um recorte
+    # and the whole screen, not a crop
     assert info.width / info.height == pytest.approx(
         original.width / original.height, abs=0.02
     )
@@ -626,20 +634,20 @@ def test_o_proxy_sai_da_mesma_decodificacao_e_e_muito_menor(
     assert proxy.stat().st_size < short_sample.stat().st_size
 
 
-def test_o_job_diz_o_tamanho_da_gravacao(isolated, short_sample):
-    """E o padrao de exportacao -- e o que deixa o editor avisar que a saida
-    pedida vai cortar o quadro."""
+def test_the_job_says_the_recording_size(isolated, short_sample):
+    """It is the export default -- and what lets the editor warn that the
+    requested output will crop the frame."""
     from owcore import ffmpeg
 
     job_id = run_analysis(short_sample)
-    esperado = ffmpeg.probe(short_sample)
+    expected = ffmpeg.probe(short_sample)
 
     detail = api().get(f"/api/jobs/{job_id}").json()
-    assert detail["width"] == esperado.width
-    assert detail["height"] == esperado.height
+    assert detail["width"] == expected.width
+    assert detail["height"] == expected.height
 
 
-def test_o_proxy_e_servido_com_range(isolated, short_sample):
+def test_the_proxy_is_served_with_range(isolated, short_sample):
     job_id = run_analysis(short_sample)
 
     detail = api().get(f"/api/jobs/{job_id}").json()
@@ -651,236 +659,238 @@ def test_o_proxy_e_servido_com_range(isolated, short_sample):
     assert resp.headers["content-type"] == "video/mp4"
 
 
-def test_partida_analisada_antes_do_proxy_diz_isso_em_vez_de_quebrar(isolated):
-    """O app cai na gravacao original quando `proxy_url` vem nulo."""
+def test_a_match_analysed_before_proxies_says_so_instead_of_breaking(isolated):
+    """The app falls back to the original recording when `proxy_url` is null."""
     from owcore.models import Job
 
     with session() as s:
-        s.add(Job(id="antigo0000000001", video_key="k", video_name="v.mp4"))
+        s.add(Job(id="old0000000000001", video_key="k", video_name="v.mp4"))
 
-    assert api().get("/api/jobs/antigo0000000001").json()["proxy_url"] is None
-    assert api().get("/api/jobs/antigo0000000001/proxy").status_code == 404
+    assert api().get("/api/jobs/old0000000000001").json()["proxy_url"] is None
+    assert api().get("/api/jobs/old0000000000001/proxy").status_code == 404
 
 
-def test_partida_antiga_e_medida_ao_abrir_o_editor(isolated, short_sample):
-    """A coluna nova nasce vazia numa partida analisada antes dela existir, e o
-    reconciliador de esquema nao tem como saber o que ela deveria valer -- so o
-    arquivo sabe. Sem isso o editor abriria sem poder dizer se um 9:16 corta o
-    quadro dela."""
+def test_an_old_match_is_measured_when_the_editor_opens(isolated, short_sample):
+    """The new column is born empty on a match analysed before it existed, and
+    the schema reconciler has no way of knowing what it should hold -- only the
+    file knows. Without this the editor would open unable to say whether a 9:16
+    crops its frame."""
     from owcore import ffmpeg
     from owcore.models import Job, JobStatus
     from owcore.storage import get_storage
 
-    key = get_storage().put_file("antigo/video.mp4", short_sample)
+    key = get_storage().put_file("old/video.mp4", short_sample)
     with session() as s:
-        # `ready` porque e o que uma partida antiga e: ela ja foi analisada, so
-        # que por uma versao que nao tinha esta coluna
-        s.add(Job(id="antigo0000000002", video_key=key, video_name="v.mp4",
+        # `ready` because that is what an old match is: it was already
+        # analysed, just by a version that did not have this column
+        s.add(Job(id="old0000000000002", video_key=key, video_name="v.mp4",
                   status=JobStatus.READY))
 
-    esperado = ffmpeg.probe(short_sample)
-    detail = api().get("/api/jobs/antigo0000000002").json()
-    assert detail["width"] == esperado.width
-    assert detail["height"] == esperado.height
+    expected = ffmpeg.probe(short_sample)
+    detail = api().get("/api/jobs/old0000000000002").json()
+    assert detail["width"] == expected.width
+    assert detail["height"] == expected.height
 
-    # e a medida fica guardada: o proximo GET nao paga outro ffprobe
+    # and the measurement is stored: the next GET does not pay another ffprobe
     with session() as s:
-        assert s.get(Job, "antigo0000000002").width == esperado.width
+        assert s.get(Job, "old0000000000002").width == expected.width
 
 
-def test_partida_sendo_analisada_nao_paga_ffprobe(isolated, short_sample):
-    """Enquanto a analise roda, o preprocessador vai gravar o tamanho de
-    verdade em segundos -- nao ha o que remendar. E ler o cabecalho pela rede
-    justamente enquanto ele baixa o mesmo arquivo disputa a mesma banda: medido,
-    uma consulta de 0,5s passou de 30s nessa janela, e a tela, que consulta de
-    dois em dois segundos, mostra isso como servidor fora do ar."""
+def test_a_match_being_analysed_does_not_pay_an_ffprobe(isolated, short_sample):
+    """While the analysis runs, the preprocessor will store the real size in
+    seconds -- there is nothing to patch. And reading the header over the
+    network right while it downloads the same file competes for the same
+    bandwidth: measured, a 0.5s query went past 30s in that window, and the
+    screen, which polls every two seconds, shows that as the server being
+    down."""
     from owcore.models import Job, JobStatus
     from owcore.storage import get_storage
 
-    key = get_storage().put_file("andando/video.mp4", short_sample)
+    key = get_storage().put_file("running/video.mp4", short_sample)
     with session() as s:
-        s.add(Job(id="andando000000001", video_key=key, video_name="v.mp4",
+        s.add(Job(id="running000000001", video_key=key, video_name="v.mp4",
                   status=JobStatus.PREPROCESSING))
 
-    detail = api().get("/api/jobs/andando000000001").json()
-    assert detail["width"] == 0, "mediu uma gravacao que ainda esta sendo lida"
+    detail = api().get("/api/jobs/running000000001").json()
+    assert detail["width"] == 0, "measured a recording that is still being read"
     with session() as s:
-        assert s.get(Job, "andando000000001").width in (0, None)
+        assert s.get(Job, "running000000001").width in (0, None)
 
 
-def test_medir_uma_gravacao_sumida_nao_derruba_a_tela(isolated):
-    """Vale mais abrir o editor sem o tamanho do que nao abrir."""
+def test_measuring_a_vanished_recording_does_not_bring_the_screen_down(isolated):
+    """Better to open the editor without the size than not to open it."""
     from owcore.models import Job
 
     with session() as s:
-        s.add(Job(id="antigo0000000003", video_key="sumido.mp4", video_name="v"))
+        s.add(Job(id="old0000000000003", video_key="vanished.mp4", video_name="v"))
 
-    detail = api().get("/api/jobs/antigo0000000003").json()
+    detail = api().get("/api/jobs/old0000000000003").json()
     assert detail["width"] == 0
 
 
-def test_a_onda_da_partida_volta_com_o_job(isolated, short_sample):
-    """É ela que mostra o tiro e a explosão na régua do editor."""
+def test_the_match_waveform_comes_back_with_the_job(isolated, short_sample):
+    """It is what shows the shot and the explosion on the editor's ruler."""
     job_id = run_analysis(short_sample)
 
     detail = api().get(f"/api/jobs/{job_id}").json()
-    onda = detail["waveform"]
+    wave_ = detail["waveform"]
 
-    assert len(onda) > 100, "sem onda nao da para casar o corte com o som"
-    assert all(0.0 <= v <= 1.0 for v in onda)
-    assert max(onda) == pytest.approx(1.0), "a onda e normalizada pelo pico"
+    assert len(wave_) > 100, "without a waveform the cut cannot be matched to the sound"
+    assert all(0.0 <= v <= 1.0 for v in wave_)
+    assert max(wave_) == pytest.approx(1.0), "the waveform is normalised by its peak"
 
 
-def test_a_onda_nao_vai_na_listagem(isolated, short_sample):
-    """São alguns milhares de números por partida, e a lista não os usa."""
+def test_the_waveform_is_not_in_the_listing(isolated, short_sample):
+    """It is a few thousand numbers per match, and the list does not use them."""
     run_analysis(short_sample)
     jobs = api().get("/api/jobs").json()["jobs"]
 
-    assert jobs, "nenhuma partida na listagem"
+    assert jobs, "no match in the listing"
     assert "waveform" not in jobs[0]
-    # o proxy, esse sim, vai: a lista e por onde o app decide o que abrir
+    # the proxy, on the other hand, goes: the list is how the app decides what
+    # to open
     assert "proxy_url" in jobs[0]
 
 
-# ── montagem em camadas (Fase 3) ────────────────────────────────────────────
+# ── layered montage (Phase 3) ───────────────────────────────────────────────
 
 
-def test_o_formato_da_v1_continua_entrando_e_sai_em_camadas(isolated):
-    """Nenhuma migracao roda no banco: o formato velho e entrada valida.
+def test_the_v1_format_still_comes_in_and_goes_out_as_layers(isolated):
+    """No migration runs on the database: the old format is valid input.
 
-    Um rascunho salvo antes desta versao, ou um pedido guardado num render
-    antigo, chega com `cuts` e e convertido na leitura -- uma camada so, de
-    clipes de gravacao.
+    A draft saved before this version, or a request stored in an old render,
+    arrives with `cuts` and is converted on read -- a single layer of recording
+    clips.
     """
     from owcore.models import ClipSource, Timeline
 
-    velha = Timeline(
+    old = Timeline(
         cuts=[
             {"start_s": 10, "duration_s": 2, "at_s": 0, "kind": "kill"},
             {"start_s": 30, "duration_s": 1, "at_s": 3},
         ]
     )
 
-    assert len(velha.layers) == 1
-    assert [c.at_s for c in velha.clips] == [0.0, 3.0]
-    assert velha.clips[0].source is ClipSource.RECORDING
-    assert velha.clips[0].kind == "kill"
-    assert velha.duration_s == pytest.approx(4.0)
-    # e continua sabendo se apresentar como V1, para o caminho antigo
-    assert [c.duration_s for c in velha.cuts] == [2.0, 1.0]
-    assert velha.single_layer
+    assert len(old.layers) == 1
+    assert [c.at_s for c in old.clips] == [0.0, 3.0]
+    assert old.clips[0].source is ClipSource.RECORDING
+    assert old.clips[0].kind == "kill"
+    assert old.duration_s == pytest.approx(4.0)
+    # and it still knows how to present itself as V1, for the old path
+    assert [c.duration_s for c in old.cuts] == [2.0, 1.0]
+    assert old.single_layer
 
 
-def test_camada_ou_transformacao_tira_a_montagem_do_caminho_antigo(isolated):
-    """A escolha do caminho e o que protege o render.
+def test_a_layer_or_transform_takes_the_montage_off_the_old_path(isolated):
+    """The choice of path is what protects the render.
 
-    Corte-e-emenda e mais resistente -- um corte ruim custa so ele --, entao ele
-    fica com o caso comum. O grafo entra so quando e preciso.
+    Cut-and-splice is more resilient -- a bad cut costs only itself -- so it
+    keeps the common case. The graph only comes in when needed.
     """
     from owcore.models import Layer, Timeline, TimelineClip
 
-    simples = Timeline(layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=1)])])
-    assert simples.single_layer
+    simple = Timeline(layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=1)])])
+    assert simple.single_layer
 
-    duas = Timeline(
+    two = Timeline(
         layers=[
             Layer(clips=[TimelineClip(at_s=0, duration_s=1)]),
             Layer(clips=[TimelineClip(at_s=0, duration_s=1)]),
         ]
     )
-    assert not duas.single_layer
+    assert not two.single_layer
 
-    com_zoom = Timeline(
+    scaled = Timeline(
         layers=[
             Layer(clips=[
                 TimelineClip(at_s=0, duration_s=1, transform={"scale": 1.5})
             ])
         ]
     )
-    assert not com_zoom.single_layer
+    assert not scaled.single_layer
 
-    # camada escondida nao conta: sobra uma so, e ela e simples
-    com_escondida = Timeline(
+    # a hidden layer does not count: one is left, and it is simple
+    with_hidden = Timeline(
         layers=[
             Layer(clips=[TimelineClip(at_s=0, duration_s=1)]),
             Layer(hidden=True, clips=[TimelineClip(at_s=0, duration_s=1)]),
         ]
     )
-    assert com_escondida.single_layer
+    assert with_hidden.single_layer
 
 
-def test_duas_camadas_viram_um_video_com_a_de_cima_por_cima(
+def test_two_layers_become_one_video_with_the_upper_on_top(
     isolated, short_sample
 ):
-    """O caminho novo, do pedido ao mp4."""
+    """The new path, from the request to the mp4."""
     job_id = run_analysis(short_sample)
 
-    camadas = [
+    layers = [
         {"clips": [
             {"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0, "kind": "kill"},
             {"at_s": 3.0, "duration_s": 1.5, "start_s": 6.0},
         ]},
-        {"name": "canto", "clips": [
+        {"name": "corner", "clips": [
             {"at_s": 0.5, "duration_s": 1.5, "start_s": 9.0,
              "transform": {"scale": 0.35, "x": 0.6, "y": -0.6, "opacity": 0.9}},
         ]},
     ]
-    render_id = montar(job_id, [{"title": "Em camadas", "layers": camadas}])
+    render_id = render_montage(job_id, [{"title": "Layered", "layers": layers}])
     run_render()
 
-    pedido = api().get(f"/api/renders/{render_id}").json()
-    assert pedido["status"] == "done", pedido["error"]
-    clip = pedido["clips"][0]
+    request = api().get(f"/api/renders/{render_id}").json()
+    assert request["status"] == "done", request["error"]
+    clip = request["clips"][0]
 
     assert clip["meta"]["composed"] is True
     assert clip["meta"]["layers"] == 2
     assert clip["meta"]["segments"] == 3
-    assert clip["video_url"], "o video nao saiu"
-    # o pedido sabe se contar
-    assert pedido["timelines"][0]["n_layers"] == 2
-    assert pedido["timelines"][0]["n_cuts"] == 3
+    assert clip["video_url"], "the video did not come out"
+    # the request knows how to count itself
+    assert request["timelines"][0]["n_layers"] == 2
+    assert request["timelines"][0]["n_cuts"] == 3
 
     from owcore import ffmpeg
     from owcore.storage import local_copy
 
     with session() as s:
         key = next(c.key for c in s.get(Job, job_id).clips)
-    saida = local_copy(key, Path(isolated.work_dir) / "camadas")
-    info = ffmpeg.probe(saida)
+    output = local_copy(key, Path(isolated.work_dir) / "layers")
+    info = ffmpeg.probe(output)
     original = ffmpeg.probe(short_sample)
 
-    # 0 -> 4.5s: o ultimo clipe termina em 4.5
+    # 0 -> 4.5s: the last clip ends at 4.5
     assert info.duration_s == pytest.approx(4.5, abs=0.35)
-    # a tela e a da gravacao: a sobreposicao nao muda o quadro
+    # the frame is the recording's: overlaying does not change it
     assert (info.width, info.height) == (original.width, original.height)
 
 
-def test_uma_saida_fora_do_padrao_tira_a_montagem_do_caminho_antigo(isolated):
-    """Corte-e-emenda nao sabe mudar a proporcao nem por marca d'agua: essas
-    coisas so existem no grafo de filtros. Foi assim que um pedido de 9:16 saiu
-    16:9 sem reclamar de nada."""
+def test_a_non_default_output_takes_the_montage_off_the_old_path(isolated):
+    """Cut-and-splice cannot change the aspect ratio or add a watermark: those
+    only exist in the filter graph. That is how a 9:16 request came out 16:9
+    without complaining about anything."""
     from owcore.models import Layer, Timeline, TimelineClip
 
-    def montagem(**export):
+    def montage(**export):
         return Timeline(
             export=export,
             layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=2, start_s=1)])],
         )
 
-    assert montagem().single_layer, "sem pedido nenhum, o caminho antigo"
-    assert not montagem(width=1080, height=1920).single_layer
-    assert not montagem(from_s=1.0).single_layer
-    assert not montagem(watermark_id="m1").single_layer
-    assert not montagem(crf=30).single_layer
-    assert not montagem(fps=24).single_layer
+    assert montage().single_layer, "with nothing requested, the old path"
+    assert not montage(width=1080, height=1920).single_layer
+    assert not montage(from_s=1.0).single_layer
+    assert not montage(watermark_id="m1").single_layer
+    assert not montage(crf=30).single_layer
+    assert not montage(fps=24).single_layer
 
 
-def test_montagem_de_uma_camada_so_continua_pelo_caminho_antigo(
+def test_a_single_layer_montage_still_goes_the_old_path(
     isolated, short_sample
 ):
-    """E o caminho que sobrevive a um corte ruim, entao ele fica com o comum."""
+    """It is the path that survives a bad cut, so it keeps the common case."""
     job_id = run_analysis(short_sample)
-    render_id = montar(
+    render_id = render_montage(
         job_id,
         [{"layers": [{"clips": [
             {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
@@ -891,42 +901,42 @@ def test_montagem_de_uma_camada_so_continua_pelo_caminho_antigo(
 
     clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
     assert "composed" not in clip["meta"]
-    # e o zip dos cortes, que so o caminho antigo produz, continua vindo
+    # and the cuts zip, which only the old path produces, still comes
     assert clip["segments_zip_url"]
     assert clip["meta"]["blackfill_s"] == pytest.approx(1.5, abs=0.05)
 
 
-def test_clipe_fora_da_gravacao_vira_fundo_sem_mover_os_outros(isolated):
-    """A mesma promessa da V1, agora no grafo."""
+def test_a_clip_outside_the_recording_becomes_background_without_moving_the_others(isolated):
+    """The same promise as V1, now in the graph."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
-        TimelineClip(at_s=0, duration_s=2, start_s=59),   # so 1s existe
+        TimelineClip(at_s=0, duration_s=2, start_s=59),   # only 1s exists
         TimelineClip(at_s=4, duration_s=1, start_s=1),
     ])])
     c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
                source_duration_s=60)
 
-    # o primeiro entra aparado em 1s, e o segundo continua entrando aos 4s
+    # the first comes in trimmed to 1s, and the second still comes in at 4s
     assert "trim=duration=1.000" in c.filter_complex
     assert "between(t,4.000,5.000)" in c.filter_complex
     assert c.duration_s == pytest.approx(5.0)
 
 
-def test_fonte_que_ainda_nao_da_para_montar_e_recusada(isolated):
-    """Ignorar em silencio seria pior do que nao aceitar."""
+def test_a_source_that_cannot_be_rendered_yet_is_refused(isolated):
+    """Ignoring it silently would be worse than not accepting it."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=1, source="color", fill="black"),
     ])])
-    with pytest.raises(ValueError, match="ainda nao e montavel"):
+    with pytest.raises(ValueError, match="cannot be rendered yet"):
         compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
 
-def test_camada_muda_entra_sem_som(isolated):
+def test_a_muted_layer_comes_in_without_sound(isolated):
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -936,19 +946,19 @@ def test_camada_muda_entra_sem_som(isolated):
     ])
     c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
-    # dois videos, um audio so
+    # two videos, a single audio
     assert c.filter_complex.count("overlay=") == 2
     assert "amix" not in c.filter_complex
     assert c.audio_map == "[aout]"
 
 
-# ── a biblioteca de midia (Fase 4) ──────────────────────────────────────────
+# ── the media library (Phase 4) ─────────────────────────────────────────────
 
 
-def subir_media(job_id: str, nome: str, dados: bytes) -> str:
-    """Traz um arquivo e roda o worker que o analisa."""
+def upload_media(job_id: str, name: str, data: bytes) -> str:
+    """Brings a file in and runs the worker that analyses it."""
     resp = api().post(
-        f"/api/jobs/{job_id}/media", files={"file": (nome, dados, "application/octet-stream")}
+        f"/api/jobs/{job_id}/media", files={"file": (name, data, "application/octet-stream")}
     )
     assert resp.status_code == 201, resp.text
     media_id = resp.json()["id"]
@@ -959,36 +969,37 @@ def subir_media(job_id: str, nome: str, dados: bytes) -> str:
     return media_id
 
 
-def png_de_teste(destino: Path, cor: str = "red") -> Path:
-    """Uma imagem qualquer, feita pelo proprio ffmpeg."""
+def make_png(dest: Path, colour: str = "red") -> Path:
+    """Any image, made by ffmpeg itself."""
     from owcore.config import get_settings
 
     subprocess.run(
         [get_settings().ffmpeg, "-y", "-v", "error", "-f", "lavfi",
-         "-i", f"color=c={cor}:s=320x180", "-frames:v", "1", str(destino)],
+         "-i", f"color=c={colour}:s=320x180", "-frames:v", "1", str(dest)],
         check=True,
     )
-    return destino
+    return dest
 
 
-def test_a_musica_virou_um_item_da_biblioteca(isolated, short_sample):
-    """Generalizar `Track` custou uma coluna e evitou um segundo sistema de
-    upload vivendo ao lado do primeiro."""
+
+def test_music_became_a_library_item(isolated, short_sample):
+    """Generalising `Track` cost one column and avoided a second upload system
+    living next to the first."""
     job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
+    track_id = upload_music(job_id)
 
     detail = api().get(f"/api/jobs/{job_id}").json()
     assert [m["id"] for m in detail["media"]] == [track_id]
     assert detail["media"][0]["kind"] == "audio"
-    # e continua aparecendo como musica, que e o que o seletor de trilha usa
+    # and it still shows up as music, which is what the track picker uses
     assert [t["id"] for t in detail["tracks"]] == [track_id]
 
 
-def test_um_video_importado_ganha_dimensoes_miniatura_e_proxy(
+def test_an_imported_video_gets_dimensions_thumbnail_and_proxy(
     isolated, short_sample
 ):
     job_id = run_analysis(short_sample)
-    media_id = subir_media(job_id, "clipe.mp4", short_sample.read_bytes())
+    media_id = upload_media(job_id, "clip.mp4", short_sample.read_bytes())
 
     item = api().get(f"/api/media/{media_id}").json()
     assert item["status"] == "ready", item["error"]
@@ -996,22 +1007,22 @@ def test_um_video_importado_ganha_dimensoes_miniatura_e_proxy(
     assert item["width"] > 0 and item["height"] > 0
     assert item["fps"] > 0
     assert item["duration_s"] > 5
-    assert item["thumb_url"], "sem miniatura nao da para escolher na lista"
-    assert item["proxy_url"], "sem proxy o monitor arrastaria o arquivo cheio"
+    assert item["thumb_url"], "without a thumbnail it cannot be picked in the list"
+    assert item["proxy_url"], "without a proxy the monitor would drag the full file"
 
-    # e os dois sao servidos
+    # and both are served
     assert api().get(item["thumb_url"]).status_code == 200
     assert api().get(item["proxy_url"]).status_code == 200
 
 
-def test_uma_imagem_ganha_dimensoes_e_miniatura_mas_nao_duracao(
+def test_an_image_gets_dimensions_and_thumbnail_but_no_duration(
     isolated, short_sample, tmp_path
 ):
-    """Quanto uma imagem fica na tela e escolha da montagem, nao propriedade do
-    arquivo."""
+    """How long an image stays on screen is the montage's choice, not a
+    property of the file."""
     job_id = run_analysis(short_sample)
-    png = png_de_teste(tmp_path / "logo.png")
-    media_id = subir_media(job_id, "logo.png", png.read_bytes())
+    png = make_png(tmp_path / "logo.png")
+    media_id = upload_media(job_id, "logo.png", png.read_bytes())
 
     item = api().get(f"/api/media/{media_id}").json()
     assert item["status"] == "ready", item["error"]
@@ -1019,101 +1030,101 @@ def test_uma_imagem_ganha_dimensoes_e_miniatura_mas_nao_duracao(
     assert (item["width"], item["height"]) == (320, 180)
     assert item["duration_s"] == 0
     assert item["thumb_url"]
-    assert item["proxy_url"] is None, "imagem nao precisa de proxy"
+    assert item["proxy_url"] is None, "an image needs no proxy"
 
 
-def test_arquivo_de_tipo_desconhecido_e_recusado(isolated, short_sample):
-    """Aceitar e falhar depois seria pior do que dizer nao agora."""
+def test_a_file_of_unknown_kind_is_refused(isolated, short_sample):
+    """Accepting it and failing later would be worse than saying no now."""
     job_id = run_analysis(short_sample)
     resp = api().post(
         f"/api/jobs/{job_id}/media",
-        files={"file": ("planilha.xlsx", b"nao sou midia", "application/octet-stream")},
+        files={"file": ("sheet.xlsx", b"not media", "application/octet-stream")},
     )
     assert resp.status_code == 422
-    assert "nao sei o que fazer" in resp.json()["detail"]
+    assert "don't know what to do" in resp.json()["detail"]
 
 
-def test_uma_imagem_entra_na_montagem_como_qualquer_clipe(
+def test_an_image_goes_into_the_montage_like_any_clip(
     isolated, short_sample, tmp_path
 ):
-    """O caminho inteiro: importar, montar por cima e conferir o mp4."""
+    """The whole path: import, assemble on top and check the mp4."""
     job_id = run_analysis(short_sample)
-    png = png_de_teste(tmp_path / "selo.png", cor="blue")
-    media_id = subir_media(job_id, "selo.png", png.read_bytes())
+    png = make_png(tmp_path / "badge.png", colour="blue")
+    media_id = upload_media(job_id, "badge.png", png.read_bytes())
 
-    camadas = [
+    layers = [
         {"clips": [{"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0}]},
-        {"name": "selo", "clips": [
+        {"name": "badge", "clips": [
             {"at_s": 0.5, "duration_s": 1.0, "source": "media",
              "media_id": media_id,
              "transform": {"scale": 0.5, "x": 0.5, "y": -0.5}},
         ]},
     ]
-    render_id = montar(job_id, [{"title": "Com selo", "layers": camadas}])
+    render_id = render_montage(job_id, [{"title": "With badge", "layers": layers}])
     run_render()
 
-    pedido = api().get(f"/api/renders/{render_id}").json()
-    assert pedido["status"] == "done", pedido["error"]
-    clip = pedido["clips"][0]
+    request = api().get(f"/api/renders/{render_id}").json()
+    assert request["status"] == "done", request["error"]
+    clip = request["clips"][0]
     assert clip["meta"]["media"] == 1
-    assert clip["video_url"], "o video nao saiu"
+    assert clip["video_url"], "the video did not come out"
 
     from owcore import ffmpeg
     from owcore.storage import local_copy
 
     with session() as s:
         key = next(c.key for c in s.get(Job, job_id).clips)
-    saida = local_copy(key, Path(isolated.work_dir) / "com_selo")
-    assert ffmpeg.probe(saida).duration_s == pytest.approx(2.0, abs=0.35)
+    output = local_copy(key, Path(isolated.work_dir) / "with_badge")
+    assert ffmpeg.probe(output).duration_s == pytest.approx(2.0, abs=0.35)
 
 
-def test_midia_de_outro_job_e_recusada_no_pedido(isolated, short_sample):
-    """A montagem sairia sem ela, e sem aviso."""
+def test_media_from_another_job_is_refused_in_the_request(isolated, short_sample):
+    """The montage would come out without it, and with no warning."""
     job_id = run_analysis(short_sample)
     resp = api().post(
         f"/api/jobs/{job_id}/renders",
         data={"timelines": json.dumps([
             {"layers": [{"clips": [
                 {"at_s": 0, "duration_s": 1, "source": "media",
-                 "media_id": "naoexiste"},
+                 "media_id": "doesnotexist"},
             ]}]}
         ])},
     )
     assert resp.status_code == 422
-    assert "midia desconhecida" in resp.json()["detail"]
+    assert "unknown media" in resp.json()["detail"]
 
 
-def test_tirar_da_biblioteca(isolated, short_sample, tmp_path):
+def test_removing_from_the_library(isolated, short_sample, tmp_path):
     job_id = run_analysis(short_sample)
-    png = png_de_teste(tmp_path / "x.png")
-    media_id = subir_media(job_id, "x.png", png.read_bytes())
+    png = make_png(tmp_path / "x.png")
+    media_id = upload_media(job_id, "x.png", png.read_bytes())
 
     assert api().delete(f"/api/media/{media_id}").status_code == 204
     assert api().get(f"/api/media/{media_id}").status_code == 404
     assert api().get(f"/api/jobs/{job_id}").json()["media"] == []
 
 
-# ── efeitos (Fase 5) ────────────────────────────────────────────────────────
+# ── effects (Phase 5) ───────────────────────────────────────────────────────
 
 
-def test_velocidade_muda_quanto_da_fonte_o_clipe_come(isolated):
-    """Nao a duracao dele no video -- essa e o que o usuario arrasta."""
+def test_speed_changes_how_much_source_the_clip_consumes(isolated):
+    """Not its duration in the video -- that is what the user drags."""
     from owcore.models import TimelineClip
 
-    lento = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=0.5)
-    rapido = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=2.0)
+    slow = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=0.5)
+    fast = TimelineClip(at_s=0, duration_s=2, start_s=10, speed=2.0)
 
-    assert lento.source_consumed_s == pytest.approx(1.0)
-    assert rapido.source_consumed_s == pytest.approx(4.0)
-    # e onde ele termina na gravacao muda junto
-    assert lento.end_s == pytest.approx(11.0)
-    assert rapido.end_s == pytest.approx(14.0)
-    # mas os dois ocupam os mesmos 2s do video
-    assert lento.until_s == rapido.until_s == pytest.approx(2.0)
+    assert slow.source_consumed_s == pytest.approx(1.0)
+    assert fast.source_consumed_s == pytest.approx(4.0)
+    # and where it ends in the recording changes along
+    assert slow.end_s == pytest.approx(11.0)
+    assert fast.end_s == pytest.approx(14.0)
+    # but both take the same 2s of the video
+    assert slow.until_s == fast.until_s == pytest.approx(2.0)
 
 
-def test_o_grafo_acelera_imagem_e_som_juntos(isolated):
-    """Descompasso entre imagem e som e pior do que nao ter som."""
+def test_the_graph_speeds_picture_and_sound_up_together(isolated):
+    """Picture and sound out of step is worse than having no sound."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1122,15 +1133,15 @@ def test_o_grafo_acelera_imagem_e_som_juntos(isolated):
     ])])
     g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
-    # 2s de video a 0.4x comem 0.8s de gravacao
+    # 2s of video at 0.4x consume 0.8s of recording
     assert "trim=duration=0.800" in g
     assert "setpts=PTS/0.4000" in g
-    # `atempo` so aceita de 0.5 em diante, entao 0.4 vira 0.5 x 0.8
+    # `atempo` only accepts 0.5 and up, so 0.4 becomes 0.5 x 0.8
     assert "atempo=0.5" in g and "atempo=0.8000" in g
 
 
-def test_a_ordem_dos_filtros_poe_o_fade_no_relogio_do_video(isolated):
-    """Um fade de meio segundo dura meio segundo no video, nao na fonte."""
+def test_the_filter_order_puts_the_fade_on_the_videos_clock(isolated):
+    """A half-second fade lasts half a second in the video, not in the source."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1140,49 +1151,49 @@ def test_a_ordem_dos_filtros_poe_o_fade_no_relogio_do_video(isolated):
     ])])
     g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
-    # a velocidade vem antes do fade: ela muda o relogio do clipe
+    # speed comes before the fade: it changes the clip's clock
     assert g.index("setpts=PTS/2.0000") < g.index("fade=t=in")
-    # e o fade de saida comeca contando a duracao no *video*
+    # and the fade out starts counting the duration in the *video*
     assert "fade=t=out:st=1.500:d=0.500" in g
 
 
-def test_cor_e_aplicada_e_o_neutro_nao_polui_o_grafo(isolated):
+def test_colour_is_applied_and_neutral_does_not_pollute_the_graph(isolated):
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
-    def grafo(**kw):
+    def graph(**kw):
         t = Timeline(layers=[Layer(clips=[
             TimelineClip(at_s=0, duration_s=1, start_s=1, **kw),
         ])])
         return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
                       fps=30).filter_complex
 
-    assert "eq=" not in grafo()
-    assert "saturation=1.4000" in grafo(color={"saturation": 1.4})
+    assert "eq=" not in graph()
+    assert "saturation=1.4000" in graph(color={"saturation": 1.4})
 
 
-def test_a_musica_deixa_o_jogo_aparecer_por_baixo(isolated):
-    """Com `game_volume` em 0 ela substitui, como na V1; acima disso, mistura."""
+def test_the_music_lets_the_game_show_through_underneath(isolated):
+    """With `game_volume` at 0 it replaces, as in V1; above that, it mixes."""
     from owcore.compose import compose_graph
 
-    def grafo(**kw):
+    def graph(**kw):
         return compose_graph(
-            _com_musica_na_regua(**kw),
+            _with_music_on_the_ruler(**kw),
             source=Path("x.mp4"), width=640, height=360, fps=30,
             source_duration_s=600, library=_audio_library(Path("m.mp3")),
         ).filter_complex
 
-    # o padrao continua sendo o da V1: a musica manda sozinha
-    assert "[game]" not in grafo()
-    misturado = grafo(game_volume=0.5, music_volume=0.8)
-    assert "volume=0.8000[music]" in misturado
-    assert "volume=0.5000[game]" in misturado
-    assert "[music][game]amix" in misturado
+    # the default is still V1's: the music rules alone
+    assert "[game]" not in graph()
+    mixed = graph(game_volume=0.5, music_volume=0.8)
+    assert "volume=0.8000[music]" in mixed
+    assert "volume=0.5000[game]" in mixed
+    assert "[music][game]amix" in mixed
 
 
-def test_sem_musica_nenhuma_o_som_dos_cortes_vale_por_si(isolated):
-    """Nem `music_volume` nem `game_volume` tem o que fazer aqui: nao ha duas
-    coisas a equilibrar."""
+def test_with_no_music_at_all_the_cuts_sound_stands_on_its_own(isolated):
+    """Neither `music_volume` nor `game_volume` has anything to do here: there
+    are not two things to balance."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1197,28 +1208,28 @@ def test_sem_musica_nenhuma_o_som_dos_cortes_vale_por_si(isolated):
     assert "[a1]anull[aout]" in g
 
 
-def test_efeito_tira_a_montagem_do_caminho_de_corte_e_emenda(isolated):
-    """Corte-e-emenda nao sabe fazer nada disto."""
+def test_an_effect_takes_the_montage_off_the_cut_and_splice_path(isolated):
+    """Cut-and-splice cannot do any of this."""
     from owcore.models import Layer, Timeline, TimelineClip
 
-    def so_uma_camada(**kw):
+    def single_layer(**kw):
         return Timeline(layers=[Layer(clips=[
             TimelineClip(at_s=0, duration_s=1, start_s=1, **kw),
         ])]).single_layer
 
-    assert so_uma_camada()
-    assert not so_uma_camada(speed=2.0)
-    assert not so_uma_camada(fade={"in_s": 0.2})
-    assert not so_uma_camada(color={"contrast": 1.2})
+    assert single_layer()
+    assert not single_layer(speed=2.0)
+    assert not single_layer(fade={"in_s": 0.2})
+    assert not single_layer(color={"contrast": 1.2})
 
 
-def test_efeitos_absurdos_sao_recusados(isolated):
-    """Guardar lixo agora seria um render quebrado depois."""
+def test_absurd_effects_are_refused(isolated):
+    """Storing garbage now would be a broken render later."""
     from owcore.models import TimelineClip
 
     with pytest.raises(ValueError, match="speed"):
         TimelineClip(at_s=0, duration_s=1, start_s=0, speed=50)
-    with pytest.raises(ValueError, match="fades somados"):
+    with pytest.raises(ValueError, match="fades together"):
         TimelineClip(at_s=0, duration_s=1, start_s=0,
                      fade={"in_s": 0.7, "out_s": 0.7})
     with pytest.raises(ValueError, match="saturation"):
@@ -1226,103 +1237,104 @@ def test_efeitos_absurdos_sao_recusados(isolated):
                      color={"saturation": 9})
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_camera_lenta_e_fade_viram_video_de_verdade(isolated, short_sample):
-    """Do pedido ao mp4, com o relogio conferido."""
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_slow_motion_and_fades_become_a_real_video(isolated, short_sample):
+    """From the request to the mp4, with the clock checked."""
     job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
+    track_id = upload_music(job_id)
 
-    camadas = [{"clips": [
+    layers = [{"clips": [
         {"at_s": 0.0, "duration_s": 2.0, "start_s": 1.0, "speed": 0.5,
          "fade": {"in_s": 0.4}, "color": {"saturation": 1.3}},
         {"at_s": 2.0, "duration_s": 1.5, "start_s": 6.0, "speed": 2.0,
          "fade": {"out_s": 0.5}},
     ]}]
-    render_id = montar(job_id, [{
-        "title": "Com efeitos", "track_id": track_id,
-        "music_volume": 0.9, "game_volume": 0.3, "layers": camadas,
+    render_id = render_montage(job_id, [{
+        "title": "With effects", "track_id": track_id,
+        "music_volume": 0.9, "game_volume": 0.3, "layers": layers,
     }])
     run_render()
 
-    pedido = api().get(f"/api/renders/{render_id}").json()
-    assert pedido["status"] == "done", pedido["error"]
-    clip = pedido["clips"][0]
+    request = api().get(f"/api/renders/{render_id}").json()
+    assert request["status"] == "done", request["error"]
+    clip = request["clips"][0]
     assert clip["meta"]["composed"] is True
-    assert clip["video_url"], "o video nao saiu"
+    assert clip["video_url"], "the video did not come out"
 
     from owcore import ffmpeg
     from owcore.storage import local_copy
 
     with session() as s:
         key = next(c.key for c in s.get(Job, job_id).clips)
-    saida = local_copy(key, Path(isolated.work_dir) / "efeitos")
-    info = ffmpeg.probe(saida)
+    output = local_copy(key, Path(isolated.work_dir) / "effects")
+    info = ffmpeg.probe(output)
 
-    # 2s + 1.5s: a velocidade muda o que se consome da fonte, nao o que se ve
+    # 2s + 1.5s: speed changes what is consumed from the source, not what is
+    # seen
     assert info.duration_s == pytest.approx(3.5, abs=0.35)
     assert info.has_audio
 
 
-# ── quadros-chave, congelar, inverter (Fase 5, segunda metade) ──────────────
+# ── keyframes, freeze, reverse (Phase 5, second half) ───────────────────────
 
 
-def quadro_cru(video: Path, t: float) -> "np.ndarray":
-    """Um quadro em RGB, pequeno, direto do ffmpeg."""
+def raw_frame(video: Path, t: float) -> "np.ndarray":
+    """A small RGB frame, straight from ffmpeg."""
     import numpy as np
 
     from owcore.config import get_settings
 
-    saida = subprocess.run(
+    out = subprocess.run(
         [get_settings().ffmpeg, "-v", "error", "-ss", f"{t:.3f}",
          "-i", str(video), "-frames:v", "1", "-vf", "scale=80:45",
          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
         capture_output=True,
     ).stdout
-    return np.frombuffer(saida, dtype=np.uint8).astype(float)
+    return np.frombuffer(out, dtype=np.uint8).astype(float)
 
 
-def compor_e_render(timeline, source: Path, destino: Path) -> Path:
+def compose_and_render(timeline, source: Path, dest: Path) -> Path:
     from owcore import ffmpeg
     from owcore.compose import compose_graph
 
     info = ffmpeg.probe(source)
     c = compose_graph(timeline, source=source, width=info.width, height=info.height,
                fps=info.fps, source_duration_s=info.duration_s)
-    ffmpeg.compose(c, destino)
-    return destino
+    ffmpeg.compose(c, dest)
+    return dest
 
 
-def test_o_fade_revela_a_camada_de_baixo_em_vez_de_pintar_preto(
+def test_the_fade_reveals_the_layer_below_instead_of_painting_black(
     isolated, short_sample, tmp_path
 ):
-    """O `fade` do ffmpeg pinta preto; numa camada de cima isso e um borrao
-    escuro por cima do que deveria aparecer. Com `alpha=1` ele revela.
+    """ffmpeg's `fade` paints black; on an upper layer that is a dark smear
+    over what should show. With `alpha=1` it reveals.
 
-    Sobre o fundo preto os dois dao no mesmo -- e por isso o erro passou
-    despercebido na primeira metade da fase.
+    Over the black background both come out the same -- which is why the bug
+    went unnoticed in the first half of the phase.
     """
     from owcore.models import Layer, Timeline, TimelineClip
 
-    baixo = TimelineClip(at_s=0, duration_s=2, start_s=1)
-    cima = TimelineClip(at_s=0, duration_s=2, start_s=6, fade={"out_s": 1.0})
+    lower = TimelineClip(at_s=0, duration_s=2, start_s=1)
+    upper = TimelineClip(at_s=0, duration_s=2, start_s=6, fade={"out_s": 1.0})
 
-    juntos = compor_e_render(
-        Timeline(layers=[Layer(clips=[baixo]), Layer(clips=[cima])]),
-        short_sample, tmp_path / "juntos.mp4",
+    together = compose_and_render(
+        Timeline(layers=[Layer(clips=[lower]), Layer(clips=[upper])]),
+        short_sample, tmp_path / "together.mp4",
     )
-    so_baixo = compor_e_render(
-        Timeline(layers=[Layer(clips=[baixo])]),
-        short_sample, tmp_path / "baixo.mp4",
+    lower_only = compose_and_render(
+        Timeline(layers=[Layer(clips=[lower])]),
+        short_sample, tmp_path / "lower.mp4",
     )
 
-    # no fim do fade, o composto tem de ser a camada de baixo
-    a = quadro_cru(juntos, 1.95)
-    b = quadro_cru(so_baixo, 1.95)
+    # at the end of the fade, the composite must be the lower layer
+    a = raw_frame(together, 1.95)
+    b = raw_frame(lower_only, 1.95)
     assert a.size > 0 and a.size == b.size
-    assert abs(a - b).mean() < 12, "o fade pintou preto em vez de revelar"
+    assert abs(a - b).mean() < 12, "the fade painted black instead of revealing"
 
 
-def test_o_grafo_usa_fade_no_alfa(isolated):
+def test_the_graph_fades_the_alpha(isolated):
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1332,11 +1344,12 @@ def test_o_grafo_usa_fade_no_alfa(isolated):
     g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
     assert "fade=t=in:st=0:d=0.500:alpha=1" in g
-    # sem rgba o alfa nao existe, e o filtro nao teria onde mexer
+    # without rgba the alpha does not exist, and the filter would have nothing
+    # to work on
     assert g.index("format=rgba") < g.index("fade=t=in")
 
 
-def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
+def test_zoom_interpolates_between_keyframes(isolated):
     """`zoompan` animates it, with expressions in the frame's time (`it`).
 
     It used to be `crop`, which computes width and height only once -- and so
@@ -1352,52 +1365,52 @@ def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
 
     assert "zoompan=z=" in g
     assert "crop=w=" not in g
-    # a fracao 0.5 do clipe de 2s e o segundo 1
+    # the 0.5 fraction of a 2s clip is second 1
     assert "lt(it,1.0000)" in g
     # and it comes out at the canvas size and frame rate
     assert ":s=640x360:fps=30.000" in g
 
 
-def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
-    """Um zoom que fecha no fim continua fechando no fim depois de esticar."""
+def test_keyframes_are_fractions_and_follow_the_block(isolated):
+    """A zoom that closes at the end still closes at the end after stretching."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
-    def grafo(duracao: float) -> str:
+    def graph(duration: float) -> str:
         t = Timeline(layers=[Layer(clips=[
-            TimelineClip(at_s=0, duration_s=duracao, start_s=1,
+            TimelineClip(at_s=0, duration_s=duration, start_s=1,
                          zoom=[{"t": 0, "scale": 1}, {"t": 1.0, "scale": 2}]),
         ])])
         return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
                       fps=30).filter_complex
 
-    assert "lt(it,2.0000)" in grafo(2.0)
-    assert "lt(it,5.0000)" in grafo(5.0)
+    assert "lt(it,2.0000)" in graph(2.0)
+    assert "lt(it,5.0000)" in graph(5.0)
 
 
-def test_congelar_come_um_quadro_so_da_gravacao(isolated):
+def test_freezing_consumes_a_single_frame_of_the_recording(isolated):
     from owcore.models import TimelineClip
 
     c = TimelineClip(at_s=0, duration_s=3, start_s=10, freeze=True)
 
-    assert c.source_consumed_s < 0.2, "um quadro parado nao come tres segundos"
-    assert c.until_s == pytest.approx(3.0), "mas ocupa os tres no video"
+    assert c.source_consumed_s < 0.2, "a still frame does not consume three seconds"
+    assert c.until_s == pytest.approx(3.0), "but it takes all three in the video"
 
 
-def test_congelar_e_inverter_viram_video(isolated, short_sample, tmp_path):
+def test_freezing_and_reversing_become_video(isolated, short_sample, tmp_path):
     from owcore import ffmpeg
     from owcore.models import Layer, Timeline, TimelineClip
 
-    for nome, kw in [("congelado", {"freeze": True}),
-                     ("invertido", {"reverse": True})]:
+    for name, kw in [("frozen", {"freeze": True}),
+                     ("reversed", {"reverse": True})]:
         t = Timeline(layers=[Layer(clips=[
             TimelineClip(at_s=0, duration_s=1.5, start_s=3, **kw),
         ])])
-        saida = compor_e_render(t, short_sample, tmp_path / f"{nome}.mp4")
-        assert ffmpeg.probe(saida).duration_s == pytest.approx(1.5, abs=0.35)
+        output = compose_and_render(t, short_sample, tmp_path / f"{name}.mp4")
+        assert ffmpeg.probe(output).duration_s == pytest.approx(1.5, abs=0.35)
 
 
-def test_um_quadro_congelado_nao_tem_som_correndo(isolated):
+def test_a_frozen_frame_has_no_running_sound(isolated):
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1409,12 +1422,13 @@ def test_um_quadro_congelado_nao_tem_som_correndo(isolated):
     assert c.audio_map is None
 
 
-def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
-    """Nao basta o grafo estar certo: a imagem tem de aproximar mesmo.
+def test_an_animated_zoom_really_zooms_in(isolated, short_sample, tmp_path):
+    """It is not enough for the graph to be right: the picture must really
+    zoom in.
 
-    O clipe e **congelado** de proposito: com o conteudo parado, a unica coisa
-    que muda entre um instante e outro e a lente. Comparar dois videos cujo
-    conteudo tambem corre no tempo nao diria nada.
+    The clip is **frozen** on purpose: with the content still, the only thing
+    that changes between one instant and another is the lens. Comparing two
+    videos whose content also runs in time would say nothing.
     """
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1422,14 +1436,14 @@ def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
         TimelineClip(at_s=0, duration_s=2, start_s=3, freeze=True,
                      zoom=[{"t": 0, "scale": 1}, {"t": 1, "scale": 3}]),
     ])])
-    video = compor_e_render(t, short_sample, tmp_path / "zoom.mp4")
+    video = compose_and_render(t, short_sample, tmp_path / "zoom.mp4")
 
-    inicio = quadro_cru(video, 0.1)
-    fim = quadro_cru(video, 1.8)
+    start = raw_frame(video, 0.1)
+    end = raw_frame(video, 1.8)
 
-    assert inicio.size > 0 and inicio.size == fim.size
-    # mesma imagem, lentes diferentes: os quadros tem de ser bem distintos
-    assert abs(inicio - fim).mean() > 10, "a lente nao se mexeu"
+    assert start.size > 0 and start.size == end.size
+    # same picture, different lenses: the frames must be clearly different
+    assert abs(start - end).mean() > 10, "the lens did not move"
 
 
 def test_a_frozen_clip_shows_its_picture_from_start_to_end(
@@ -1442,9 +1456,9 @@ def test_a_frozen_clip_shows_its_picture_from_start_to_end(
     t = Timeline(layers=[Layer(clips=[
         TimelineClip(at_s=0, duration_s=2, start_s=3, freeze=True),
     ])])
-    video = compor_e_render(t, short_sample, tmp_path / "frozen.mp4")
+    video = compose_and_render(t, short_sample, tmp_path / "frozen.mp4")
 
-    start, middle, end = (quadro_cru(video, s) for s in (0.1, 1.0, 1.8))
+    start, middle, end = (raw_frame(video, s) for s in (0.1, 1.0, 1.8))
     assert start.mean() > 20, "the frozen clip came out black"
     # and still: the same frame the whole time
     assert abs(start - middle).mean() < 2
@@ -1462,137 +1476,139 @@ def test_zoom_also_animates_on_a_running_clip(
         t = Timeline(layers=[Layer(clips=[
             TimelineClip(at_s=0, duration_s=2, start_s=3, **extra),
         ])])
-        return compor_e_render(t, short_sample, tmp_path / f"{name}.mp4")
+        return compose_and_render(t, short_sample, tmp_path / f"{name}.mp4")
 
     plain = render("plain")
     zoomed = render("zoomed", zoom=[{"t": 0, "scale": 1}, {"t": 1, "scale": 3}])
 
-    assert abs(quadro_cru(zoomed, 0.05) - quadro_cru(plain, 0.05)).mean() < 8
-    assert abs(quadro_cru(zoomed, 1.8) - quadro_cru(plain, 1.8)).mean() > 10
+    assert abs(raw_frame(zoomed, 0.05) - raw_frame(plain, 0.05)).mean() < 8
+    assert abs(raw_frame(zoomed, 1.8) - raw_frame(plain, 1.8)).mean() > 10
 
 
-# ── texto (Fase 6) ──────────────────────────────────────────────────────────
+# ── text (Phase 6) ──────────────────────────────────────────────────────────
 
 
-def test_o_texto_escapa_o_que_quebraria_o_grafo(isolated):
-    """Dois pontos e aspas aparecem em texto de verdade -- e cada um deles,
-    solto, parte o filtergraph em dois."""
+def test_text_escapes_what_would_break_the_graph(isolated):
+    """Colons and quotes show up in real text -- and each of them, loose,
+    splits the filtergraph in two."""
     from owcore.textfx import escape
 
     assert escape("TRIPLE KILL: 50") == r"TRIPLE KILL\: 50"
-    assert escape("o 'x'") == r"o \'x\'"
+    assert escape("a 'x'") == r"a \'x\'"
     assert escape("a\\b") == r"a\\b"
-    # uma quebra crua partiria o grafo: o filtergraph e uma linha so
-    assert "\n" not in escape("duas\nlinhas")
+    # a raw line break would split the graph: the filtergraph is one line
+    assert "\n" not in escape("two\nlines")
 
 
-def test_a_porcentagem_passa_inteira_e_a_expansao_fica_desligada(isolated):
-    """Escapar o `%` com barra faz o drawtext reclamar "Stray %" em nivel de
-    aviso e **nao desenhar nada** -- o texto sumia do video sem erro nenhum.
+def test_the_percent_goes_through_whole_and_expansion_stays_off(isolated):
+    """Escaping `%` with a backslash makes drawtext complain "Stray %" at
+    warning level and **draw nothing** -- the text vanished from the video with
+    no error at all.
 
-    Quem resolve e `expansion=none`: sem expansao, `%` e so um caractere.
+    `expansion=none` is what solves it: without expansion, `%` is just a
+    character.
     """
     from owcore.models import TimelineClip
     from owcore.textfx import escape, filter_chain
 
     assert escape("50%") == "50%"
     c = filter_chain(
-        TimelineClip(at_s=0, duration_s=1, source="text", text="50% de vida"),
+        TimelineClip(at_s=0, duration_s=1, source="text", text="50% health"),
         height=720,
     )
     assert "expansion=none" in c
-    assert "50% de vida" in c
+    assert "50% health" in c
 
 
-def test_o_tamanho_do_texto_e_fracao_da_altura(isolated):
-    """A mesma montagem tem de sair igual em 720p e em 4K."""
+def test_the_text_size_is_a_fraction_of_the_height(isolated):
+    """The same montage must come out the same in 720p and in 4K."""
     from owcore.models import TimelineClip
     from owcore.textfx import filter_chain
 
-    clip = TimelineClip(at_s=0, duration_s=1, source="text", text="oi",
+    clip = TimelineClip(at_s=0, duration_s=1, source="text", text="hi",
                         text_style={"size": 0.1})
 
     assert "fontsize=72" in filter_chain(clip, 720)
     assert "fontsize=216" in filter_chain(clip, 2160)
 
 
-def test_um_clipe_de_texto_precisa_de_texto(isolated):
+def test_a_text_clip_needs_text(isolated):
     from owcore.models import TimelineClip
 
-    with pytest.raises(ValueError, match="precisa de texto"):
+    with pytest.raises(ValueError, match="needs text"):
         TimelineClip(at_s=0, duration_s=1, source="text", text="   ")
 
 
-def test_o_texto_entra_numa_tela_transparente(isolated):
-    """Se a tela fosse preta, o texto viria dentro de uma caixa."""
+def test_text_goes_onto_a_transparent_canvas(isolated):
+    """If the canvas were black, the text would come inside a box."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
-        TimelineClip(at_s=0, duration_s=1, source="text", text="oi"),
+        TimelineClip(at_s=0, duration_s=1, source="text", text="hi"),
     ])])
     c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30)
 
-    # o alfa tem de vir da **fonte**: pedido depois, na cadeia, o `color` ja
-    # negociou yuv420p com o `drawtext` e desenhou preto opaco -- e o alfa
-    # acrescentado ali nasce em 1, tapando a camada de baixo
-    tela = next(e for e in c.inputs if "color=c=black@0.0" in e.path)
-    assert tela.path.endswith(",format=rgba")
-    # e um texto nao tem som que corra junto
+    # the alpha must come from the **source**: requested later, in the chain,
+    # `color` has already negotiated yuv420p with `drawtext` and drawn opaque
+    # black -- and the alpha added there is born at 1, covering the layer below
+    canvas = next(e for e in c.inputs if "color=c=black@0.0" in e.path)
+    assert canvas.path.endswith(",format=rgba")
+    # and a text has no sound running along
     assert c.audio_map is None
 
 
-def test_o_texto_aparece_no_video_e_some_sem_deixar_caixa(
+def test_text_shows_up_in_the_video_and_leaves_without_a_box(
     isolated, short_sample, tmp_path
 ):
-    """O que importa nao e o grafo: e o quadro."""
+    """What matters is not the graph: it is the frame."""
     from owcore.models import Layer, Timeline, TimelineClip
 
     base = TimelineClip(at_s=0, duration_s=2, start_s=1)
-    texto = TimelineClip(
+    text = TimelineClip(
         at_s=0.2, duration_s=1.2, source="text", text="TRIPLE KILL: 50%",
         text_style={"size": 0.14, "color": "yellow"}, transform={"y": -0.5},
     )
 
-    com = compor_e_render(
-        Timeline(layers=[Layer(clips=[base]), Layer(clips=[texto])]),
-        short_sample, tmp_path / "com.mp4",
+    with_text = compose_and_render(
+        Timeline(layers=[Layer(clips=[base]), Layer(clips=[text])]),
+        short_sample, tmp_path / "with.mp4",
     )
-    sem = compor_e_render(
-        Timeline(layers=[Layer(clips=[base])]), short_sample, tmp_path / "sem.mp4"
+    without = compose_and_render(
+        Timeline(layers=[Layer(clips=[base])]), short_sample, tmp_path / "without.mp4"
     )
 
     import numpy as np
 
-    def metades(video, t):
-        q = quadro_cru(video, t).reshape(45, 80, 3)
+    def halves(video, t):
+        q = raw_frame(video, t).reshape(45, 80, 3)
         return q[:20, :, :], q[25:, :, :]
 
-    cima_com, baixo_com = metades(com, 0.8)
-    cima_sem, baixo_sem = metades(sem, 0.8)
+    top_with, bottom_with = halves(with_text, 0.8)
+    top_without, bottom_without = halves(without, 0.8)
 
-    # o texto ocupa a metade de cima (`y=-0.5`): ali os quadros mudam
-    assert np.abs(cima_com - cima_sem).mean() > 5
-    # e a de baixo fica **igual** -- a tela do texto e transparente, e o video
-    # continua aparecendo por baixo dela. Sem esta metade, uma tela preta por
-    # cima de tudo passava no teste: ela tambem "muda o quadro"
-    assert np.abs(baixo_com - baixo_sem).mean() < 1
+    # the text takes the top half (`y=-0.5`): there the frames change
+    assert np.abs(top_with - top_without).mean() > 5
+    # and the bottom stays **the same** -- the text canvas is transparent, and
+    # the video keeps showing underneath it. Without this half, a black canvas
+    # over everything would pass the test: it also "changes the frame"
+    assert np.abs(bottom_with - bottom_without).mean() < 1
 
-    # depois do texto, identicos: ele nao deixa caixa nenhuma para tras
-    assert abs(quadro_cru(com, 1.9) - quadro_cru(sem, 1.9)).mean() < 5
+    # after the text, identical: it leaves no box behind
+    assert abs(raw_frame(with_text, 1.9) - raw_frame(without, 1.9)).mean() < 5
 
 
-def test_texto_e_montado_pelo_grafo_e_nao_pelo_caminho_antigo(isolated):
+def test_text_is_rendered_by_the_graph_and_not_the_old_path(isolated):
     from owcore.models import Layer, Timeline, TimelineClip
 
     t = Timeline(layers=[Layer(clips=[
-        TimelineClip(at_s=0, duration_s=1, source="text", text="oi"),
+        TimelineClip(at_s=0, duration_s=1, source="text", text="hi"),
     ])])
     assert not t.single_layer
 
 
-def test_sem_fonte_o_erro_aparece_na_hora_certa(isolated, monkeypatch):
-    """Descobrir que nao ha fonte no meio de um render seria pior."""
+def test_without_a_font_the_error_shows_up_at_the_right_time(isolated, monkeypatch):
+    """Finding out there is no font in the middle of a render would be worse."""
     from owcore import fonts
 
     fonts.default_font.cache_clear()
@@ -1610,10 +1626,10 @@ def test_sem_fonte_o_erro_aparece_na_hora_certa(isolated, monkeypatch):
         config.get_settings.cache_clear()
 
 
-# ── exportação (Fase 7) ─────────────────────────────────────────────────────
+# ── export (Phase 7) ────────────────────────────────────────────────────────
 
 
-def _timeline_simples(**export):
+def _simple_timeline(**export):
     from owcore.models import Layer, Timeline, TimelineClip
 
     return Timeline(
@@ -1625,89 +1641,90 @@ def _timeline_simples(**export):
     )
 
 
-def test_a_mesma_montagem_sai_em_qualquer_proporcao(
+def test_the_same_montage_comes_out_in_any_aspect_ratio(
     isolated, short_sample, tmp_path
 ):
-    """O que muda entre 16:9 e 9:16 nao e a montagem: e a janela por onde se
-    olha. Nada dos clipes precisa mudar."""
+    """What changes between 16:9 and 9:16 is not the montage: it is the window
+    one looks through. Nothing about the clips needs to change."""
     from owcore import ffmpeg
 
-    for nome, exp, esperado in [
-        ("padrao", {}, (1280, 720)),
+    for name, exp, expected in [
+        ("default", {}, (1280, 720)),
         ("vertical", {"width": 1080, "height": 1920}, (1080, 1920)),
-        ("quadrado", {"width": 720, "height": 720}, (720, 720)),
+        ("square", {"width": 720, "height": 720}, (720, 720)),
     ]:
-        saida = compor_e_render(
-            _timeline_simples(**exp), short_sample, tmp_path / f"{nome}.mp4"
+        output = compose_and_render(
+            _simple_timeline(**exp), short_sample, tmp_path / f"{name}.mp4"
         )
-        info = ffmpeg.probe(saida)
-        assert (info.width, info.height) == esperado, nome
-        assert info.duration_s == pytest.approx(4.0, abs=0.35), nome
+        info = ffmpeg.probe(output)
+        assert (info.width, info.height) == expected, name
+        assert info.duration_s == pytest.approx(4.0, abs=0.35), name
 
 
-def test_cover_preenche_e_contain_deixa_barras(
+def test_cover_fills_and_contain_leaves_bars(
     isolated, short_sample, tmp_path
 ):
-    """As duas respostas sao legitimas, e dao imagens bem diferentes."""
-    cover = compor_e_render(
-        _timeline_simples(width=720, height=1280),
+    """Both answers are legitimate, and give quite different pictures."""
+    cover = compose_and_render(
+        _simple_timeline(width=720, height=1280),
         short_sample, tmp_path / "cover.mp4",
     )
-    contain = compor_e_render(
-        _timeline_simples(width=720, height=1280, fit="contain"),
+    contain = compose_and_render(
+        _simple_timeline(width=720, height=1280, fit="contain"),
         short_sample, tmp_path / "contain.mp4",
     )
 
-    a, b = quadro_cru(cover, 1.0), quadro_cru(contain, 1.0)
-    assert abs(a - b).mean() > 15, "os dois enquadramentos deram na mesma coisa"
-    # o `contain` tem barras pretas: ele e visivelmente mais escuro no total
+    a, b = raw_frame(cover, 1.0), raw_frame(contain, 1.0)
+    assert abs(a - b).mean() > 15, "both framings came out the same"
+    # `contain` has black bars: it is visibly darker overall
     assert b.mean() < a.mean()
 
 
-def test_exportar_um_trecho_reposiciona_os_clipes(isolated):
-    """Nao e cortar o video depois de pronto: os clipes sao reposicionados como
-    se a janela fosse o comeco."""
+def test_exporting_a_range_repositions_the_clips(isolated):
+    """It is not cutting the finished video: the clips are repositioned as if
+    the window were the beginning."""
     from owcore.compose import compose_graph
 
     c = compose_graph(
-        _timeline_simples(from_s=1.0, to_s=3.0),
+        _simple_timeline(from_s=1.0, to_s=3.0),
         source=Path("x.mp4"), width=640, height=360, fps=30,
         source_duration_s=600,
     )
 
     assert c.duration_s == pytest.approx(2.0)
-    # dos dois clipes, os dois entram — mas cada um pela metade
+    # of the two clips, both come in -- but each halfway
     assert c.filter_complex.count("overlay=") == 2
     assert "between(t,0.000,1.000)" in c.filter_complex
     assert "between(t,1.000,2.000)" in c.filter_complex
 
 
-def test_um_clipe_que_comeca_antes_da_janela_entra_pelo_meio(isolated):
-    """E o ponto de entrada na fonte anda junto, senao a imagem saltaria."""
+def test_a_clip_that_starts_before_the_window_comes_in_halfway(isolated):
+    """And the entry point into the source moves along, or the picture would
+    jump."""
     from owcore.compose import _within_window
     from owcore.models import TimelineClip
 
     clip = TimelineClip(at_s=0, duration_s=4, start_s=10)
-    visto = _within_window(clip, 1.0, 3.0)
+    seen = _within_window(clip, 1.0, 3.0)
 
-    assert visto is not None
-    assert visto.at_s == 0.0, "ele passa a comecar no primeiro quadro"
-    assert visto.duration_s == pytest.approx(2.0)
-    assert visto.start_s == pytest.approx(11.0), "pulou 1s da gravacao tambem"
+    assert seen is not None
+    assert seen.at_s == 0.0, "it now starts at the first frame"
+    assert seen.duration_s == pytest.approx(2.0)
+    assert seen.start_s == pytest.approx(11.0), "it skipped 1s of the recording too"
 
 
-def test_a_velocidade_conta_no_pulo_da_janela(isolated):
+def test_speed_counts_in_the_window_skip(isolated):
     from owcore.compose import _within_window
     from owcore.models import TimelineClip
 
-    # a 2x, um segundo de video pulado custa dois de gravacao
+    # at 2x, one skipped second of video costs two of recording
     clip = TimelineClip(at_s=0, duration_s=4, start_s=10, speed=2.0)
-    visto = _within_window(clip, 1.0, 3.0)
+    seen = _within_window(clip, 1.0, 3.0)
 
-    assert visto.start_s == pytest.approx(12.0)
+    assert seen.start_s == pytest.approx(12.0)
 
 
-def test_clipe_fora_da_janela_nao_entra(isolated):
+def test_a_clip_outside_the_window_does_not_come_in(isolated):
     from owcore.compose import _within_window
     from owcore.models import TimelineClip
 
@@ -1716,152 +1733,152 @@ def test_clipe_fora_da_janela_nao_entra(isolated):
     assert _within_window(TimelineClip(at_s=0, duration_s=1, start_s=1), 5.0, 9.0) is None
 
 
-def test_trecho_vazio_e_recusado(isolated):
+def test_an_empty_range_is_refused(isolated):
     from owcore.compose import compose_graph
 
-    with pytest.raises(ValueError, match="vazio"):
-        compose_graph(_timeline_simples(from_s=50, to_s=60), source=Path("x.mp4"),
+    with pytest.raises(ValueError, match="empty"):
+        compose_graph(_simple_timeline(from_s=50, to_s=60), source=Path("x.mp4"),
                width=640, height=360, fps=30, source_duration_s=600)
 
 
-def test_a_marca_dagua_vem_por_cima_de_tudo(isolated, short_sample, tmp_path):
-    """Marca que alguma camada cobre nao e marca d'agua."""
+def test_the_watermark_goes_on_top_of_everything(isolated, short_sample, tmp_path):
+    """A mark some layer covers is not a watermark."""
     from owcore.compose import LibraryFile, compose_graph
     from owcore import ffmpeg
 
-    png = png_de_teste(tmp_path / "marca.png", cor="white")
-    t = _timeline_simples(watermark_id="m1", watermark_scale=0.3)
+    png = make_png(tmp_path / "mark.png", colour="white")
+    t = _simple_timeline(watermark_id="m1", watermark_scale=0.3)
     info = ffmpeg.probe(short_sample)
     c = compose_graph(t, source=short_sample, width=info.width, height=info.height,
                fps=info.fps, source_duration_s=info.duration_s,
                library={"m1": LibraryFile(png, "image")})
 
-    # a marca e o ultimo overlay antes da saida: o que sai dela vai direto para
-    # o corte final, sem nenhuma camada por cima
-    filtros = c.filter_complex
-    assert "[mark]overlay" in filtros
-    assert "[watermarked]trim=" in filtros
+    # the mark is the last overlay before the output: what comes out of it goes
+    # straight to the final trim, with no layer on top
+    filters = c.filter_complex
+    assert "[mark]overlay" in filters
+    assert "[watermarked]trim=" in filters
 
-    com = tmp_path / "com_marca.mp4"
-    ffmpeg.compose(c, com)
-    sem = compor_e_render(_timeline_simples(), short_sample, tmp_path / "sem.mp4")
-    assert abs(quadro_cru(com, 1.0) - quadro_cru(sem, 1.0)).mean() > 3
+    with_mark = tmp_path / "with_mark.mp4"
+    ffmpeg.compose(c, with_mark)
+    without = compose_and_render(_simple_timeline(), short_sample, tmp_path / "without.mp4")
+    assert abs(raw_frame(with_mark, 1.0) - raw_frame(without, 1.0)).mean() > 3
 
 
-def test_marca_dagua_que_nao_esta_na_biblioteca_e_recusada(isolated):
+def test_a_watermark_not_in_the_library_is_refused(isolated):
     from owcore.compose import compose_graph
 
-    with pytest.raises(ValueError, match="marca"):
-        compose_graph(_timeline_simples(watermark_id="sumida"), source=Path("x.mp4"),
+    with pytest.raises(ValueError, match="watermark"):
+        compose_graph(_simple_timeline(watermark_id="gone"), source=Path("x.mp4"),
                width=640, height=360, fps=30, source_duration_s=600)
 
 
-def test_a_qualidade_pedida_chega_ao_arquivo(isolated, short_sample, tmp_path):
-    """CRF alto e resolucao baixa tem de dar um arquivo visivelmente menor."""
+def test_the_requested_quality_reaches_the_file(isolated, short_sample, tmp_path):
+    """A high CRF and a low resolution must give a visibly smaller file."""
     from owcore import ffmpeg
 
-    cheio = compor_e_render(
-        _timeline_simples(), short_sample, tmp_path / "cheio.mp4"
+    full = compose_and_render(
+        _simple_timeline(), short_sample, tmp_path / "full.mp4"
     )
-    leve = compor_e_render(
-        _timeline_simples(width=854, height=480, fps=24, crf=32),
-        short_sample, tmp_path / "leve.mp4",
+    light = compose_and_render(
+        _simple_timeline(width=854, height=480, fps=24, crf=32),
+        short_sample, tmp_path / "light.mp4",
     )
 
-    assert leve.stat().st_size < cheio.stat().st_size / 3
-    assert ffmpeg.probe(leve).fps == pytest.approx(24, abs=1)
+    assert light.stat().st_size < full.stat().st_size / 3
+    assert ffmpeg.probe(light).fps == pytest.approx(24, abs=1)
 
 
-# ── reaproveitamento ────────────────────────────────────────────────────────
+# ── reuse ───────────────────────────────────────────────────────────────────
 
 
-def _montagem(**kw):
+def _montage(**kw):
     return {"layers": [{"clips": [
         {"at_s": 0.0, "duration_s": 2.0, "start_s": 10.0},
     ]}], **kw}
 
 
-def test_uma_partida_guarda_varias_montagens(isolated, short_sample):
-    """O corte de 30s para o Shorts e a montagem longa sao trabalhos diferentes
-    sobre o mesmo material. Ate a Fase 8 era preciso escolher um."""
+def test_a_match_keeps_several_montages(isolated, short_sample):
+    """The 30s cut for Shorts and the long montage are different jobs over the
+    same material. Until Phase 8 one had to be chosen."""
     job_id = run_analysis(short_sample)
 
-    curta = api().post(f"/api/jobs/{job_id}/montages",
-                       json={"name": "vertical curta", "data": _montagem()}).json()
-    longa = api().post(f"/api/jobs/{job_id}/montages",
-                       json={"name": "a longa"}).json()
+    short = api().post(f"/api/jobs/{job_id}/montages",
+                       json={"name": "short vertical", "data": _montage()}).json()
+    long_ = api().post(f"/api/jobs/{job_id}/montages",
+                       json={"name": "the long one"}).json()
 
-    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
-    assert {m["name"] for m in lista} == {"vertical curta", "a longa"}
-    assert curta["n_clips"] == 1
-    assert curta["duration_s"] == pytest.approx(2.0)
-    assert longa["n_clips"] == 0, "uma montagem nova comeca vazia"
+    items = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert {m["name"] for m in items} == {"short vertical", "the long one"}
+    assert short["n_clips"] == 1
+    assert short["duration_s"] == pytest.approx(2.0)
+    assert long_["n_clips"] == 0, "a new montage starts empty"
 
 
-def test_a_lista_vem_da_mais_recente_para_a_mais_antiga(isolated, short_sample):
-    """A que se estava editando e a que se quer de volta."""
+def test_the_list_goes_from_most_recent_to_oldest(isolated, short_sample):
+    """The one being edited is the one wanted back."""
     job_id = run_analysis(short_sample)
-    primeira = api().post(f"/api/jobs/{job_id}/montages",
-                          json={"name": "primeira"}).json()
-    api().post(f"/api/jobs/{job_id}/montages", json={"name": "segunda"})
-    api().put(f"/api/jobs/{job_id}/montages/{primeira['id']}",
-              json={"data": _montagem()})
+    first = api().post(f"/api/jobs/{job_id}/montages",
+                       json={"name": "first"}).json()
+    api().post(f"/api/jobs/{job_id}/montages", json={"name": "second"})
+    api().put(f"/api/jobs/{job_id}/montages/{first['id']}",
+              json={"data": _montage()})
 
-    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
-    assert lista[0]["name"] == "primeira"
+    items = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert items[0]["name"] == "first"
 
 
-def test_nomes_repetidos_ganham_numero(isolated, short_sample):
-    """Duas "Montagem" numa lista de escolher e o mesmo que nome nenhum."""
+def test_repeated_names_get_a_number(isolated, short_sample):
+    """Two "Montage"s in a list to pick from are as good as no names."""
     job_id = run_analysis(short_sample)
-    a = api().post(f"/api/jobs/{job_id}/montages", json={"name": "teste"}).json()
-    b = api().post(f"/api/jobs/{job_id}/montages", json={"name": "teste"}).json()
+    a = api().post(f"/api/jobs/{job_id}/montages", json={"name": "test"}).json()
+    b = api().post(f"/api/jobs/{job_id}/montages", json={"name": "test"}).json()
 
-    assert a["name"] == "teste"
-    assert b["name"] == "teste 2"
+    assert a["name"] == "test"
+    assert b["name"] == "test 2"
 
 
-def test_montagem_sem_nome_ganha_um(isolated, short_sample):
+def test_a_montage_without_a_name_gets_one(isolated, short_sample):
     job_id = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{job_id}/montages", json={}).json()
-    assert m["name"] == "Montagem 1"
+    assert m["name"] == "Montage 1"
 
 
-def test_duplicar_para_experimentar_sem_arriscar(isolated, short_sample):
+def test_duplicating_to_experiment_without_risk(isolated, short_sample):
     job_id = run_analysis(short_sample)
     original = api().post(f"/api/jobs/{job_id}/montages",
-                          json={"name": "boa", "data": _montagem()}).json()
+                          json={"name": "good", "data": _montage()}).json()
 
-    copia = api().post(
+    copy = api().post(
         f"/api/jobs/{job_id}/montages/{original['id']}/duplicate"
     ).json()
 
-    assert copia["id"] != original["id"]
-    assert copia["name"] == "boa (copia)"
-    assert copia["data"] == original["data"]
+    assert copy["id"] != original["id"]
+    assert copy["name"] == "good (copy)"
+    assert copy["data"] == original["data"]
 
-    # mexer na copia nao mexe na original
-    api().put(f"/api/jobs/{job_id}/montages/{copia['id']}",
+    # touching the copy does not touch the original
+    api().put(f"/api/jobs/{job_id}/montages/{copy['id']}",
               json={"data": {"layers": []}})
-    volta = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
-    por_id = {m["id"]: m for m in volta}
-    assert por_id[original["id"]]["n_clips"] == 1
-    assert por_id[copia["id"]]["n_clips"] == 0
+    back = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    by_id = {m["id"]: m for m in back}
+    assert by_id[original["id"]]["n_clips"] == 1
+    assert by_id[copy["id"]]["n_clips"] == 0
 
 
-def test_renomear_e_apagar(isolated, short_sample):
+def test_renaming_and_deleting(isolated, short_sample):
     job_id = run_analysis(short_sample)
-    m = api().post(f"/api/jobs/{job_id}/montages", json={"name": "antiga"}).json()
+    m = api().post(f"/api/jobs/{job_id}/montages", json={"name": "old"}).json()
 
-    api().put(f"/api/jobs/{job_id}/montages/{m['id']}", json={"name": "nova"})
-    assert api().get(f"/api/jobs/{job_id}/montages").json()["items"][0]["name"] == "nova"
+    api().put(f"/api/jobs/{job_id}/montages/{m['id']}", json={"name": "new"})
+    assert api().get(f"/api/jobs/{job_id}/montages").json()["items"][0]["name"] == "new"
 
     assert api().delete(f"/api/jobs/{job_id}/montages/{m['id']}").status_code == 204
     assert api().get(f"/api/jobs/{job_id}/montages").json()["items"] == []
 
 
-def test_montagem_de_outra_partida_e_404(isolated, short_sample):
-    """O id sozinho nao basta: a montagem tem de ser desta partida."""
+def test_a_montage_from_another_match_is_404(isolated, short_sample):
+    """The id alone is not enough: the montage must belong to this match."""
     a = run_analysis(short_sample)
     b = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{a}/montages", json={"name": "x"}).json()
@@ -1870,7 +1887,7 @@ def test_montagem_de_outra_partida_e_404(isolated, short_sample):
     assert api().delete(f"/api/jobs/{b}/montages/{m['id']}").status_code == 404
 
 
-def test_montagem_invalida_e_recusada(isolated, short_sample):
+def test_an_invalid_montage_is_refused(isolated, short_sample):
     job_id = run_analysis(short_sample)
     resp = api().post(f"/api/jobs/{job_id}/montages",
                       json={"data": {"layers": [{"clips": [
@@ -1878,9 +1895,9 @@ def test_montagem_invalida_e_recusada(isolated, short_sample):
     assert resp.status_code == 422
 
 
-def test_apagar_a_partida_leva_as_montagens(isolated, short_sample):
+def test_deleting_the_match_takes_the_montages(isolated, short_sample):
     job_id = run_analysis(short_sample)
-    api().post(f"/api/jobs/{job_id}/montages", json={"data": _montagem()})
+    api().post(f"/api/jobs/{job_id}/montages", json={"data": _montage()})
 
     api().delete(f"/api/jobs/{job_id}")
     with session() as s:
@@ -1888,39 +1905,39 @@ def test_apagar_a_partida_leva_as_montagens(isolated, short_sample):
         assert s.query(MontageModel).filter_by(job_id=job_id).count() == 0
 
 
-# ── a migracao do rascunho unico ────────────────────────────────────────────
+# ── migrating the single draft ──────────────────────────────────────────────
 
 
-def test_o_rascunho_antigo_vira_a_primeira_montagem(isolated, short_sample):
-    """Quem sabe converter o formato velho e o codigo que le -- e por isso uma
-    partida parada ha meses continua abrindo."""
+def test_the_old_draft_becomes_the_first_montage(isolated, short_sample):
+    """The code that reads is what knows how to convert the old format -- and
+    that is why a match untouched for months still opens."""
     job_id = run_analysis(short_sample)
     api().put(f"/api/jobs/{job_id}/draft",
-              json={"title": "o que eu estava fazendo", "cuts": [
+              json={"title": "what I was doing", "cuts": [
                   {"at_s": 0.0, "duration_s": 2.0, "start_s": 10.0}]})
 
-    # simula o estado anterior a Fase 8: tudo na coluna do job
+    # simulates the state before Phase 8: everything in the job's column
     with session() as s:
         from owcore.models import Job, Montage as MontageModel
         job = s.get(Job, job_id)
-        guardado = job.montages[0].data
+        stored = job.montages[0].data
         for m in list(job.montages):
             s.delete(m)
-        job.draft = guardado
+        job.draft = stored
 
-    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
-    assert len(lista) == 1
-    assert lista[0]["name"] == "o que eu estava fazendo"
-    assert lista[0]["n_clips"] == 1
+    items = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert len(items) == 1
+    assert items[0]["name"] == "what I was doing"
+    assert items[0]["n_clips"] == 1
 
-    # e a coluna some, para nao haver duas verdades sobre a mesma montagem
+    # and the column goes away, so there are not two truths about one montage
     with session() as s:
         from owcore.models import Job
         assert not s.get(Job, job_id).draft
 
 
-def test_a_migracao_nao_repete_a_montagem(isolated, short_sample):
-    """Ler duas vezes nao pode criar duas."""
+def test_the_migration_does_not_repeat_the_montage(isolated, short_sample):
+    """Reading twice must not create two."""
     job_id = run_analysis(short_sample)
     api().put(f"/api/jobs/{job_id}/draft", json={"cuts": [
         {"at_s": 0.0, "duration_s": 2.0, "start_s": 10.0}]})
@@ -1930,76 +1947,77 @@ def test_a_migracao_nao_repete_a_montagem(isolated, short_sample):
     assert len(api().get(f"/api/jobs/{job_id}/montages").json()["items"]) == 1
 
 
-def test_o_app_antigo_continua_salvando(isolated, short_sample):
-    """`PUT /draft` escreve na montagem mais recente em vez de perder o trabalho
-    em silencio."""
+def test_the_old_app_keeps_saving(isolated, short_sample):
+    """`PUT /draft` writes to the most recent montage instead of silently
+    losing the work."""
     job_id = run_analysis(short_sample)
-    m = api().post(f"/api/jobs/{job_id}/montages", json={"name": "atual"}).json()
+    m = api().post(f"/api/jobs/{job_id}/montages", json={"name": "current"}).json()
 
-    api().put(f"/api/jobs/{job_id}/draft", json=_montagem())
+    api().put(f"/api/jobs/{job_id}/draft", json=_montage())
 
-    lista = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
-    assert len(lista) == 1, "nao criou uma segunda"
-    assert lista[0]["id"] == m["id"]
-    assert lista[0]["n_clips"] == 1
+    items = api().get(f"/api/jobs/{job_id}/montages").json()["items"]
+    assert len(items) == 1, "it created a second one"
+    assert items[0]["id"] == m["id"]
+    assert items[0]["n_clips"] == 1
 
 
-def test_o_detalhe_do_job_traz_as_montagens(isolated, short_sample):
+def test_the_job_detail_brings_the_montages(isolated, short_sample):
     job_id = run_analysis(short_sample)
     api().post(f"/api/jobs/{job_id}/montages",
-               json={"name": "uma", "data": _montagem()})
+               json={"name": "one", "data": _montage()})
 
     detail = api().get(f"/api/jobs/{job_id}").json()
-    assert [m["name"] for m in detail["montages"]] == ["uma"]
-    # e `draft` continua respondendo a mais recente, para um app anterior
+    assert [m["name"] for m in detail["montages"]] == ["one"]
+    # and `draft` still answers with the most recent, for an older app
     assert detail["draft"]["layers"][0]["clips"][0]["at_s"] == 0.0
 
 
-# ── historico de versoes ────────────────────────────────────────────────────
+# ── version history ─────────────────────────────────────────────────────────
 
 
-def test_marcar_e_voltar_a_uma_versao(isolated, short_sample):
-    """O "estava bom ontem" -- que nao e o desfazer: esse morre com a aba."""
+def test_marking_and_going_back_to_a_version(isolated, short_sample):
+    """The "it was good yesterday" -- which is not undo: that one dies with the
+    tab."""
     job_id = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{job_id}/montages",
-                   json={"name": "x", "data": _montagem()}).json()
+                   json={"name": "x", "data": _montage()}).json()
     base = f"/api/jobs/{job_id}/montages/{m['id']}"
 
-    foto = api().post(f"{base}/versions", json={"label": "estava bom"}).json()
-    assert foto["n_clips"] == 1
+    snapshot = api().post(f"{base}/versions", json={"label": "it was good"}).json()
+    assert snapshot["n_clips"] == 1
 
     api().put(base, json={"data": {"layers": []}})
     assert api().get(f"/api/jobs/{job_id}/montages").json()["items"][0]["n_clips"] == 0
 
-    voltou = api().post(f"{base}/versions/{foto['id']}/restore").json()
-    assert voltou["n_clips"] == 1
+    restored = api().post(f"{base}/versions/{snapshot['id']}/restore").json()
+    assert restored["n_clips"] == 1
 
 
-def test_restaurar_nao_apaga_o_que_estava_na_frente(isolated, short_sample):
-    """Restaurar troca o que esta na frente; nao joga trabalho fora."""
+def test_restoring_does_not_delete_what_was_in_front(isolated, short_sample):
+    """Restoring swaps what is in front; it does not throw work away."""
     job_id = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{job_id}/montages",
-                   json={"name": "x", "data": _montagem()}).json()
+                   json={"name": "x", "data": _montage()}).json()
     base = f"/api/jobs/{job_id}/montages/{m['id']}"
-    foto = api().post(f"{base}/versions", json={"label": "primeira"}).json()
+    snapshot = api().post(f"{base}/versions", json={"label": "first"}).json()
 
-    dois = _montagem()
-    dois["layers"][0]["clips"].append(
+    two = _montage()
+    two["layers"][0]["clips"].append(
         {"at_s": 5.0, "duration_s": 2.0, "start_s": 20.0})
-    api().put(base, json={"data": dois})
-    api().post(f"{base}/versions/{foto['id']}/restore")
+    api().put(base, json={"data": two})
+    api().post(f"{base}/versions/{snapshot['id']}/restore")
 
-    fotos = api().get(f"{base}/versions").json()["items"]
-    assert "antes de restaurar" in [f["label"] for f in fotos]
-    guardada = [f for f in fotos if f["label"] == "antes de restaurar"][0]
-    assert guardada["n_clips"] == 2, "o estado de antes foi guardado inteiro"
+    snapshots = api().get(f"{base}/versions").json()["items"]
+    assert "before restoring" in [f["label"] for f in snapshots]
+    kept = [f for f in snapshots if f["label"] == "before restoring"][0]
+    assert kept["n_clips"] == 2, "the previous state was kept whole"
 
 
-def test_marcar_duas_vezes_a_mesma_coisa_nao_cria_versao(isolated, short_sample):
-    """Uma lista de estados iguais nao ajuda ninguem a achar o de ontem."""
+def test_marking_the_same_thing_twice_creates_no_version(isolated, short_sample):
+    """A list of identical states helps nobody find yesterday's."""
     job_id = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{job_id}/montages",
-                   json={"name": "x", "data": _montagem()}).json()
+                   json={"name": "x", "data": _montage()}).json()
     base = f"/api/jobs/{job_id}/montages/{m['id']}"
 
     assert api().post(f"{base}/versions", json={}).status_code == 201
@@ -2007,62 +2025,63 @@ def test_marcar_duas_vezes_a_mesma_coisa_nao_cria_versao(isolated, short_sample)
     assert len(api().get(f"{base}/versions").json()["items"]) == 1
 
 
-def test_o_historico_para_de_crescer(isolated, short_sample):
-    """Vinte marcos ja e mais historia do que alguem percorre numa lista."""
+def test_the_history_stops_growing(isolated, short_sample):
+    """Twenty markers is already more history than anyone scrolls through in a
+    list."""
     from owcore.models import Montage as MontageModel, MontageVersion
 
     job_id = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{job_id}/montages",
-                   json={"name": "x", "data": _montagem()}).json()
+                   json={"name": "x", "data": _montage()}).json()
 
     with session() as s:
-        alvo = s.get(MontageModel, m["id"])
+        target = s.get(MontageModel, m["id"])
         for i in range(30):
-            dados = _montagem()
-            dados["music_start_s"] = float(i)
-            alvo.data = dados
-            alvo.versions.append(MontageVersion(label=f"n{i}", data=dados))
+            data = _montage()
+            data["music_start_s"] = float(i)
+            target.data = data
+            target.versions.append(MontageVersion(label=f"n{i}", data=data))
             s.flush()
 
-    fotos = api().get(
+    snapshots = api().get(
         f"/api/jobs/{job_id}/montages/{m['id']}/versions"
     ).json()["items"]
-    assert len(fotos) == 30, "guardar direto no banco nao passa pela poda"
+    assert len(snapshots) == 30, "storing straight in the database skips pruning"
 
-    # ja o caminho normal poda
+    # whereas the normal path prunes
     api().put(f"/api/jobs/{job_id}/montages/{m['id']}",
               json={"data": {"layers": [], "music_start_s": 99.0}})
     api().post(f"/api/jobs/{job_id}/montages/{m['id']}/versions", json={})
-    fotos = api().get(
+    snapshots = api().get(
         f"/api/jobs/{job_id}/montages/{m['id']}/versions"
     ).json()["items"]
-    assert len(fotos) == 20
+    assert len(snapshots) == 20
 
 
-def test_a_copia_nao_leva_o_historico(isolated, short_sample):
-    """As fotos dizem por onde *aquela* montagem passou; a copia ainda nao passou
-    por lugar nenhum."""
+def test_a_copy_does_not_take_the_history(isolated, short_sample):
+    """The snapshots say where *that* montage has been; the copy has not been
+    anywhere yet."""
     job_id = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{job_id}/montages",
-                   json={"name": "x", "data": _montagem()}).json()
+                   json={"name": "x", "data": _montage()}).json()
     api().post(f"/api/jobs/{job_id}/montages/{m['id']}/versions", json={})
 
-    copia = api().post(
+    copy = api().post(
         f"/api/jobs/{job_id}/montages/{m['id']}/duplicate"
     ).json()
-    assert copia["n_versions"] == 0
-    fotos = api().get(
-        f"/api/jobs/{job_id}/montages/{copia['id']}/versions"
+    assert copy["n_versions"] == 0
+    snapshots = api().get(
+        f"/api/jobs/{job_id}/montages/{copy['id']}/versions"
     ).json()["items"]
-    assert fotos == []
+    assert snapshots == []
 
 
-def test_apagar_a_montagem_leva_as_versoes(isolated, short_sample):
+def test_deleting_the_montage_takes_the_versions(isolated, short_sample):
     from owcore.models import MontageVersion
 
     job_id = run_analysis(short_sample)
     m = api().post(f"/api/jobs/{job_id}/montages",
-                   json={"name": "x", "data": _montagem()}).json()
+                   json={"name": "x", "data": _montage()}).json()
     api().post(f"/api/jobs/{job_id}/montages/{m['id']}/versions", json={})
 
     api().delete(f"/api/jobs/{job_id}/montages/{m['id']}")
@@ -2070,29 +2089,29 @@ def test_apagar_a_montagem_leva_as_versoes(isolated, short_sample):
         assert s.query(MontageVersion).filter_by(montage_id=m["id"]).count() == 0
 
 
-# ── predefinicoes ───────────────────────────────────────────────────────────
+# ── presets ─────────────────────────────────────────────────────────────────
 
 
-def test_a_predefinicao_atravessa_partidas(isolated, short_sample):
-    """E o que faz a segunda partida custar um clique em vez de meia hora de
-    encaixe -- por isso ela nao pertence a job nenhum."""
+def test_a_preset_crosses_matches(isolated, short_sample):
+    """It is what makes the second match cost one click instead of half an hour
+    of fitting -- which is why it belongs to no job."""
     a = run_analysis(short_sample)
-    receita = {"kinds": ["kill"], "duration_s": 1.8, "beats_per_cut": 2.0,
-               "zoom": True, "export": {"width": 1080, "height": 1920}}
-    api().post("/api/presets", json={"name": "shorts", "data": receita})
+    recipe = {"kinds": ["kill"], "duration_s": 1.8, "beats_per_cut": 2.0,
+              "zoom": True, "export": {"width": 1080, "height": 1920}}
+    api().post("/api/presets", json={"name": "shorts", "data": recipe})
 
-    itens = api().get("/api/presets").json()["items"]
-    assert [p["name"] for p in itens] == ["shorts"]
-    assert itens[0]["data"]["beats_per_cut"] == 2.0
-    assert itens[0]["data"]["export"]["width"] == 1080
-    # a lista e a mesma vista de qualquer partida
+    items = api().get("/api/presets").json()["items"]
+    assert [p["name"] for p in items] == ["shorts"]
+    assert items[0]["data"]["beats_per_cut"] == 2.0
+    assert items[0]["data"]["export"]["width"] == 1080
+    # the list is the same seen from any match
     assert api().get("/api/presets").json() == api().get("/api/presets").json()
-    assert a  # a partida nao entra na conta
+    assert a  # the match does not come into it
 
 
-def test_a_predefinicao_guarda_o_jeito_de_cortar_e_nao_os_cortes(isolated):
-    """Uma lista de cortes so vale para aquela partida; um jeito de cortar vale
-    para qualquer uma."""
+def test_a_preset_keeps_the_way_of_cutting_and_not_the_cuts(isolated):
+    """A list of cuts is only good for that match; a way of cutting is good for
+    any of them."""
     from owcore.models import Recipe
 
     r = Recipe(**{"kinds": ["kill", "sleep"], "lead_s": 1.2, "duration_s": 2.0})
@@ -2101,45 +2120,45 @@ def test_a_predefinicao_guarda_o_jeito_de_cortar_e_nao_os_cortes(isolated):
     assert r.kinds == ["kill", "sleep"]
 
 
-def test_receita_impossivel_e_recusada(isolated):
-    for ruim in ({"duration_s": 0.0}, {"lead_s": -1}, {"speed": 0},
-                 {"gap_s": -0.5}, {"music_volume": 5}):
-        resp = api().post("/api/presets", json={"name": "x", "data": ruim})
-        assert resp.status_code == 422, ruim
+def test_an_impossible_recipe_is_refused(isolated):
+    for bad in ({"duration_s": 0.0}, {"lead_s": -1}, {"speed": 0},
+                {"gap_s": -0.5}, {"music_volume": 5}):
+        resp = api().post("/api/presets", json={"name": "x", "data": bad})
+        assert resp.status_code == 422, bad
 
 
-def test_predefinicao_sem_nome_e_recusada(isolated):
+def test_a_preset_without_a_name_is_refused(isolated):
     assert api().post("/api/presets", json={"data": {}}).status_code == 422
     assert api().post("/api/presets", json={"name": "  "}).status_code == 422
 
 
-def test_editar_e_apagar_predefinicao(isolated):
-    p = api().post("/api/presets", json={"name": "um", "data": {}}).json()
+def test_editing_and_deleting_a_preset(isolated):
+    p = api().post("/api/presets", json={"name": "one", "data": {}}).json()
 
     api().put(f"/api/presets/{p['id']}",
-              json={"name": "outro", "data": {"duration_s": 3.0}})
-    volta = api().get("/api/presets").json()["items"][0]
-    assert volta["name"] == "outro"
-    assert volta["data"]["duration_s"] == 3.0
+              json={"name": "another", "data": {"duration_s": 3.0}})
+    back = api().get("/api/presets").json()["items"][0]
+    assert back["name"] == "another"
+    assert back["data"]["duration_s"] == 3.0
 
     assert api().delete(f"/api/presets/{p['id']}").status_code == 204
     assert api().get("/api/presets").json()["items"] == []
 
 
-# ── musica na regua (Fase 9) ────────────────────────────────────────────────
+# ── music on the ruler (Phase 9) ────────────────────────────────────────────
 
 
-def _com_musica_na_regua(**kw):
+def _with_music_on_the_ruler(**kw):
     from owcore.models import Timeline
 
-    blocos = kw.pop("blocos", [
+    blocks = kw.pop("blocks", [
         {"at_s": 0.0, "duration_s": 1.5, "start_s": 10.0,
          "source": "media", "media_id": "m1"},
     ])
     return Timeline(
         layers=[
             {"clips": [{"at_s": 0.0, "duration_s": 4.0, "start_s": 1.0}]},
-            {"kind": "audio", "clips": blocos},
+            {"kind": "audio", "clips": blocks},
         ],
         **kw,
     )
@@ -2151,28 +2170,28 @@ def _audio_library(path):
     return {"m1": LibraryFile(path, "audio")}
 
 
-def test_uma_camada_de_audio_nao_desenha_nada(isolated):
-    """Ela toca. Se ela entrasse no empilhamento, o proximo clipe de video
-    apareceria por cima de um `overlay` que nao existe."""
+def test_an_audio_layer_draws_nothing(isolated):
+    """It plays. If it entered the stacking, the next video clip would show up
+    over an `overlay` that does not exist."""
     from owcore.compose import compose_graph
 
     c = compose_graph(
-        _com_musica_na_regua(),
+        _with_music_on_the_ruler(),
         source=Path("x.mp4"), width=640, height=360, fps=30,
         source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
-    assert c.filter_complex.count("overlay=") == 1, "so o clipe de video"
-    assert "[2:a]atrim" in c.filter_complex, "mas o som dela entra"
+    assert c.filter_complex.count("overlay=") == 1, "only the video clip"
+    assert "[2:a]atrim" in c.filter_complex, "but its sound comes in"
 
 
-def test_o_bloco_de_musica_e_aparado_e_posicionado(isolated):
-    """E o que a faixa continua nunca soube fazer: entrar no meio do video, com
-    um pedaco escolhido da musica."""
+def test_a_music_block_is_trimmed_and_positioned(isolated):
+    """It is what the continuous track never knew how to do: come in mid-video,
+    with a chosen piece of the music."""
     from owcore.compose import compose_graph
 
     c = compose_graph(
-        _com_musica_na_regua(blocos=[
+        _with_music_on_the_ruler(blocks=[
             {"at_s": 2.5, "duration_s": 1.5, "start_s": 30.0,
              "source": "media", "media_id": "m1"},
         ]),
@@ -2180,22 +2199,22 @@ def test_o_bloco_de_musica_e_aparado_e_posicionado(isolated):
         source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
-    # o pedaco vem de 30s da musica...
+    # the piece comes from 30s into the music...
     assert any(
         e.seek == pytest.approx(30.0) and "m.mp3" in e.path
         for e in c.inputs
     )
-    # ...dura 1,5s e entra aos 2,5s do video
+    # ...lasts 1.5s and comes in at 2.5s of the video
     assert "atrim=duration=1.500" in c.filter_complex
     assert "adelay=2500|2500" in c.filter_complex
 
 
-def test_dois_blocos_de_musica_se_misturam(isolated):
-    """Trocar de faixa no meio do video era o pedido; sao dois blocos."""
+def test_two_music_blocks_mix(isolated):
+    """Switching tracks mid-video was the request; it is two blocks."""
     from owcore.compose import compose_graph
 
     c = compose_graph(
-        _com_musica_na_regua(blocos=[
+        _with_music_on_the_ruler(blocks=[
             {"at_s": 0.0, "duration_s": 2.0, "start_s": 0.0,
              "source": "media", "media_id": "m1"},
             {"at_s": 2.0, "duration_s": 2.0, "start_s": 60.0,
@@ -2205,20 +2224,20 @@ def test_dois_blocos_de_musica_se_misturam(isolated):
         source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
-    # os dois blocos se misturam entre si; o som do jogo fica de fora porque
-    # `game_volume` e 0 -- com musica tocando, o padrao e ela mandar sozinha
+    # the two blocks mix with each other; the game sound stays out because
+    # `game_volume` is 0 -- with music playing, the default is music alone
     assert "amix=inputs=2" in c.filter_complex
     assert "[music]" in c.filter_complex
     assert "volume=0.4000" in c.filter_complex
 
 
-def test_o_silencio_e_a_falta_de_bloco(isolated):
-    """Nao ha "bloco de silencio": onde nao ha musica, nao ha musica. E o mesmo
-    que o buraco entre clipes ja faz com a imagem."""
+def test_silence_is_the_absence_of_a_block(isolated):
+    """There is no "silence block": where there is no music, there is no music.
+    It is the same the gap between clips already does with the picture."""
     from owcore.compose import compose_graph
 
     c = compose_graph(
-        _com_musica_na_regua(blocos=[
+        _with_music_on_the_ruler(blocks=[
             {"at_s": 0.0, "duration_s": 1.0, "start_s": 0.0,
              "source": "media", "media_id": "m1"},
             {"at_s": 3.0, "duration_s": 1.0, "start_s": 0.0,
@@ -2228,15 +2247,15 @@ def test_o_silencio_e_a_falta_de_bloco(isolated):
         source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
-    # nada cobre o vao dos 1s aos 3s, e nenhum filtro tenta preenche-lo
+    # nothing covers the gap from 1s to 3s, and no filter tries to fill it
     assert "adelay=3000|3000" in c.filter_complex
     assert c.duration_s == pytest.approx(4.0)
 
 
-def test_a_camada_de_audio_muda_e_ignorada(isolated):
+def test_a_muted_audio_layer_is_ignored(isolated):
     from owcore.compose import compose_graph
 
-    t = _com_musica_na_regua()
+    t = _with_music_on_the_ruler()
     t.layers[1].muted = True
     c = compose_graph(
         t, source=Path("x.mp4"), width=640, height=360, fps=30,
@@ -2246,12 +2265,12 @@ def test_a_camada_de_audio_muda_e_ignorada(isolated):
     assert "[2:a]" not in c.filter_complex
 
 
-def test_com_so_video_a_camada_de_audio_nem_e_aberta(isolated):
-    """Montar a entrada dela seria pagar por um arquivo que ninguem ia ouvir."""
+def test_with_video_only_the_audio_layer_is_not_even_opened(isolated):
+    """Building its input would mean paying for a file nobody would hear."""
     from owcore.compose import compose_graph
 
     c = compose_graph(
-        _com_musica_na_regua(),
+        _with_music_on_the_ruler(),
         source=Path("x.mp4"), width=640, height=360, fps=30,
         source_duration_s=600, library=_audio_library(Path("m.mp3")),
         video_only=True,
@@ -2261,38 +2280,39 @@ def test_com_so_video_a_camada_de_audio_nem_e_aberta(isolated):
     assert c.audio_map is None
 
 
-def test_o_bloco_de_musica_entra_na_janela_de_exportacao(isolated):
-    """Exportar um trecho reposiciona o som junto com a imagem -- senao a
-    musica sairia deslocada do video."""
+def test_a_music_block_enters_the_export_window(isolated):
+    """Exporting a range repositions the sound along with the picture --
+    otherwise the music would come out shifted from the video."""
     from owcore.compose import compose_graph
 
     c = compose_graph(
-        _com_musica_na_regua(
+        _with_music_on_the_ruler(
             export={"from_s": 1.0, "to_s": 3.0},
-            blocos=[{"at_s": 0.0, "duration_s": 4.0, "start_s": 10.0,
+            blocks=[{"at_s": 0.0, "duration_s": 4.0, "start_s": 10.0,
                      "source": "media", "media_id": "m1"}],
         ),
         source=Path("x.mp4"), width=640, height=360, fps=30,
         source_duration_s=600, library=_audio_library(Path("m.mp3")),
     )
 
-    # o bloco comecava aos 0s e ia ate 4s; visto pela janela ele comeca no
-    # primeiro quadro e pega a musica a partir de 11s
+    # the block started at 0s and went until 4s; seen through the window it
+    # starts at the first frame and takes the music from 11s on
     assert any(e.seek == pytest.approx(11.0) for e in c.inputs)
     assert "atrim=duration=2.000" in c.filter_complex
 
 
-def test_musica_na_regua_tira_a_montagem_do_caminho_curto(isolated):
-    """Corte-e-emenda nao mistura som que corre por fora dos cortes, e o
-    reaproveitamento da imagem supoe que o som venha depois, por fora."""
-    t = _com_musica_na_regua()
+def test_music_on_the_ruler_takes_the_montage_off_the_short_path(isolated):
+    """Cut-and-splice does not mix sound that runs outside the cuts, and reusing
+    the picture assumes the sound comes afterwards, from outside."""
+    t = _with_music_on_the_ruler()
 
     assert t.has_music
     assert not t.single_layer
 
 
-def test_camada_de_audio_vazia_ainda_nao_e_musica(isolated):
-    """Criar a camada e so abrir espaco; nada mudou ainda no video que sai."""
+def test_an_empty_audio_layer_is_not_music_yet(isolated):
+    """Creating the layer is just making room; nothing changed yet in the video
+    that comes out."""
     from owcore.models import Timeline
 
     t = Timeline(layers=[
@@ -2302,24 +2322,24 @@ def test_camada_de_audio_vazia_ainda_nao_e_musica(isolated):
     assert not t.has_music
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_o_video_sai_com_a_musica_cortada_e_posicionada(
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_the_video_comes_out_with_the_music_trimmed_and_positioned(
     isolated, short_sample, tmp_path
 ):
-    """De ponta a ponta: o arquivo que sai tem som, dura o que foi pedido, e o
-    trecho sem bloco de musica e mais silencioso que o resto."""
+    """End to end: the output file has sound, lasts what was asked, and the
+    stretch without a music block is quieter than the rest."""
     from owcore import ffmpeg
     from owcore.compose import compose_graph
 
     info = ffmpeg.probe(short_sample)
-    t = _com_musica_na_regua(
+    t = _with_music_on_the_ruler(
         game_volume=0.0,
-        blocos=[{"at_s": 0.0, "duration_s": 2.0, "start_s": 5.0,
+        blocks=[{"at_s": 0.0, "duration_s": 2.0, "start_s": 5.0,
                  "source": "media", "media_id": "m1"}],
     )
-    # sem o som do jogo, o que sobra depois dos 2s e silencio de verdade
-    for camada in t.layers:
-        for clip in camada.clips:
+    # without the game sound, what is left after 2s is real silence
+    for layer in t.layers:
+        for clip in layer.clips:
             if clip.source == "recording":
                 clip.audio.mute = True
 
@@ -2328,43 +2348,43 @@ def test_o_video_sai_com_a_musica_cortada_e_posicionada(
         fps=info.fps, source_duration_s=info.duration_s,
         library=_audio_library(MUSIC),
     )
-    saida = tmp_path / "com_musica.mp4"
-    ffmpeg.compose(c, saida)
+    output = tmp_path / "with_music.mp4"
+    ffmpeg.compose(c, output)
 
-    saiu = ffmpeg.probe(saida)
-    assert saiu.duration_s == pytest.approx(4.0, abs=0.35)
-    assert saiu.has_audio
+    result = ffmpeg.probe(output)
+    assert result.duration_s == pytest.approx(4.0, abs=0.35)
+    assert result.has_audio
 
-    assert _volume_entre(saida, 0.0, 1.8) > _volume_entre(saida, 2.2, 3.8) + 10
+    assert _volume_between(output, 0.0, 1.8) > _volume_between(output, 2.2, 3.8) + 10
 
 
-def _volume_entre(video: Path, inicio: float, fim: float) -> float:
-    """O volume medio de um trecho, em dB. Quanto mais perto de zero, mais alto."""
+def _volume_between(video: Path, start: float, end: float) -> float:
+    """The mean volume of a stretch, in dB. The closer to zero, the louder."""
     from owcore.config import get_settings
 
-    saida = subprocess.run(
-        # `-v info` de proposito: o `volumedetect` escreve o resultado como
-        # informacao, e com `-v error` ele nao diria nada
-        [get_settings().ffmpeg, "-v", "info", "-ss", f"{inicio:.3f}",
-         "-t", f"{fim - inicio:.3f}", "-i", str(video),
+    out = subprocess.run(
+        # `-v info` on purpose: `volumedetect` writes its result as info, and
+        # with `-v error` it would say nothing
+        [get_settings().ffmpeg, "-v", "info", "-ss", f"{start:.3f}",
+         "-t", f"{end - start:.3f}", "-i", str(video),
          "-af", "volumedetect", "-f", "null", "-"],
         capture_output=True, text=True,
     ).stderr
-    for linha in saida.splitlines():
-        if "mean_volume" in linha:
-            return float(linha.split(":")[1].strip().split()[0])
+    for line in out.splitlines():
+        if "mean_volume" in line:
+            return float(line.split(":")[1].strip().split()[0])
     return -91.0
 
 
-# ── o que o servidor recusa ─────────────────────────────────────────────────
+# ── what the server refuses ─────────────────────────────────────────────────
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_musica_numa_camada_de_video_e_recusada(isolated, short_sample):
-    """Ela faria o ffmpeg tentar redimensionar um fluxo de audio, e o render
-    inteiro morreria com uma mensagem que nao explica nada."""
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_music_on_a_video_layer_is_refused(isolated, short_sample):
+    """It would make ffmpeg try to resize an audio stream, and the whole render
+    would die with a message that explains nothing."""
     job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
+    track_id = upload_music(job_id)
 
     resp = api().post(
         f"/api/jobs/{job_id}/renders",
@@ -2377,15 +2397,15 @@ def test_musica_numa_camada_de_video_e_recusada(isolated, short_sample):
         }])},
     )
     assert resp.status_code == 422
-    assert "camada de audio" in resp.json()["detail"]
+    assert "audio layer" in resp.json()["detail"]
 
 
-def test_imagem_numa_camada_de_audio_e_recusada(isolated, short_sample, tmp_path):
-    """Pior que um erro: ela sairia em silencio, sem erro nenhum, e o usuario
-    procuraria o problema na mixagem."""
+def test_an_image_on_an_audio_layer_is_refused(isolated, short_sample, tmp_path):
+    """Worse than an error: it would come out silent, with no error at all, and
+    the user would look for the problem in the mix."""
     job_id = run_analysis(short_sample)
-    png = png_de_teste(tmp_path / "selo.png")
-    media_id = subir_media(job_id, "selo.png", png.read_bytes())
+    png = make_png(tmp_path / "badge.png")
+    media_id = upload_media(job_id, "badge.png", png.read_bytes())
 
     resp = api().post(
         f"/api/jobs/{job_id}/renders",
@@ -2400,13 +2420,14 @@ def test_imagem_numa_camada_de_audio_e_recusada(isolated, short_sample, tmp_path
         }])},
     )
     assert resp.status_code == 422
-    assert "so aceita musica" in resp.json()["detail"]
+    assert "only accepts music" in resp.json()["detail"]
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_a_faixa_continua_vira_bloco_na_leitura(isolated):
-    """Houve dois jeitos de ter musica e sobrou um. Quem converte o formato
-    velho e o codigo que le -- nao ha migracao a rodar no banco."""
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_the_continuous_track_becomes_a_block_on_read(isolated):
+    """There were two ways of having music and one is left. The code that reads
+    is what converts the old format -- there is no migration to run on the
+    database."""
     from owcore.models import MontageDraft, Timeline
 
     t = Timeline(
@@ -2417,18 +2438,18 @@ def test_a_faixa_continua_vira_bloco_na_leitura(isolated):
         ]}],
     )
 
-    assert t.track_id is None, "a faixa continua nao sobrevive a leitura"
+    assert t.track_id is None, "the continuous track does not survive reading"
     assert t.music_start_s == 0.0
-    som = t.layers[-1]
-    assert som.is_audio and len(som.clips) == 1
-    bloco = som.clips[0]
-    assert bloco.media_id == "m1"
-    assert bloco.at_s == 0.0, "a musica entrava com o video"
-    assert bloco.duration_s == pytest.approx(5.0), "e cobria o video inteiro"
-    assert bloco.start_s == pytest.approx(12.0), "do mesmo ponto da musica"
+    sound = t.layers[-1]
+    assert sound.is_audio and len(sound.clips) == 1
+    block = sound.clips[0]
+    assert block.media_id == "m1"
+    assert block.at_s == 0.0, "the music came in with the video"
+    assert block.duration_s == pytest.approx(5.0), "and covered the whole video"
+    assert block.start_s == pytest.approx(12.0), "from the same point in the music"
     assert t.has_music
 
-    # o rascunho salvo na V1 (cortes, sem camadas) chega no mesmo lugar
+    # the draft saved in V1 (cuts, no layers) ends up in the same place
     d = MontageDraft(
         track_id="m1", music_start_s=3.0,
         cuts=[{"start_s": 10.0, "duration_s": 2.0, "at_s": 0.0}],
@@ -2438,15 +2459,15 @@ def test_a_faixa_continua_vira_bloco_na_leitura(isolated):
     assert d.layers[1].clips[0].start_s == pytest.approx(3.0)
 
 
-@pytest.mark.skipif(not MUSIC.exists(), reason="precisa do data/sample/music.wav")
-def test_um_pedido_no_formato_antigo_ainda_vira_video(isolated, short_sample):
-    """A conversao nao e so do modelo: o pedido de um app anterior a esta fase
-    tem de sair do outro lado como video com musica."""
+@pytest.mark.skipif(not MUSIC.exists(), reason="needs data/sample/music.wav")
+def test_a_request_in_the_old_format_still_becomes_a_video(isolated, short_sample):
+    """The conversion is not only the model's: a request from an app older than
+    this phase must come out the other side as a video with music."""
     job_id = run_analysis(short_sample)
-    track_id = subir_musica(job_id)
+    track_id = upload_music(job_id)
 
-    render_id = montar(job_id, [{
-        "title": "trilha de sempre", "track_id": track_id,
+    render_id = render_montage(job_id, [{
+        "title": "the usual track", "track_id": track_id,
         "music_start_s": 2.0,
         "layers": [{"clips": [
             {"at_s": 0.0, "duration_s": 1.5, "start_s": 1.0},
@@ -2457,11 +2478,9 @@ def test_um_pedido_no_formato_antigo_ainda_vira_video(isolated, short_sample):
 
     clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
     assert clip["video_url"], clip.get("meta")
-    assert clip["meta"]["composed"] is True, "musica so existe no grafo"
+    assert clip["meta"]["composed"] is True, "music only exists in the graph"
     assert clip["meta"]["original_audio"] is False
-    assert clip["meta"]["music_name"], "a lista diz com que musica ele saiu"
-
-
+    assert clip["meta"]["music_name"], "the list says which music it came out with"
 
 
 # ── transitions ─────────────────────────────────────────────────────────────
@@ -2507,7 +2526,7 @@ def _render_with_library(timeline, library, short_sample, dest):
 
 def _rgb(video, t):
     """The frame's mean colour (R, G, B)."""
-    return quadro_cru(video, t).reshape(-1, 3).mean(axis=0)
+    return raw_frame(video, t).reshape(-1, 3).mean(axis=0)
 
 
 def test_transition_is_in_the_model_and_leaves_the_simple_path(isolated):
@@ -2578,7 +2597,7 @@ def test_slide_pushes_the_new_clip_over_the_old_one(
         lib, short_sample, tmp_path / "slide.mp4",
     )
 
-    q = quadro_cru(video, 2.5).reshape(45, 80, 3)
+    q = raw_frame(video, 2.5).reshape(45, 80, 3)
     left = q[:, :30, :].mean(axis=(0, 1))
     right = q[:, 50:, :].mean(axis=(0, 1))
     # halfway: blue came in from the right, red is still on the left -- and

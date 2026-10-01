@@ -50,7 +50,7 @@ def _header(w: wave.Wave_read) -> tuple[int, int, int, int]:
     """
     width = w.getsampwidth()
     if width != 2:
-        raise ValueError(f"esperado PCM 16 bits, recebi {width * 8} bits")
+        raise ValueError(f"expected 16-bit PCM, got {width * 8} bits")
     return w.getframerate(), w.getnchannels(), width, w.getnframes()
 
 
