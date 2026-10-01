@@ -2419,3 +2419,167 @@ def test_um_pedido_no_formato_antigo_ainda_vira_video(isolated, short_sample):
     assert clip["meta"]["music_name"], "a lista diz com que musica ele saiu"
 
 
+
+
+# ── transições ──────────────────────────────────────────────────────────────
+
+
+def _cores_solidas(tmp_path):
+    """Dois quadros de cor chapada, para saber de quem é cada pixel."""
+    import cv2
+    import numpy as np
+
+    from owcore.compose import LibraryFile
+
+    vermelho = tmp_path / "vermelho.png"
+    azul = tmp_path / "azul.png"
+    # o OpenCV escreve em BGR
+    cv2.imwrite(str(vermelho), np.full((360, 640, 3), (0, 0, 255), np.uint8))
+    cv2.imwrite(str(azul), np.full((360, 640, 3), (255, 0, 0), np.uint8))
+    return {
+        "vermelho": LibraryFile(path=vermelho, kind="image"),
+        "azul": LibraryFile(path=azul, kind="image"),
+    }
+
+
+def _vermelho_para_azul(transition):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    return Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, source="media", media_id="vermelho"),
+        TimelineClip(at_s=2, duration_s=2, source="media", media_id="azul",
+                     transition=transition),
+    ])])
+
+
+def _render_com_biblioteca(timeline, library, short_sample, destino):
+    from owcore import ffmpeg
+    from owcore.compose import compose_graph
+
+    c = compose_graph(timeline, source=short_sample, width=640, height=360,
+                      fps=30, library=library)
+    ffmpeg.compose(c, destino)
+    return destino
+
+
+def _rgb(video, t):
+    """A cor média do quadro (R, G, B)."""
+    return quadro_cru(video, t).reshape(-1, 3).mean(axis=0)
+
+
+def test_transicao_entra_no_modelo_e_tira_do_caminho_simples(isolated):
+    from owcore.models import TimelineClip
+
+    c = TimelineClip(at_s=0, duration_s=2,
+                     transition={"kind": "dissolve", "duration_s": 0.5})
+    assert c.transition.kind == "dissolve"
+    assert not c.is_simple
+
+    with pytest.raises(ValueError, match="transicao"):
+        TimelineClip(at_s=0, duration_s=1,
+                     transition={"kind": "dissolve", "duration_s": 2})
+    with pytest.raises(ValueError):
+        TimelineClip(at_s=0, duration_s=2,
+                     transition={"kind": "giratoria", "duration_s": 0.5})
+
+
+def test_dissolver_mistura_os_dois_e_termina_no_novo(
+    isolated, short_sample, tmp_path
+):
+    lib = _cores_solidas(tmp_path)
+    video = _render_com_biblioteca(
+        _vermelho_para_azul({"kind": "dissolve", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "dissolve.mp4",
+    )
+
+    r, _, b = _rgb(video, 1.5)
+    assert r > 180 and b < 60, "antes do corte, só o vermelho"
+    # no meio da transição os dois aparecem ao mesmo tempo: é isso que separa
+    # um dissolver de um fade sobre o fundo preto
+    r, _, b = _rgb(video, 2.5)
+    assert r > 60 and b > 60, f"no meio, mistura (r={r:.0f}, b={b:.0f})"
+    r, _, b = _rgb(video, 3.5)
+    assert b > 180 and r < 60, "depois, só o azul"
+
+
+def test_mergulho_no_preto_escurece_no_corte(isolated, short_sample, tmp_path):
+    lib = _cores_solidas(tmp_path)
+    video = _render_com_biblioteca(
+        _vermelho_para_azul({"kind": "fade_black", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "preto.mp4",
+    )
+
+    assert _rgb(video, 1.0)[0] > 180
+    assert _rgb(video, 2.0).max() < 40, "no corte, preto"
+    assert _rgb(video, 3.0)[2] > 180
+
+
+def test_mergulho_no_branco_clareia_no_corte(isolated, short_sample, tmp_path):
+    lib = _cores_solidas(tmp_path)
+    video = _render_com_biblioteca(
+        _vermelho_para_azul({"kind": "fade_white", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "branco.mp4",
+    )
+
+    assert _rgb(video, 2.0).min() > 200, "no corte, branco"
+
+
+def test_deslizar_empurra_o_novo_por_cima_do_velho(
+    isolated, short_sample, tmp_path
+):
+    import numpy as np
+
+    lib = _cores_solidas(tmp_path)
+    video = _render_com_biblioteca(
+        _vermelho_para_azul({"kind": "slide_left", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "deslizar.mp4",
+    )
+
+    q = quadro_cru(video, 2.5).reshape(45, 80, 3)
+    esquerda = q[:, :30, :].mean(axis=(0, 1))
+    direita = q[:, 50:, :].mean(axis=(0, 1))
+    # no meio do caminho: o azul entrou pela direita, o vermelho ainda está à
+    # esquerda — e por baixo dele, não preto
+    assert esquerda[0] > 180 and esquerda[2] < 60
+    assert direita[2] > 180 and direita[0] < 60
+    assert np.abs(_rgb(video, 3.5) - (0, 0, 255)).max() < 40
+
+
+def test_a_sobra_do_bloco_anterior_e_so_imagem(isolated):
+    """O dissolver estica a imagem do bloco de antes por baixo do novo; o som
+    dele para onde ele para na régua."""
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1),
+        TimelineClip(at_s=2, duration_s=2, start_s=6,
+                     transition={"kind": "dissolve", "duration_s": 0.5}),
+    ])])
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60)
+
+    grafo = c.filter_complex
+    assert "[1:v]trim=duration=2.500" in grafo, "a imagem passa do corte"
+    assert "[1:a]atrim=duration=2.000" in grafo, "o som não"
+    # e o bloco de antes fica visível até o fim da transição
+    assert "between(t,0.000,2.500)" in grafo
+
+
+def test_transicao_cortada_pela_janela_de_exportacao_some(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(
+        export={"from_s": 2.2},
+        layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=1),
+            TimelineClip(at_s=2, duration_s=2, start_s=6,
+                         transition={"kind": "slide_left", "duration_s": 1}),
+        ])],
+    )
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60)
+
+    # a entrada aconteceu antes da janela: o bloco já está parado no lugar
+    assert "*W*" not in c.filter_complex

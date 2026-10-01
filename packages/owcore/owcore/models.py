@@ -408,6 +408,52 @@ class ClipFade(BaseModel):
         return self.in_s == 0.0 and self.out_s == 0.0
 
 
+class TransitionKind(StrEnum):
+    """How a clip enters over the one before it on the same layer."""
+
+    #: the new clip appears over the old one, which keeps running underneath
+    DISSOLVE = "dissolve"
+    #: the old one goes dark, the new one comes out of the dark
+    FADE_BLACK = "fade_black"
+    #: same, through white -- the flash of an impact
+    FADE_WHITE = "fade_white"
+    #: the new clip slides in over the old one, from the side it is named after
+    #: the *movement*: `slide_left` comes in from the right moving left
+    SLIDE_LEFT = "slide_left"
+    SLIDE_RIGHT = "slide_right"
+    SLIDE_UP = "slide_up"
+    SLIDE_DOWN = "slide_down"
+
+    @property
+    def overlaps(self) -> bool:
+        """Does it need the previous clip on screen while this one comes in?
+
+        A dissolve or a slide mixes two pictures, and the overlay graph only has
+        two pictures at the same instant if the previous clip runs **past** the
+        cut. A dip to black or white does not mix anything: one goes out, the
+        other comes in.
+        """
+        return self not in (TransitionKind.FADE_BLACK, TransitionKind.FADE_WHITE)
+
+
+class ClipTransition(BaseModel):
+    """How the clip enters, at the cut with the previous one on its layer.
+
+    It belongs to the clip that **enters**, and not to the cut: moving the clip
+    takes its entrance with it, and a cut with nothing before it (the first
+    clip, or one after a gap) still has an entrance -- out of the background.
+    """
+
+    kind: TransitionKind
+    duration_s: float = 0.5
+
+    @model_validator(mode="after")
+    def _check_coherent(self) -> "ClipTransition":
+        if not 0.1 <= self.duration_s <= 3.0:
+            raise ValueError("uma transicao dura entre 0.1 e 3 segundos")
+        return self
+
+
 class Fit(StrEnum):
     """What to do when the clip's aspect is not the output's.
 
@@ -582,6 +628,8 @@ class TimelineClip(BaseModel):
     audio: ClipAudio = Field(default_factory=ClipAudio)
     color: ClipColor = Field(default_factory=ClipColor)
     fade: ClipFade = Field(default_factory=ClipFade)
+    #: How the clip enters over the previous one on its layer. None = a cut.
+    transition: ClipTransition | None = None
 
     #: Zoom animation inside the clip. Empty = no animation.
     #:
@@ -626,6 +674,8 @@ class TimelineClip(BaseModel):
             raise ValueError("congelar e inverter ao mesmo tempo nao faz sentido")
         if self.source is ClipSource.TEXT and not self.text.strip():
             raise ValueError("um clipe de texto precisa de texto")
+        if self.transition and self.transition.duration_s > self.duration_s + 1e-6:
+            raise ValueError("a transicao passa da duracao do clipe")
         return self
 
     @property
@@ -660,6 +710,7 @@ class TimelineClip(BaseModel):
             and self.audio.is_neutral
             and self.color.is_neutral
             and self.fade.is_neutral
+            and self.transition is None
             and self.speed == 1.0
             and not self.zoom
             and not self.freeze
