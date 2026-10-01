@@ -1337,7 +1337,10 @@ def test_o_grafo_usa_fade_no_alfa(isolated):
 
 
 def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
-    """`scale` nao anima no ffmpeg; quem anima e o `crop`, com expressoes em t."""
+    """`zoompan` animates it, with expressions in the frame's time (`it`).
+
+    It used to be `crop`, which computes width and height only once -- and so
+    the lens never moved."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1347,11 +1350,12 @@ def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
     ])])
     g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
-    assert "crop=w=" in g
+    assert "zoompan=z=" in g
+    assert "crop=w=" not in g
     # a fracao 0.5 do clipe de 2s e o segundo 1
-    assert "lt(t,1.0000)" in g
-    # e o quadro volta ao tamanho da tela depois do recorte
-    assert "scale=640:360" in g
+    assert "lt(it,1.0000)" in g
+    # and it comes out at the canvas size and frame rate
+    assert ":s=640x360:fps=30.000" in g
 
 
 def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
@@ -1367,8 +1371,8 @@ def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
         return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
                       fps=30).filter_complex
 
-    assert "lt(t,2.0000)" in grafo(2.0)
-    assert "lt(t,5.0000)" in grafo(5.0)
+    assert "lt(it,2.0000)" in grafo(2.0)
+    assert "lt(it,5.0000)" in grafo(5.0)
 
 
 def test_congelar_come_um_quadro_so_da_gravacao(isolated):
@@ -1426,6 +1430,45 @@ def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
     assert inicio.size > 0 and inicio.size == fim.size
     # mesma imagem, lentes diferentes: os quadros tem de ser bem distintos
     assert abs(inicio - fim).mean() > 10, "a lente nao se mexeu"
+
+
+def test_a_frozen_clip_shows_its_picture_from_start_to_end(
+    isolated, short_sample, tmp_path
+):
+    """In ffmpeg 7, `tpad` read the frame rate that `setpts` had cleared, and a
+    frozen clip came out as two frames followed by the black background."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=3, freeze=True),
+    ])])
+    video = compor_e_render(t, short_sample, tmp_path / "frozen.mp4")
+
+    start, middle, end = (quadro_cru(video, s) for s in (0.1, 1.0, 1.8))
+    assert start.mean() > 20, "the frozen clip came out black"
+    # and still: the same frame the whole time
+    assert abs(start - middle).mean() < 2
+    assert abs(start - end).mean() < 2
+
+
+def test_zoom_also_animates_on_a_running_clip(
+    isolated, short_sample, tmp_path
+):
+    """The same stretch with and without a lens: equal at the start, different
+    at the end."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def render(name, **extra):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=3, **extra),
+        ])])
+        return compor_e_render(t, short_sample, tmp_path / f"{name}.mp4")
+
+    plain = render("plain")
+    zoomed = render("zoomed", zoom=[{"t": 0, "scale": 1}, {"t": 1, "scale": 3}])
+
+    assert abs(quadro_cru(zoomed, 0.05) - quadro_cru(plain, 0.05)).mean() < 8
+    assert abs(quadro_cru(zoomed, 1.8) - quadro_cru(plain, 1.8)).mean() > 10
 
 
 # ── texto (Fase 6) ──────────────────────────────────────────────────────────
@@ -2419,3 +2462,167 @@ def test_um_pedido_no_formato_antigo_ainda_vira_video(isolated, short_sample):
     assert clip["meta"]["music_name"], "a lista diz com que musica ele saiu"
 
 
+
+
+# ── transitions ─────────────────────────────────────────────────────────────
+
+
+def _solid_colours(tmp_path):
+    """Two flat-colour frames, so every pixel can be traced to its clip."""
+    import cv2
+    import numpy as np
+
+    from owcore.compose import LibraryFile
+
+    red = tmp_path / "red.png"
+    blue = tmp_path / "blue.png"
+    # OpenCV writes BGR
+    cv2.imwrite(str(red), np.full((360, 640, 3), (0, 0, 255), np.uint8))
+    cv2.imwrite(str(blue), np.full((360, 640, 3), (255, 0, 0), np.uint8))
+    return {
+        "red": LibraryFile(path=red, kind="image"),
+        "blue": LibraryFile(path=blue, kind="image"),
+    }
+
+
+def _red_to_blue(transition):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    return Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, source="media", media_id="red"),
+        TimelineClip(at_s=2, duration_s=2, source="media", media_id="blue",
+                     transition=transition),
+    ])])
+
+
+def _render_with_library(timeline, library, short_sample, dest):
+    from owcore import ffmpeg
+    from owcore.compose import compose_graph
+
+    c = compose_graph(timeline, source=short_sample, width=640, height=360,
+                      fps=30, library=library)
+    ffmpeg.compose(c, dest)
+    return dest
+
+
+def _rgb(video, t):
+    """The frame's mean colour (R, G, B)."""
+    return quadro_cru(video, t).reshape(-1, 3).mean(axis=0)
+
+
+def test_transition_is_in_the_model_and_leaves_the_simple_path(isolated):
+    from owcore.models import TimelineClip
+
+    c = TimelineClip(at_s=0, duration_s=2,
+                     transition={"kind": "dissolve", "duration_s": 0.5})
+    assert c.transition.kind == "dissolve"
+    assert not c.is_simple
+
+    with pytest.raises(ValueError, match="transition"):
+        TimelineClip(at_s=0, duration_s=1,
+                     transition={"kind": "dissolve", "duration_s": 2})
+    with pytest.raises(ValueError):
+        TimelineClip(at_s=0, duration_s=2,
+                     transition={"kind": "spinning", "duration_s": 0.5})
+
+
+def test_dissolve_mixes_both_and_ends_on_the_new_clip(
+    isolated, short_sample, tmp_path
+):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _red_to_blue({"kind": "dissolve", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "dissolve.mp4",
+    )
+
+    r, _, b = _rgb(video, 1.5)
+    assert r > 180 and b < 60, "before the cut, only red"
+    # halfway through, both show at the same time: that is what sets a
+    # dissolve apart from a fade over the black background
+    r, _, b = _rgb(video, 2.5)
+    assert r > 60 and b > 60, f"halfway, a mix (r={r:.0f}, b={b:.0f})"
+    r, _, b = _rgb(video, 3.5)
+    assert b > 180 and r < 60, "afterwards, only blue"
+
+
+def test_dip_to_black_goes_dark_at_the_cut(isolated, short_sample, tmp_path):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _red_to_blue({"kind": "fade_black", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "black.mp4",
+    )
+
+    assert _rgb(video, 1.0)[0] > 180
+    assert _rgb(video, 2.0).max() < 40, "black at the cut"
+    assert _rgb(video, 3.0)[2] > 180
+
+
+def test_dip_to_white_goes_bright_at_the_cut(isolated, short_sample, tmp_path):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _red_to_blue({"kind": "fade_white", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "white.mp4",
+    )
+
+    assert _rgb(video, 2.0).min() > 200, "white at the cut"
+
+
+def test_slide_pushes_the_new_clip_over_the_old_one(
+    isolated, short_sample, tmp_path
+):
+    import numpy as np
+
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _red_to_blue({"kind": "slide_left", "duration_s": 1.0}),
+        lib, short_sample, tmp_path / "slide.mp4",
+    )
+
+    q = quadro_cru(video, 2.5).reshape(45, 80, 3)
+    left = q[:, :30, :].mean(axis=(0, 1))
+    right = q[:, 50:, :].mean(axis=(0, 1))
+    # halfway: blue came in from the right, red is still on the left -- and
+    # underneath it, not black
+    assert left[0] > 180 and left[2] < 60
+    assert right[2] > 180 and right[0] < 60
+    assert np.abs(_rgb(video, 3.5) - (0, 0, 255)).max() < 40
+
+
+def test_the_previous_clip_overrun_is_picture_only(isolated):
+    """A dissolve stretches the previous clip's picture under the new one; its
+    sound stops where the clip stops on the ruler."""
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1),
+        TimelineClip(at_s=2, duration_s=2, start_s=6,
+                     transition={"kind": "dissolve", "duration_s": 0.5}),
+    ])])
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60)
+
+    graph = c.filter_complex
+    assert "[1:v]trim=duration=2.500" in graph, "the picture runs past the cut"
+    assert "[1:a]atrim=duration=2.000" in graph, "the sound does not"
+    # and the previous clip stays visible until the transition ends
+    assert "between(t,0.000,2.500)" in graph
+
+
+def test_a_transition_cut_off_by_the_export_window_is_dropped(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(
+        export={"from_s": 2.2},
+        layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=1),
+            TimelineClip(at_s=2, duration_s=2, start_s=6,
+                         transition={"kind": "slide_left", "duration_s": 1}),
+        ])],
+    )
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60)
+
+    # the entrance happened before the window: the clip is already in place
+    assert "*W*" not in c.filter_complex

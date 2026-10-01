@@ -35,7 +35,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import textfx
-from .models import MIN_CUT_S, ClipSource, Fit, MediaKind, Timeline, TimelineClip
+from .models import (
+    MIN_CUT_S,
+    ClipSource,
+    Fit,
+    MediaKind,
+    Timeline,
+    TimelineClip,
+    TransitionKind,
+)
 
 
 @dataclass(slots=True)
@@ -115,13 +123,50 @@ def _position(clip: TimelineClip) -> tuple[str, str]:
     move the text twice -- with `y=-0.5` it went over the edge and vanished.
     """
     if clip.source is ClipSource.TEXT:
-        return "0", "0"
-    x = f"(W-w)/2+({clip.transform.x:.4f})*(W/2)"
-    y = f"(H-h)/2+({clip.transform.y:.4f})*(H/2)"
+        x, y = "0", "0"
+    else:
+        x = f"(W-w)/2+({clip.transform.x:.4f})*(W/2)"
+        y = f"(H-h)/2+({clip.transform.y:.4f})*(H/2)"
+    return _slide(clip, x, y)
+
+
+#: Where a sliding clip starts, as a multiple of the frame: it comes in from
+#: the side opposite to the movement.
+_SLIDE_FROM = {
+    TransitionKind.SLIDE_LEFT: (1, 0),
+    TransitionKind.SLIDE_RIGHT: (-1, 0),
+    TransitionKind.SLIDE_UP: (0, 1),
+    TransitionKind.SLIDE_DOWN: (0, -1),
+}
+
+
+def _slide(clip: TimelineClip, x: str, y: str) -> tuple[str, str]:
+    """The resting position, plus the stretch still to travel while it slides.
+
+    The `t` of an overlay is the time of the final video, so the progress is
+    counted from the clip's `at_s`; once it reaches 1 the extra term is zero and
+    the clip sits where it was placed.
+    """
+    tr = clip.transition
+    if tr is None or tr.kind not in _SLIDE_FROM:
+        return x, y
+    dx, dy = _SLIDE_FROM[tr.kind]
+    remaining = f"(1-min(1,max(0,(t-{clip.at_s:.3f})/{tr.duration_s:.3f})))"
+    # quoted: the commas of `min`/`max` would otherwise split filters in the graph
+    if dx:
+        x = f"'{x}+({dx})*W*{remaining}'"
+    if dy:
+        y = f"'{y}+({dy})*H*{remaining}'"
     return x, y
 
 
-def _interpolate(keys: list, field_name: str, duration_s: float) -> str:
+#: The colour each dip goes through.
+_DIP_COLOR = {TransitionKind.FADE_BLACK: "black", TransitionKind.FADE_WHITE: "white"}
+
+
+def _interpolate(
+    keys: list, field_name: str, duration_s: float, var: str = "t"
+) -> str:
     """An ffmpeg expression interpolating the field between keyframes.
 
     What comes out is a ladder of `if`s, from the first point to the last, with
@@ -137,9 +182,9 @@ def _interpolate(keys: list, field_name: str, duration_s: float) -> str:
     expr = f"{points[-1][1]:.4f}"
     for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:]))):
         span = max(1e-6, t1 - t0)
-        line = f"({v0:.4f}+({v1 - v0:.4f})*(t-{t0:.4f})/{span:.4f})"
-        expr = f"if(lt(t,{t1:.4f}),{line},{expr})"
-    return f"if(lt(t,{points[0][0]:.4f}),{points[0][1]:.4f},{expr})"
+        line = f"({v0:.4f}+({v1 - v0:.4f})*({var}-{t0:.4f})/{span:.4f})"
+        expr = f"if(lt({var},{t1:.4f}),{line},{expr})"
+    return f"if(lt({var},{points[0][0]:.4f}),{points[0][1]:.4f},{expr})"
 
 
 def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
@@ -165,22 +210,30 @@ def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
     ]
 
 
-def _zoom_chain(clip: TimelineClip, width: int, height: int) -> list[str]:
+def _zoom_chain(clip: TimelineClip, width: int, height: int, fps: float) -> list[str]:
     """The window that moves and tightens inside the clip.
 
-    `scale` does not animate in ffmpeg. What animates is `crop`, which accepts
-    expressions in `t`: an ever smaller window is cropped out and scaled back to
-    the canvas size. The effect is the lens closing in.
+    It used to be a `crop` with expressions in `t`, scaled back to the canvas.
+    That never animated: `crop` evaluates its **width and height once**, when
+    the filter is configured -- only `x` and `y` are per frame. The window kept
+    a single size (the last keyframe's) and the lens stood still.
+
+    `zoompan` is the filter made for this: zoom and position are evaluated on
+    every frame. Its clock is `it`, the input frame's time, which here already
+    starts at 0 and already counts the speed. It positions the window in whole
+    pixels, and at canvas size a slow zoom would visibly step a pixel at a
+    time; working on a frame twice as large halves the step.
     """
-    z = _interpolate(clip.zoom, "scale", clip.duration_s)
-    x = _interpolate(clip.zoom, "x", clip.duration_s)
-    y = _interpolate(clip.zoom, "y", clip.duration_s)
+    z = _interpolate(clip.zoom, "scale", clip.duration_s, "it")
+    x = _interpolate(clip.zoom, "x", clip.duration_s, "it")
+    y = _interpolate(clip.zoom, "y", clip.duration_s, "it")
     return [
-        f"crop=w='iw/({z})':h='ih/({z})'"
-        f":x='(iw-iw/({z}))*(0.5+({x})/2)'"
-        f":y='(ih-ih/({z}))*(0.5+({y})/2)'",
-        # back to the canvas size: the crop shrank the frame
-        f"scale={int(width)}:{int(height)}",
+        f"scale={2 * int(width)}:{2 * int(height)}",
+        f"zoompan=z='{z}'"
+        f":x='(iw-iw/zoom)*(0.5+({x})/2)'"
+        f":y='(ih-ih/zoom)*(0.5+({y})/2)'"
+        # one frame out per frame in: it is a video, not a still being panned
+        f":d=1:s={int(width)}x{int(height)}:fps={fps:.3f}",
     ]
 
 
@@ -191,8 +244,13 @@ def _video_chain(
     width: int,
     height: int,
     fit: Fit,
+    dip_out: tuple[str, float] | None = None,
+    fps: float = 30.0,
 ) -> str:
     """What happens to a clip before it touches the canvas.
+
+    `dip_out` is (colour, seconds): the clip after this one dips through that
+    colour, and this one has to go into it on its way out.
 
     Order matters. Speed comes **before** everything, because it changes the
     clip's clock: a half-second fade has to last half a second in the final
@@ -208,7 +266,13 @@ def _video_chain(
         steps.append("reverse")
 
     if clip.freeze:
-        # a single frame, stretched over the block's duration
+        # A single frame, stretched over the block's duration.
+        #
+        # `tpad` turns that duration into frames using the link's frame rate,
+        # and in ffmpeg 7 `setpts` leaves the rate **unknown**: the padding came
+        # out as zero frames, and the frozen block as the black background.
+        # The `fps` in front says the rate again.
+        steps.append(f"fps={fps:.3f}")
         steps.append(f"tpad=stop_mode=clone:stop_duration={clip.duration_s:.3f}")
     elif clip.speed != 1.0:
         # dividing the PTS speeds it up: at 2x, each frame is worth half the time
@@ -219,13 +283,16 @@ def _video_chain(
         # `_clip_input`): the text is drawn straight onto it
         steps.append(textfx.filter_chain(clip, height))
 
-    if clip.zoom:
-        steps += _zoom_chain(clip, width, height)
-
     # before anything that depends on size, the clip takes on the size of the
     # output canvas
     if clip.source is not ClipSource.TEXT:
         steps += _fit_chain(fit, width, height)
+
+    # The lens comes after the framing: it zooms into what is on screen. Before
+    # it, a 16:9 recording exported as 9:16 was zoomed in its own aspect and
+    # then stretched into the other.
+    if clip.zoom:
+        steps += _zoom_chain(clip, width, height, fps)
 
     if not clip.color.is_neutral:
         steps.append(
@@ -239,11 +306,28 @@ def _video_chain(
             f"scale=iw*{clip.transform.scale:.4f}:ih*{clip.transform.scale:.4f}"
         )
 
+    tr = clip.transition
+    dissolve = tr is not None and tr.kind is TransitionKind.DISSOLVE
+
     # alpha only exists in rgba, and from here down everything touches it
-    if (not clip.fade.is_neutral or clip.transform.opacity < 1.0) and (
+    if (not clip.fade.is_neutral or clip.transform.opacity < 1.0 or dissolve) and (
         clip.source is not ClipSource.TEXT
     ):
         steps.append("format=rgba")
+
+    # The entrance. A dissolve is a fade **of the alpha**: the previous clip
+    # runs on underneath (see `compose_graph`) and shows through. A dip is a
+    # fade of the colour, half the time on each side of the cut.
+    if dissolve:
+        steps.append(f"fade=t=in:st=0:d={tr.duration_s:.3f}:alpha=1")
+    elif tr is not None and tr.kind in _DIP_COLOR:
+        steps.append(
+            f"fade=t=in:st=0:d={tr.duration_s / 2:.3f}:color={_DIP_COLOR[tr.kind]}"
+        )
+    if dip_out is not None:
+        colour, d = dip_out
+        start = max(0.0, clip.duration_s - d)
+        steps.append(f"fade=t=out:st={start:.3f}:d={d:.3f}:color={colour}")
 
     if not clip.fade.is_neutral:
         # `alpha=1` is what makes the fade **reveal** what is underneath rather
@@ -340,6 +424,8 @@ def _within_window(
 
     return clip.model_copy(
         update={
+            # an entrance that happened before the window is not seen in it
+            "transition": clip.transition if eaten_before <= 0 else None,
             "at_s": max(0.0, clip.at_s - start),
             "duration_s": new_duration,
             # how much of the clip was skipped costs more source when it runs
@@ -533,10 +619,41 @@ def compose_graph(
         # would hear
         if layer.is_audio and video_only:
             continue
-        for original in layer.clips:
-            clip = _within_window(original, start, end)
+        clips = layer.clips
+        for i, original in enumerate(clips):
+            # How the **next** clip enters decides how this one leaves: a
+            # dissolve or a slide needs this one still on screen underneath,
+            # so its picture runs past the cut for the transition's length --
+            # its sound does not, and the ruler does not move. A dip needs this
+            # one to go dark on its way out.
+            nxt = clips[i + 1] if i + 1 < len(clips) else None
+            tail = 0.0
+            dip_out: tuple[str, float] | None = None
+            if (
+                not layer.is_audio
+                and nxt is not None
+                and nxt.transition is not None
+                and abs(nxt.at_s - original.until_s) < 1e-3
+            ):
+                tr = nxt.transition
+                if tr.kind.overlaps:
+                    tail = tr.duration_s
+                else:
+                    dip_out = (_DIP_COLOR[tr.kind], tr.duration_s / 2)
+            drawn = (
+                original.model_copy(
+                    update={"duration_s": original.duration_s + tail}
+                )
+                if tail
+                else original
+            )
+            clip = _within_window(drawn, start, end)
             if clip is None:
                 continue  # outside the stretch asked for
+            heard = _within_window(original, start, end) if tail else clip
+            # a dip whose end fell outside the window would happen off screen
+            if dip_out is not None and clip.until_s < original.until_s - start - 1e-6:
+                dip_out = None
 
             clip_input, usable_duration, has_sound = _clip_input(
                 clip,
@@ -556,7 +673,16 @@ def compose_graph(
 
             if not layer.is_audio:
                 c.filters.append(
-                    _video_chain(trimmed, n, f"v{n}", width, height, fit)
+                    _video_chain(
+                        trimmed,
+                        n,
+                        f"v{n}",
+                        width,
+                        height,
+                        fit,
+                        dip_out=dip_out,
+                        fps=fps,
+                    )
                 )
                 x, y = _position(trimmed)
                 output = f"t{n}"
@@ -572,8 +698,19 @@ def compose_graph(
             # chain with no output makes the graph invalid and ffmpeg refuses
             # the whole set
             keeps_sound = layer.is_audio or game_comes_in
-            if not video_only and not layer.muted and has_sound and keeps_sound:
-                chain = _audio_chain(trimmed, n, f"a{n}")
+            if (
+                not video_only
+                and not layer.muted
+                and has_sound
+                and keeps_sound
+                and heard is not None
+            ):
+                # the extra picture past the cut is silent: the sound stops
+                # where the clip stops on the ruler
+                sound = trimmed.model_copy(
+                    update={"duration_s": min(heard.duration_s, usable_duration)}
+                )
+                chain = _audio_chain(sound, n, f"a{n}")
                 if chain is not None:
                     c.filters.append(chain)
                     (music_audio if layer.is_audio else cut_audio).append(f"a{n}")
