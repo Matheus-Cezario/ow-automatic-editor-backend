@@ -450,7 +450,7 @@ class ClipTransition(BaseModel):
     @model_validator(mode="after")
     def _check_coherent(self) -> "ClipTransition":
         if not 0.1 <= self.duration_s <= 3.0:
-            raise ValueError("uma transicao dura entre 0.1 e 3 segundos")
+            raise ValueError("a transition lasts between 0.1 and 3 seconds")
         return self
 
 
@@ -675,7 +675,7 @@ class TimelineClip(BaseModel):
         if self.source is ClipSource.TEXT and not self.text.strip():
             raise ValueError("um clipe de texto precisa de texto")
         if self.transition and self.transition.duration_s > self.duration_s + 1e-6:
-            raise ValueError("a transicao passa da duracao do clipe")
+            raise ValueError("the transition is longer than the clip")
         return self
 
     @property

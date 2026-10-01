@@ -151,12 +151,12 @@ def _slide(clip: TimelineClip, x: str, y: str) -> tuple[str, str]:
     if tr is None or tr.kind not in _SLIDE_FROM:
         return x, y
     dx, dy = _SLIDE_FROM[tr.kind]
-    falta = f"(1-min(1,max(0,(t-{clip.at_s:.3f})/{tr.duration_s:.3f})))"
-    # entre aspas: as vírgulas do `min`/`max` separariam filtros no grafo
+    remaining = f"(1-min(1,max(0,(t-{clip.at_s:.3f})/{tr.duration_s:.3f})))"
+    # quoted: the commas of `min`/`max` would otherwise split filters in the graph
     if dx:
-        x = f"'{x}+({dx})*W*{falta}'"
+        x = f"'{x}+({dx})*W*{remaining}'"
     if dy:
-        y = f"'{y}+({dy})*H*{falta}'"
+        y = f"'{y}+({dy})*H*{remaining}'"
     return x, y
 
 
@@ -325,9 +325,9 @@ def _video_chain(
             f"fade=t=in:st=0:d={tr.duration_s / 2:.3f}:color={_DIP_COLOR[tr.kind]}"
         )
     if dip_out is not None:
-        cor, d = dip_out
+        colour, d = dip_out
         start = max(0.0, clip.duration_s - d)
-        steps.append(f"fade=t=out:st={start:.3f}:d={d:.3f}:color={cor}")
+        steps.append(f"fade=t=out:st={start:.3f}:d={d:.3f}:color={colour}")
 
     if not clip.fade.is_neutral:
         # `alpha=1` is what makes the fade **reveal** what is underneath rather

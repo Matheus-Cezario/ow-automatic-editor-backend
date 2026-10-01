@@ -1,14 +1,14 @@
-# Sobe o sistema inteiro em modo docker: Redis Streams + S3 (RustFS) + PostgreSQL e
-# os microsservicos, todos da mesma imagem (docker/Dockerfile) mudando so o
-# SERVICE. Rode a partir da raiz deste repositorio:
+# Starts the whole system in docker mode: Redis Streams + S3 (RustFS) + PostgreSQL
+# and the microservices, all from the same image (docker/Dockerfile) with only
+# SERVICE changing. Run it from the root of this repository:
 #
 #     docker compose up --build
 #
-# App + API -> http://localhost:8000   Console do S3 -> http://localhost:9001
+# App + API -> http://localhost:8000   S3 console -> http://localhost:9001
 #
-# O gateway serve o app Flutter compilado do repositorio irmao
-# (../ow-automatic-editor-frontend/build/web). Sem o build a pasta montada fica
-# vazia e ele serve so a API. Para outro caminho: OW_FRONTEND_WEB=/caminho.
+# The gateway serves the compiled Flutter app from the sibling repository
+# (../ow-automatic-editor-frontend/build/web). Without a build the mounted folder
+# is empty and it serves the API alone. Another path: OW_FRONTEND_WEB=/path.
 
 x-worker: &worker
   restart: unless-stopped
@@ -32,7 +32,7 @@ x-worker: &worker
       condition: service_healthy
 
 services:
-  # -- infraestrutura -------------------------------------------------------
+  # -- infrastructure -------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -60,9 +60,9 @@ services:
       timeout: 3s
       retries: 20
 
-  # Storage S3. O MinIO deixou de publicar imagens (Docker Hub e quay.io
-  # negam o pull); o RustFS e um substituto compativel, com o mesmo par de
-  # portas e o mesmo login padrao.
+  # S3 storage. MinIO stopped publishing images (Docker Hub and quay.io deny
+  # the pull); RustFS is a compatible replacement, with the same pair of ports
+  # and the same default login.
   s3:
     image: rustfs/rustfs:latest
     restart: unless-stopped
@@ -81,7 +81,7 @@ services:
       timeout: 3s
       retries: 20
 
-  # -- microsservicos -------------------------------------------------------
+  # -- microservices --------------------------------------------------------
   gateway:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: gateway } }
@@ -89,7 +89,7 @@ services:
     environment:
       <<: *worker-env
       OW_WEB_DIR: /app/web
-      # o gateway atende varias requisicoes ao mesmo tempo
+      # the gateway serves several requests at once
       OW_DB_POOL_SIZE: 10
       OW_DB_MAX_OVERFLOW: 10
     ports:
