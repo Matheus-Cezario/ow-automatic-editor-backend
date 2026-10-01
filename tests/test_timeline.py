@@ -1337,7 +1337,10 @@ def test_o_grafo_usa_fade_no_alfa(isolated):
 
 
 def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
-    """`scale` nao anima no ffmpeg; quem anima e o `crop`, com expressoes em t."""
+    """Quem anima e o `zoompan`, com expressoes no tempo do quadro (`it`).
+
+    Ja foi o `crop` -- que calcula largura e altura uma vez so, e por isso a
+    lente nunca se mexia."""
     from owcore.compose import compose_graph
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -1347,11 +1350,12 @@ def test_o_zoom_interpola_entre_os_quadros_chave(isolated):
     ])])
     g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
 
-    assert "crop=w=" in g
+    assert "zoompan=z=" in g
+    assert "crop=w=" not in g
     # a fracao 0.5 do clipe de 2s e o segundo 1
-    assert "lt(t,1.0000)" in g
-    # e o quadro volta ao tamanho da tela depois do recorte
-    assert "scale=640:360" in g
+    assert "lt(it,1.0000)" in g
+    # e sai no tamanho e no ritmo da tela
+    assert ":s=640x360:fps=30.000" in g
 
 
 def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
@@ -1367,8 +1371,8 @@ def test_os_quadros_chave_sao_fracao_e_seguem_o_bloco(isolated):
         return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
                       fps=30).filter_complex
 
-    assert "lt(t,2.0000)" in grafo(2.0)
-    assert "lt(t,5.0000)" in grafo(5.0)
+    assert "lt(it,2.0000)" in grafo(2.0)
+    assert "lt(it,5.0000)" in grafo(5.0)
 
 
 def test_congelar_come_um_quadro_so_da_gravacao(isolated):
@@ -1426,6 +1430,45 @@ def test_o_zoom_animado_de_fato_aproxima(isolated, short_sample, tmp_path):
     assert inicio.size > 0 and inicio.size == fim.size
     # mesma imagem, lentes diferentes: os quadros tem de ser bem distintos
     assert abs(inicio - fim).mean() > 10, "a lente nao se mexeu"
+
+
+def test_o_bloco_congelado_mostra_a_imagem_do_comeco_ao_fim(
+    isolated, short_sample, tmp_path
+):
+    """No ffmpeg 7 o `tpad` lia a taxa de quadros que o `setpts` apagou, e o
+    congelado saia como dois quadros e depois o fundo preto -- o bloco inteiro.
+    """
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=3, freeze=True),
+    ])])
+    video = compor_e_render(t, short_sample, tmp_path / "congelado.mp4")
+
+    comeco, meio, fim = (quadro_cru(video, s) for s in (0.1, 1.0, 1.8))
+    assert comeco.mean() > 20, "o congelado saiu preto"
+    # e parado: o mesmo quadro o tempo todo
+    assert abs(comeco - meio).mean() < 2
+    assert abs(comeco - fim).mean() < 2
+
+
+def test_o_zoom_anima_tambem_num_clipe_que_corre(
+    isolated, short_sample, tmp_path
+):
+    """O mesmo trecho com e sem lente: no comeco iguais, no fim diferentes."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def render(nome, **extra):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=3, **extra),
+        ])])
+        return compor_e_render(t, short_sample, tmp_path / f"{nome}.mp4")
+
+    sem = render("sem")
+    com = render("com", zoom=[{"t": 0, "scale": 1}, {"t": 1, "scale": 3}])
+
+    assert abs(quadro_cru(com, 0.05) - quadro_cru(sem, 0.05)).mean() < 8
+    assert abs(quadro_cru(com, 1.8) - quadro_cru(sem, 1.8)).mean() > 10
 
 
 # ── texto (Fase 6) ──────────────────────────────────────────────────────────

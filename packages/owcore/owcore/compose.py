@@ -164,7 +164,9 @@ def _slide(clip: TimelineClip, x: str, y: str) -> tuple[str, str]:
 _DIP_COLOR = {TransitionKind.FADE_BLACK: "black", TransitionKind.FADE_WHITE: "white"}
 
 
-def _interpolate(keys: list, field_name: str, duration_s: float) -> str:
+def _interpolate(
+    keys: list, field_name: str, duration_s: float, var: str = "t"
+) -> str:
     """An ffmpeg expression interpolating the field between keyframes.
 
     What comes out is a ladder of `if`s, from the first point to the last, with
@@ -180,9 +182,9 @@ def _interpolate(keys: list, field_name: str, duration_s: float) -> str:
     expr = f"{points[-1][1]:.4f}"
     for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:]))):
         span = max(1e-6, t1 - t0)
-        line = f"({v0:.4f}+({v1 - v0:.4f})*(t-{t0:.4f})/{span:.4f})"
-        expr = f"if(lt(t,{t1:.4f}),{line},{expr})"
-    return f"if(lt(t,{points[0][0]:.4f}),{points[0][1]:.4f},{expr})"
+        line = f"({v0:.4f}+({v1 - v0:.4f})*({var}-{t0:.4f})/{span:.4f})"
+        expr = f"if(lt({var},{t1:.4f}),{line},{expr})"
+    return f"if(lt({var},{points[0][0]:.4f}),{points[0][1]:.4f},{expr})"
 
 
 def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
@@ -208,22 +210,30 @@ def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
     ]
 
 
-def _zoom_chain(clip: TimelineClip, width: int, height: int) -> list[str]:
+def _zoom_chain(clip: TimelineClip, width: int, height: int, fps: float) -> list[str]:
     """The window that moves and tightens inside the clip.
 
-    `scale` does not animate in ffmpeg. What animates is `crop`, which accepts
-    expressions in `t`: an ever smaller window is cropped out and scaled back to
-    the canvas size. The effect is the lens closing in.
+    It used to be a `crop` with expressions in `t`, scaled back to the canvas.
+    That never animated: `crop` evaluates its **width and height once**, when
+    the filter is configured -- only `x` and `y` are per frame. The window kept
+    a single size (the last keyframe's) and the lens stood still.
+
+    `zoompan` is the filter made for this: zoom and position are evaluated on
+    every frame. Its clock is `it`, the input frame's time, which here already
+    starts at 0 and already counts the speed. It positions the window in whole
+    pixels, and at canvas size a slow zoom would visibly step a pixel at a
+    time; working on a frame twice as large halves the step.
     """
-    z = _interpolate(clip.zoom, "scale", clip.duration_s)
-    x = _interpolate(clip.zoom, "x", clip.duration_s)
-    y = _interpolate(clip.zoom, "y", clip.duration_s)
+    z = _interpolate(clip.zoom, "scale", clip.duration_s, "it")
+    x = _interpolate(clip.zoom, "x", clip.duration_s, "it")
+    y = _interpolate(clip.zoom, "y", clip.duration_s, "it")
     return [
-        f"crop=w='iw/({z})':h='ih/({z})'"
-        f":x='(iw-iw/({z}))*(0.5+({x})/2)'"
-        f":y='(ih-ih/({z}))*(0.5+({y})/2)'",
-        # back to the canvas size: the crop shrank the frame
-        f"scale={int(width)}:{int(height)}",
+        f"scale={2 * int(width)}:{2 * int(height)}",
+        f"zoompan=z='{z}'"
+        f":x='(iw-iw/zoom)*(0.5+({x})/2)'"
+        f":y='(ih-ih/zoom)*(0.5+({y})/2)'"
+        # one frame out per frame in: it is a video, not a still being panned
+        f":d=1:s={int(width)}x{int(height)}:fps={fps:.3f}",
     ]
 
 
@@ -235,6 +245,7 @@ def _video_chain(
     height: int,
     fit: Fit,
     dip_out: tuple[str, float] | None = None,
+    fps: float = 30.0,
 ) -> str:
     """What happens to a clip before it touches the canvas.
 
@@ -255,7 +266,13 @@ def _video_chain(
         steps.append("reverse")
 
     if clip.freeze:
-        # a single frame, stretched over the block's duration
+        # A single frame, stretched over the block's duration.
+        #
+        # `tpad` turns that duration into frames using the link's frame rate,
+        # and in ffmpeg 7 `setpts` leaves the rate **unknown**: the padding came
+        # out as zero frames, and the frozen block as the black background.
+        # The `fps` in front says the rate again.
+        steps.append(f"fps={fps:.3f}")
         steps.append(f"tpad=stop_mode=clone:stop_duration={clip.duration_s:.3f}")
     elif clip.speed != 1.0:
         # dividing the PTS speeds it up: at 2x, each frame is worth half the time
@@ -266,13 +283,16 @@ def _video_chain(
         # `_clip_input`): the text is drawn straight onto it
         steps.append(textfx.filter_chain(clip, height))
 
-    if clip.zoom:
-        steps += _zoom_chain(clip, width, height)
-
     # before anything that depends on size, the clip takes on the size of the
     # output canvas
     if clip.source is not ClipSource.TEXT:
         steps += _fit_chain(fit, width, height)
+
+    # The lens comes after the framing: it zooms into what is on screen. Before
+    # it, a 16:9 recording exported as 9:16 was zoomed in its own aspect and
+    # then stretched into the other.
+    if clip.zoom:
+        steps += _zoom_chain(clip, width, height, fps)
 
     if not clip.color.is_neutral:
         steps.append(
@@ -654,7 +674,14 @@ def compose_graph(
             if not layer.is_audio:
                 c.filters.append(
                     _video_chain(
-                        trimmed, n, f"v{n}", width, height, fit, dip_out=dip_out
+                        trimmed,
+                        n,
+                        f"v{n}",
+                        width,
+                        height,
+                        fit,
+                        dip_out=dip_out,
+                        fps=fps,
                     )
                 )
                 x, y = _position(trimmed)
