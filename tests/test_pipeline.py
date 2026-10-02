@@ -31,8 +31,10 @@ from owcore.models import (
     STREAM_RENDER_READY,
     STREAM_ROI,
     Job,
+    JobStage,
     JobStatus,
     Render,
+    RenderStage,
     RenderStatus,
 )
 
@@ -182,6 +184,9 @@ def test_analysis_stops_at_ready_with_the_matchs_moments(isolated, short_sample)
         assert {r.detector for r in job.reports} == set(DETECTORS)
         assert all(r.ok for r in job.reports)
         assert any(e.kind == "kill" for e in job.events)
+        # the count is a number, and the stage a code: the sentence is the app's
+        assert job.stage == JobStage.READY
+        assert job.n_moments == len(job.events)
         # the analysis renders no video: that is the second phase
         assert job.clips == []
         assert job.renders == []
@@ -289,7 +294,33 @@ def test_a_negated_ultimate_is_stored_as_an_event(isolated):
     assert negated[0].meta["delay_s"] == 1.5
 
     with session() as s:
-        assert s.get(Job, "j1").status == JobStatus.READY
+        job = s.get(Job, "j1")
+        assert job.status == JobStatus.READY
+        assert job.n_moments == 3, "the crossed event counts as a moment too"
+
+
+def test_an_old_match_gets_its_moments_counted(isolated):
+    """Before `n_moments`, the count only lived inside a sentence in
+    `stage`. The gateway counts the events of such a match once, and swaps
+    the sentence for the plain code."""
+    from owcore.jobs import save_events
+    from owcore.models import DetectionEvent, EventKind, Job
+
+    with session() as s:
+        s.add(Job(
+            id="old", video_key="k", video_name="v.mp4", status=JobStatus.READY,
+            stage="68 momento(s) encontrados — abra o editor",
+        ))
+    save_events("old", "kills", [
+        DetectionEvent(kind=EventKind.KILL, t=10.0),
+        DetectionEvent(kind=EventKind.KILL, t=20.0),
+    ])
+
+    listed = api().get("/api/jobs").json()["jobs"][0]
+    assert listed["n_moments"] == 2
+    assert listed["stage"] == "ready"
+    with session() as s:
+        assert s.get(Job, "old").n_moments == 2, "the count was not stored"
 
 
 def test_closing_twice_does_not_duplicate_what_was_crossed(isolated):
@@ -693,7 +724,7 @@ def test_a_failing_montage_still_delivers_the_cuts(
         assert assembled.key == "", "there should be no final video"
         assert assembled.meta["segments_zip_key"], "the cuts were lost"
         assert assembled.meta["render_error"]
-        assert "cuts" in request.stage or "video" in request.stage
+        assert request.stage == RenderStage.DONE
 
     client = api()
     detail = client.get(f"/api/jobs/{job_id}").json()

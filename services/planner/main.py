@@ -39,6 +39,7 @@ from owcore.models import (
     EventKind,
     Job,
     JobParams,
+    JobStage,
     JobStatus,
     ThumbsRequested,
 )
@@ -102,10 +103,8 @@ class Planner(Worker):
         )
         set_status(
             job_id, JobStatus.READY,
-            stage=(
-                f"{total} moment(s) found — open the editor"
-                if total else "no moments found"
-            ),
+            stage=JobStage.READY,
+            n_moments=total,
             progress=1.0,
         )
         self._request_thumbnails(job_id)

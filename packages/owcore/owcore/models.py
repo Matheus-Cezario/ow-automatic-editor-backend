@@ -43,6 +43,40 @@ class RenderStatus(StrEnum):
     FAILED = "failed"
 
 
+class JobStage(StrEnum):
+    """Where the analysis is, finer than [JobStatus].
+
+    A code, never a sentence: the database stores what happened and the app
+    decides how to say it. Numbers do not go in here either -- how many
+    moments were found is `Job.n_moments`, how far along it is `progress`.
+    """
+
+    QUEUED = "queued"
+    DOWNLOADING = "downloading"
+    CROPPING = "cropping"
+    EXTRACTING_AUDIO = "extracting_audio"
+    DETECTING = "detecting"
+    #: the detectors are done and the planner is crossing their events
+    PLANNING = "planning"
+    READY = "ready"
+    ERROR = "error"
+
+
+class RenderStage(StrEnum):
+    """Where a render request is. A code, like [JobStage]: how far it got is
+    `progress`, and how many videos came out is read from its clips."""
+
+    QUEUED = "queued"
+    PREPARING = "preparing"
+    RENDERING = "rendering"
+    DONE = "done"
+    #: the request brought no timeline
+    NOTHING_CHOSEN = "nothing_chosen"
+    #: none of the timelines has anything that can be cut
+    NOTHING_TO_CUT = "nothing_to_cut"
+    ERROR = "error"
+
+
 class TrackStatus(StrEnum):
     """Lifecycle of *one media item* uploaded to the job.
 
@@ -1138,6 +1172,10 @@ class Job(Base):
     stage: Mapped[str] = mapped_column(String(64), default="")
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: how many moments the analysis found, crossed events included. `None`
+    #: until the analysis ends -- and on matches analysed before this column
+    #: existed, until the gateway counts them
+    n_moments: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     video_key: Mapped[str] = mapped_column(String(255))
     video_name: Mapped[str] = mapped_column(String(255), default="")
