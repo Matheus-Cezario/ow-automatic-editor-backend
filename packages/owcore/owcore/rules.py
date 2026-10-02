@@ -49,3 +49,37 @@ def derive_negated_ults(
             )
         )
     return out
+
+
+def unconfirmed_kills(
+    events: Sequence[DetectionEvent], before_s: float, after_s: float
+) -> list[DetectionEvent]:
+    """The crosshair skulls that no killfeed line backs up.
+
+    The skull also shows when the player destroys a deployable -- Symmetra's
+    turrets, a teleporter, a Torbjorn turret -- and those put nothing in the
+    killfeed. So a skull counts as a kill only if a line the player could have
+    made appears near it: one with the player's name on the killer's plate, or
+    one whose name could not be read (a real kill lost to a bad crop is worse
+    than a turret let through).
+
+    Any line in the window confirms, without pairing lines to skulls one to
+    one: the tracker can merge two lines that look alike, and pairing would
+    then throw a real kill away.
+
+    Returns nothing when there is no killfeed evidence at all. A match with
+    skulls and not a single line means the killfeed was not read (a region off
+    target, a recording without it) -- not that every kill was a turret.
+    """
+    lines = [e for e in events if e.kind == EventKind.KILLFEED_LINE]
+    if not lines:
+        return []
+    mine = sorted(
+        e.t for e in lines if e.meta.get("killer", "unknown") != "other"
+    )
+    return [
+        k
+        for k in events
+        if k.kind == EventKind.KILL
+        and not any(k.t - before_s <= t <= k.t + after_s for t in mine)
+    ]

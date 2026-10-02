@@ -21,7 +21,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from conftest import service_module
+from conftest import service_module, tools_module
 from owcore.bus import get_bus
 from owcore.db import session
 from owcore.models import (
@@ -190,6 +190,24 @@ def test_analysis_stops_at_ready_with_the_matchs_moments(isolated, short_sample)
         # the analysis renders no video: that is the second phase
         assert job.clips == []
         assert job.renders == []
+
+
+def test_a_destroyed_turret_does_not_become_a_kill(isolated, short_sample):
+    """The crosshair draws the same skull for a destroyed deployable; only
+    the killfeed tells them apart, and the analysis keeps just the kills it
+    backs up. The lines themselves are evidence, not moments: none is left."""
+    make_sample = tools_module("make_sample")
+    job_id = run_analysis(short_sample)
+
+    with session() as s:
+        job = s.get(Job, job_id)
+        kills = sorted(e.t for e in job.events if e.kind == "kill")
+        assert not any(e.kind == "killfeed_line" for e in job.events)
+    expected = [k for k in make_sample.KILLS if k < 12.0]
+    assert len(kills) == len(expected), kills
+    assert all(abs(a - b) <= 0.35 for a, b in zip(kills, expected))
+    for t in make_sample.OBJECT_KILLS:
+        assert not any(abs(k - t) <= 0.5 for k in kills), f"the turret at {t}s counted"
 
 
 def test_the_analysis_delivers_the_moments_the_editor_shows(isolated, short_sample):

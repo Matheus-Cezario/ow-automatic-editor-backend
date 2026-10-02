@@ -26,6 +26,7 @@ from owcore.db import session
 from owcore.jobs import (
     all_detectors_done,
     claim_for_planning,
+    delete_events,
     expected_detectors,
     load_events,
     reported_detectors,
@@ -43,7 +44,8 @@ from owcore.models import (
     JobStatus,
     ThumbsRequested,
 )
-from owcore.rules import derive_negated_ults
+from owcore.profiles import load_profile
+from owcore.rules import derive_negated_ults, unconfirmed_kills
 from owcore.worker import Worker, run_worker
 
 
@@ -93,7 +95,7 @@ class Planner(Worker):
                 return
             params = JobParams(**(job.params or {}))
 
-        events = load_events(job_id)
+        events = self._confirm_kills(job_id, load_events(job_id), params)
         derived = self._cross_detectors(job_id, events, params)
 
         total = len(events) + len(derived)
@@ -108,6 +110,34 @@ class Planner(Worker):
             progress=1.0,
         )
         self._request_thumbnails(job_id)
+
+    def _confirm_kills(self, job_id: str, events: list, params: JobParams) -> list:
+        """Drops the crosshair skulls that no killfeed line backs up.
+
+        Destroying a deployable -- a Symmetra turret, a teleporter -- draws the
+        same skull as a kill, and nothing in the killfeed. Neither detector can
+        tell on its own: the crosshair one does not see the killfeed, and the
+        killfeed one does not see the skull. It runs before the crossing below,
+        so a turret cannot become a negated ultimate either.
+
+        The killfeed lines are evidence, not moments: they are consumed here
+        and deleted, and what is left in the database is what the editor shows.
+        """
+        cfg = load_profile(params.profile or None).section("kills")
+        before, after = cfg.get("confirm_window_s", [1.0, 2.0])
+        dropped = unconfirmed_kills(events, float(before), float(after))
+        if dropped:
+            delete_events(job_id, EventKind.KILL, [e.t for e in dropped])
+            self.log.info(
+                "job %s: %d skull(s) with no killfeed line dropped (deployables): %s",
+                job_id, len(dropped), ", ".join(f"{e.t:.1f}s" for e in dropped),
+            )
+        delete_events(job_id, EventKind.KILLFEED_LINE)
+        gone = {id(e) for e in dropped}
+        return [
+            e for e in events
+            if id(e) not in gone and e.kind != EventKind.KILLFEED_LINE
+        ]
 
     def _cross_detectors(self, job_id: str, events, params: JobParams) -> list:
         """The events that only exist by crossing two detectors.

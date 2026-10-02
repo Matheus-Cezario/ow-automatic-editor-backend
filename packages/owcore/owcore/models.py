@@ -122,6 +122,12 @@ class EventKind(StrEnum):
     SLEEP = "sleep"
     #: Sigma's Accretion rock stunning someone
     STUN = "stun"
+    #: a line appearing in the killfeed, whatever it was made with.
+    #: `meta["killer"]` is "player", "other" or "unknown" (the name on the plate
+    #: could not be read). Not a moment: it is the evidence the planner uses to
+    #: confirm the crosshair's skulls, and it is consumed there -- see
+    #: `rules.unconfirmed_kills`.
+    KILLFEED_LINE = "killfeed_line"
 
 
 #: What a generated video is. There used to be a kind per rule -- "kill

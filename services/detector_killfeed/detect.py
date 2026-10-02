@@ -27,9 +27,15 @@ appears in two forms, and the detector reads both:
   the footer button (and with a blue glow around it).
 
 The icon is compared against `templates/abilities/`, which
-`tools/fetch_ability_icons.py` downloads. Without those files this detector
-emits nothing: a kill without knowing which ability it was is already what the
+`tools/fetch_ability_icons.py` downloads. Without those files there are no
+ability kills: a kill without knowing which ability it was is already what the
 kill detector reports, and repeating it here would only duplicate the event.
+
+What it still reports without them is every line that appears
+(`KILLFEED_LINE`, with whose it was). That is not a moment: it is what tells a
+real kill from the crosshair skull of a destroyed deployable -- a Symmetra
+turret draws the same skull and puts nothing in the killfeed. The planner
+crosses the two (`rules.unconfirmed_kills`).
 
 Measured on the reference recordings (Orisa and Domina, 2558x1438): the right
 icon scores between 0.65 and 0.93 and the runner-up between 0.27 and 0.55 --
@@ -176,20 +182,43 @@ def _read_killer(bgr: np.ndarray, killer: Plate, line: "_Line") -> None:
 def detect_ability_kills(
     roi_video: Path, player_video: Path | None, profile: Profile, icons_dir: Path
 ) -> list[DetectionEvent]:
+    """Only the player's ability kills -- see `read_killfeed`."""
+    return [
+        e
+        for e in read_killfeed(roi_video, player_video, profile, icons_dir)
+        if e.kind == EventKind.ABILITY_KILL
+    ]
+
+
+def read_killfeed(
+    roi_video: Path, player_video: Path | None, profile: Profile, icons_dir: Path
+) -> list[DetectionEvent]:
+    """Two readings of the same killfeed, in one pass over its frames.
+
+    * `ABILITY_KILL` -- the player's kills whose icon is a known ability;
+    * `KILLFEED_LINE` -- every line that appears, icon or not, with whose it
+      was. It is what confirms the crosshair skull: destroying a deployable (a
+      Symmetra turret) draws the skull and puts nothing here.
+
+    The two are tracked apart on purpose. Ability lines only open a track on a
+    recognised icon (see the note in the loop); the plain lines need no icon,
+    and so they also work without `templates/abilities/` and without the
+    player's name -- then they come out with killer "unknown".
+    """
     cfg = profile.section("killfeed")
     roi = profile.roi("killfeed")
 
     bank = IconBank.from_dir(icons_dir)
-    if not bank:
+    if bank:
+        log.info("%d ability icon(s) loaded", len(bank))
+    else:
         log.warning(
-            "no icons in %s -- this detector is off. "
-            "Run tools/fetch_ability_icons.py to download them.",
+            "no icons in %s -- ability kills are off; the killfeed lines are "
+            "still read. Run tools/fetch_ability_icons.py to download them.",
             icons_dir,
         )
-        return []
-    log.info("%d ability icon(s) loaded", len(bank))
 
-    # Without knowing who the player is there is no kill to report: the
+    # Without knowing who the player is there is no ability kill to report: the
     # killfeed announces all ten players', and picking the player's needs their
     # name. Returning everything would go back to what was wrong -- a
     # teammate's kill entering the montage as if it were the user's.
@@ -197,14 +226,14 @@ def detect_ability_kills(
     if player is None:
         log.warning(
             "could not read the player's name on the footer plate -- without it "
-            "there is no telling whose each kill was, and this detector "
-            "stays off"
+            "there is no telling whose each kill was: ability kills are off, and "
+            "the killfeed lines come out with an unknown killer"
         )
-        return []
-    log.info(
-        "player name read: %d letter(s), in %.0f%% of frames",
-        len(player.letters), 100 * player.agreement,
-    )
+    else:
+        log.info(
+            "player name read: %d letter(s), in %.0f%% of frames",
+            len(player.letters), 100 * player.agreement,
+        )
 
     name_threshold = float(cfg.get("name_threshold", 0.40))
     threshold = float(cfg.get("icon_threshold", 0.55))
@@ -220,9 +249,31 @@ def detect_ability_kills(
     #: at a stretch on a real recording), and a new line appearing with the
     #: ability that was already on screen.
     lines: list[_Line] = []
+    #: every line, tracked by its plates alone
+    feed: list[_Line] = []
+
+    def _alive(tracks: list[_Line], killer: Plate, victim: Plate, t: float):
+        return next(
+            (
+                ln
+                for ln in reversed(tracks)
+                if t - ln.last_seen <= hold and ln.same_as(killer, victim, t, slide)
+            ),
+            None,
+        )
+
+    def _follow(ln: _Line, killer: Plate, victim: Plate, t: float) -> None:
+        ln.last_seen = t
+        # the line slides as it enters and the edge wobbles with the
+        # compression: the track follows rather than demanding the same pixel
+        # every time
+        ln.inner_left, ln.inner_right = killer.right, victim.x
+        ln.outer_left, ln.outer_right = killer.x, victim.right
+        ln.h = killer.h
 
     for frame in iter_frames(roi_video, fps_hint=roi.fps):
         victims = _plates(frame.bgr, cfg.get("hsv_victim", []), cfg)
+        pairs: list[tuple[Plate, Plate]] = []
         for killer in _plates(frame.bgr, cfg.get("hsv_killer", []), cfg):
             for victim in victims:
                 if abs(killer.cy - victim.cy) > 0.4 * killer.h:
@@ -234,56 +285,56 @@ def detect_ability_kills(
                 gap = victim.x - killer.right
                 if not (gap_lo * killer.h < gap < gap_hi * killer.h):
                     continue
-                glyph, style = _line_icon(frame.bgr, killer, victim, cfg)
-                if glyph is None:
-                    continue
-                key, score = bank.best_match(glyph)
-                if not key or score < threshold:
-                    # With no recognised icon, no track is opened or extended.
-                    # It is almost always a kill with a normal weapon, which
-                    # draws no icon -- and a kill with no ability is already
-                    # what the crosshair detector reports. Tracking the line by
-                    # its plates and letting the icon merely label it sounds
-                    # better (a plate is a solid rectangle, an icon is thirty
-                    # pixels), but it was worse in practice: the loop crosses
-                    # every plate with every other, and a meaningless pair
-                    # landing on the same track overwrote its edges and split a
-                    # real line into four.
-                    continue
-                alive = next(
-                    (
-                        ln
-                        for ln in reversed(lines)
-                        if frame.t - ln.last_seen <= hold
-                        and ln.same_as(killer, victim, frame.t, slide)
-                    ),
-                    None,
-                )
-                if alive is None:
-                    alive = _Line(killer.right, victim.x, killer.x, victim.right,
-                                  killer.h, frame.t, frame.t, key, score, style)
-                    lines.append(alive)
-                    _read_killer(frame.bgr, killer, alive)
-                    continue
-                alive.last_seen = frame.t
-                # the line slides as it enters and the edge wobbles with the
-                # compression: the track follows rather than demanding the same
-                # pixel every time
-                alive.inner_left, alive.inner_right = killer.right, victim.x
-                alive.outer_left, alive.outer_right = killer.x, victim.right
-                alive.h = killer.h
-                if score > alive.score:
-                    # the line's best frame is what names it: as it enters it
-                    # slides and the icon comes out blurred, and a bad frame
-                    # matches anything
-                    alive.key, alive.score, alive.style = key, score, style
+                pairs.append((killer, victim))
+
+        for (killer, victim), plain in _assign(feed, pairs, frame.t, hold, slide):
+            if plain is None:
+                plain = _Line(killer.right, victim.x, killer.x, victim.right,
+                              killer.h, frame.t, frame.t, "", 0.0, "")
+                feed.append(plain)
+            else:
+                _follow(plain, killer, victim, frame.t)
+            if player is not None:
+                _read_killer(frame.bgr, killer, plain)
+
+        for killer, victim in pairs:
+            if not bank or player is None:
+                continue
+            glyph, style = _line_icon(frame.bgr, killer, victim, cfg)
+            if glyph is None:
+                continue
+            key, score = bank.best_match(glyph)
+            if not key or score < threshold:
+                # With no recognised icon, no ability track is opened or
+                # extended. It is almost always a kill with a normal weapon,
+                # which draws no icon -- that line is in `feed`. Tracking
+                # the ability line by its plates and letting the icon merely
+                # label it sounds better (a plate is a solid rectangle, an
+                # icon is thirty pixels), but it was worse in practice: the
+                # loop crosses every plate with every other, and a
+                # meaningless pair landing on the same track overwrote its
+                # edges and split a real line into four.
+                continue
+            alive = _alive(lines, killer, victim, frame.t)
+            if alive is None:
+                alive = _Line(killer.right, victim.x, killer.x, victim.right,
+                              killer.h, frame.t, frame.t, key, score, style)
+                lines.append(alive)
                 _read_killer(frame.bgr, killer, alive)
+                continue
+            _follow(alive, killer, victim, frame.t)
+            if score > alive.score:
+                # the line's best frame is what names it: as it enters it
+                # slides and the icon comes out blurred, and a bad frame
+                # matches anything
+                alive.key, alive.score, alive.style = key, score, style
+            _read_killer(frame.bgr, killer, alive)
 
     events: list[DetectionEvent] = []
     per_ability: dict[str, int] = {}
     by_others = 0
     for ln in lines:
-        if not player.matches(ln.killer_name, name_threshold):
+        if player is None or not player.matches(ln.killer_name, name_threshold):
             # the line exists and the ability was recognised, but the killer
             # was someone else: not the user's material
             by_others += 1
@@ -310,8 +361,65 @@ def detect_ability_kills(
         log.info("%d line(s) discarded: the killer was not the player",
                  by_others)
 
+    whose: dict[str, int] = {}
+    for ln in feed:
+        if player is None or ln.killer_name is None:
+            killer = "unknown"
+        elif player.matches(ln.killer_name, name_threshold):
+            killer = "player"
+        else:
+            killer = "other"
+        whose[killer] = whose.get(killer, 0) + 1
+        events.append(
+            DetectionEvent(
+                kind=EventKind.KILLFEED_LINE,
+                t=round(ln.start, 3),
+                meta={"killer": killer},
+            )
+        )
+    log.info("killfeed lines: %s", whose or "none")
+
     events.sort(key=lambda e: e.t)
     return events
+
+
+def _assign(
+    tracks: list["_Line"],
+    pairs: list[tuple[Plate, Plate]],
+    t: float,
+    hold: float,
+    slide: float,
+) -> list[tuple[tuple[Plate, Plate], "_Line | None"]]:
+    """Which track each pair of plates in this frame continues -- or `None`
+    for a new line.
+
+    One pair per track and one track per pair, the closest first. Taking, for
+    each pair, the first track it could belong to is not enough here: while a
+    line slides in only its inner edges count (`_Line.same_as`), and lines with
+    no icon all have the same inner edges -- so a new line's track grabbed the
+    plates of the lines above it, and one kill came out as four.
+    """
+    candidates = []
+    for ti, ln in enumerate(tracks):
+        if t - ln.last_seen > hold:
+            continue
+        for pi, (killer, victim) in enumerate(pairs):
+            if ln.same_as(killer, victim, t, slide):
+                cost = (
+                    abs(killer.right - ln.inner_left)
+                    + abs(victim.x - ln.inner_right)
+                    + abs(killer.x - ln.outer_left)
+                    + abs(victim.right - ln.outer_right)
+                )
+                candidates.append((cost, ti, pi))
+    taken_tracks: set[int] = set()
+    chosen: dict[int, _Line] = {}
+    for _cost, ti, pi in sorted(candidates):
+        if ti in taken_tracks or pi in chosen:
+            continue
+        taken_tracks.add(ti)
+        chosen[pi] = tracks[ti]
+    return [(pair, chosen.get(pi)) for pi, pair in enumerate(pairs)]
 
 
 @dataclass(slots=True)
