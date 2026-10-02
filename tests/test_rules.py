@@ -1,11 +1,10 @@
-"""Regras que cruzam o que mais de um detector viu. Funcao pura, entao da para
-cobrir bem sem tocar em video.
+"""Rules that cross what more than one detector saw. A pure function, so it
+can be covered well without touching video.
 
-Este arquivo ja foi tres vezes maior: cobria o motor que transformava eventos
-em propostas de video -- rajadas, "sozinho contra todos", montagens por
-habilidade. Essa fase nao existe mais. O que restou e a unica regra que ainda
-nao cabe em detector nenhum, porque depende de olhar dois tipos de evento ao
-mesmo tempo.
+This file was once three times larger: it covered the engine that turned
+events into video proposals -- kill streaks, "solo wipe", montages per ability.
+That phase no longer exists. What is left is the only rule that still fits in
+no detector, because it depends on looking at two kinds of event at once.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ def kills(*ts: float) -> list[DetectionEvent]:
     return [DetectionEvent(kind=EventKind.KILL, t=t) for t in ts]
 
 
-def test_ult_seguida_de_kill_vira_ult_anulada():
+def test_ult_followed_by_a_kill_becomes_a_negated_ult():
     ev = [DetectionEvent(kind=EventKind.ULT_USED, t=40.0)] + kills(41.5)
     out = derive_negated_ults(ev, 6.0)
     assert len(out) == 1
@@ -26,19 +25,19 @@ def test_ult_seguida_de_kill_vira_ult_anulada():
     assert out[0].meta["delay_s"] == 1.5
 
 
-def test_ult_sem_kill_na_janela_nao_conta():
+def test_ult_without_a_kill_in_the_window_does_not_count():
     ev = [DetectionEvent(kind=EventKind.ULT_USED, t=40.0)] + kills(50.0)
     assert derive_negated_ults(ev, 6.0) == []
 
 
-def test_kill_antes_da_ult_nao_conta():
+def test_a_kill_before_the_ult_does_not_count():
     ev = [DetectionEvent(kind=EventKind.ULT_USED, t=40.0)] + kills(39.0)
     assert derive_negated_ults(ev, 6.0) == []
 
 
-def test_uma_ult_por_vez_e_a_kill_mais_proxima_fecha_a_jogada():
-    """Duas ultimates anuladas na mesma partida sao dois momentos, e cada uma
-    se fecha na primeira eliminacao que a segue -- nao na ultima."""
+def test_one_ult_at_a_time_and_the_nearest_kill_closes_the_play():
+    """Two negated ultimates in the same match are two moments, and each one
+    closes on the first kill that follows it -- not on the last."""
     ev = [DetectionEvent(kind=EventKind.ULT_USED, t=t) for t in (10.0, 30.0)]
     ev += kills(11.0, 12.0, 31.0)
     out = derive_negated_ults(ev, 6.0)

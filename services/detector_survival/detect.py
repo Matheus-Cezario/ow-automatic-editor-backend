@@ -132,8 +132,8 @@ def detect_survival(health_video: Path, profile: Profile) -> list[DetectionEvent
         return []
     if all(h is None for h in health):
         log.warning(
-            "a barra de vida nunca foi encontrada -- confira a ROI 'health' do "
-            "profile com tools/calibrate.py; sem ela nao ha eventos de sobrevivencia"
+            "the health bar was never found -- check the profile's 'health' ROI "
+            "with tools/calibrate.py; without it there are no survival events"
         )
         return []
 
@@ -215,7 +215,7 @@ def detect_survival(health_video: Path, profile: Profile) -> list[DetectionEvent
 
     events.sort(key=lambda e: e.t)
     log.info(
-        "%d interrupcao(oes), %d episodio(s) de vida baixa, %d fuga(s)",
+        "%d interruption(s), %d low-health episode(s), %d escape(s)",
         len(interruptions),
         len(low_pulses),
         sum(1 for e in events if e.kind == EventKind.ESCAPE),

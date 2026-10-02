@@ -38,14 +38,14 @@ def _decode_to_wav(src: Path, dest: Path) -> Path:
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and dest.resolve() == src:
-        dest = dest.with_name(f"{dest.stem}_decodificado{dest.suffix}")
+        dest = dest.with_name(f"{dest.stem}_decoded{dest.suffix}")
     proc = subprocess.run(
         [s.ffmpeg, "-y", "-v", "error", "-i", str(src), "-vn",
          "-ac", "1", "-ar", str(SR), "-c:a", "pcm_s16le", str(dest)],
         capture_output=True, text=True,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg nao decodificou a musica: {proc.stderr[-500:]}")
+        raise RuntimeError(f"ffmpeg could not decode the music: {proc.stderr[-500:]}")
     return dest
 
 
@@ -115,7 +115,7 @@ def analyze_track(src: Path, work_dir: Path) -> TrackAnalysis:
     data, sr = read_wav(wav)
     duration = data.size / sr if sr else 0.0
     if duration <= 0:
-        raise ValueError("musica vazia ou ilegivel")
+        raise ValueError("empty or unreadable music")
     return TrackAnalysis(
         grid=_beats(data, sr, duration),
         duration_s=round(duration, 3),
@@ -135,10 +135,10 @@ def _beats(data: np.ndarray, sr: int, duration: float) -> BeatGrid:
             return BeatGrid(
                 bpm=round(bpm, 2), beats=[round(float(b), 3) for b in beats]
             )
-        log.warning("librosa devolveu batidas de menos; usando o estimador proprio")
+        log.warning("librosa returned too few beats; using our own estimator")
     except Exception as exc:
-        log.warning("librosa indisponivel (%s); usando o estimador proprio", exc)
+        log.warning("librosa unavailable (%s); using our own estimator", exc)
 
     grid = _estimate_beats(data, sr, duration)
-    log.info("estimador proprio: %.1f BPM, %d batidas", grid.bpm, len(grid.beats))
+    log.info("own estimator: %.1f BPM, %d beats", grid.bpm, len(grid.beats))
     return grid

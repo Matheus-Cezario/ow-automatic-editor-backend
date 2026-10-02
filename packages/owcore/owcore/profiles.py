@@ -36,5 +36,5 @@ def load_profile(name: str | None = None) -> Profile:
     name = name or s.profile
     path = Path(s.profiles_dir) / f"{name}.json"
     if not path.exists():
-        raise FileNotFoundError(f"profile '{name}' não encontrado em {path}")
+        raise FileNotFoundError(f"profile '{name}' not found in {path}")
     return Profile(json.loads(path.read_text(encoding="utf-8")))

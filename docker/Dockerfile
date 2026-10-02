@@ -1,5 +1,5 @@
-# Uma imagem parametrizada serve todos os microsservicos: eles compartilham o
-# mesmo pacote `owcore` e mudam so nas dependencias e no processo de entrada.
+# One parameterised image serves every microservice: they share the same
+# `owcore` package and differ only in dependencies and entry process.
 FROM python:3.12-slim
 
 ARG SERVICE
@@ -8,14 +8,14 @@ ENV PYTHONUNBUFFERED=1 \
     OW_ROOT=/app \
     OW_MODE=docker
 
-# ffmpeg faz todo o corte e recorte; libgl/libglib sao do OpenCV headless
+# ffmpeg does all the cutting and cropping; libgl/libglib are for headless OpenCV
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# dependencias primeiro, para o cache de camadas sobreviver a mudanca de codigo
+# dependencies first, so the layer cache survives code changes
 COPY requirements-base.txt /app/requirements-base.txt
 COPY services/${SERVICE}/requirements.txt /app/services/${SERVICE}/requirements.txt
 RUN pip install -r /app/services/${SERVICE}/requirements.txt

@@ -1,68 +1,65 @@
 # Templates
 
-Recortes PNG de ícones da HUD do Overwatch, usados como referência no
-casamento de template. São **assets do jogo**, então não acompanham o
-repositório.
+PNG crops of Overwatch HUD icons, used as references for template matching.
+They are **game assets**, so they are not shipped with the repository.
 
 ```
 templates/
-├── kills/      caveira de eliminação (opcional, recortada à mão)
-├── ults/       ícones de ultimate inimiga no killfeed (opcional, à mão)
-└── abilities/  ícones oficiais de TODAS as habilidades — baixados
+├── kills/      kill skull (optional, cropped by hand)
+├── ults/       enemy ultimate icons in the killfeed (optional, by hand)
+└── abilities/  official icons for ALL abilities — downloaded
 ```
 
-## `abilities/` — baixado, não recortado
+## `abilities/` — downloaded, not cropped
 
 ```bash
 python tools/fetch_ability_icons.py
 ```
 
-São ~270 arquivos em `abilities/<herói>/<habilidade>.png`, um por habilidade de
-cada herói do jogo. A lista sai da página oficial de heróis da Blizzard (via a
-[OverFast API](https://overfast-api.tekrop.fr)), então **herói novo entra
-rodando o comando de novo** — não há lista escrita no repositório para
-envelhecer a cada patch.
+That is ~270 files in `abilities/<hero>/<ability>.png`, one per ability of
+every hero in the game. The list comes from Blizzard's official heroes page
+(via the [OverFast API](https://overfast-api.tekrop.fr)), so **a new hero comes
+in by running the command again** — there is no list written in the repository
+to go stale with every patch.
 
-Recortar 270 ícones à mão da própria gravação não é razoável, e é por isso que
-esta pasta é a exceção. Quem usa esses ícones:
+Cropping 270 icons by hand from your own recording is not reasonable, which is
+why this folder is the exception. Who uses these icons:
 
-* o **detector de ultimates**, para dizer de qual herói era a ultimate que o
-  jogador usou (o desenho preto dentro do disco branco do botão do rodapé);
-* o **detector de killfeed**, para dizer com que habilidade cada eliminação foi
-  feita (o desenho na caixinha entre as duas placas coloridas).
+* the **ultimates detector**, to say which hero's ultimate the player used (the
+  black drawing inside the footer button's white disc);
+* the **killfeed detector**, to say which ability each kill was made with (the
+  drawing in the small box between the two coloured plates).
 
-Os dois comparam a **marca** — os pixels do desenho, recortados do fundo,
-enquadrados num quadrado e normalizados de tamanho. Por isso o mesmo arquivo
-serve para as duas formas em que o jogo desenha o ícone: preto sobre disco
-branco (ultimate) e branco sobre caixa escura (habilidade comum).
+Both compare the **mark** — the drawing's pixels, cut out from the background,
+framed in a square and normalised in size. That is why the same file serves the
+two ways the game draws the icon: black on a white disc (ultimate) and white on
+a dark box (regular ability).
 
-O arquivo é gravado como marca **preta sobre fundo branco**, que é o que o
-`IconBank` espera. O ícone da Blizzard vem branco com fundo transparente — o
-desenho vive no canal alfa —, e o baixador converte.
+The file is stored as a **black mark on a white background**, which is what
+`IconBank` expects. Blizzard's icon comes white on a transparent background —
+the drawing lives in the alpha channel — and the downloader converts it.
 
-## `kills/` e `ults/` — recortados da sua gravação
+## `kills/` and `ults/` — cropped from your recording
 
 ```bash
-# gera imagens das regiões a partir da sua gravação
-python tools/calibrate.py preview --video partida.mp4 --at 30 90 150
+# generates images of the regions from your recording
+python tools/calibrate.py preview --video match.mp4 --at 30 90 150
 ```
 
-Abra `data/calib/roi_*.png`, recorte o ícone bem justo (sem margem de cenário
-em volta) e salve em `templates/ults/nome_do_heroi.png`. O nome do arquivo vira
-o rótulo do evento detectado.
+Open `data/calib/roi_*.png`, crop the icon tightly (no scenery margin around
+it) and save it as `templates/ults/hero_name.png`. The file name becomes the
+label of the detected event.
 
-Tamanho ideal: até ~96px de largura. Imagens maiores são reduzidas
-automaticamente.
+Ideal size: up to ~96px wide. Larger images are scaled down automatically.
 
-## Sem templates o sistema funciona
+## The system works without templates
 
-- **Eliminações**, **acertos críticos** e **sobrevivência** não usam template
-  nenhum.
-- A **ultimate do jogador** continua sendo detectada sem `abilities/`: o botão
-  do rodapé descarregando é o evento, e os ícones só dizem de quem ela era.
-- **Ultimates inimigas** continuam saindo pelo pico de áudio; o que fica
-  desligado sem `ults/` é só o reconhecimento de qual ultimate apareceu no
-  killfeed. O serviço avisa isso no log em vez de fingir que detectou.
-- **Eliminações com habilidade** ficam desligadas sem `abilities/` — de
-  propósito. Uma eliminação sem saber com o que foi já é o que o detector da
-  mira reporta; repetir isso aqui só duplicaria evento.
+- **Kills**, **critical hits** and **survival** use no template at all.
+- The **player's ultimate** is still detected without `abilities/`: the footer
+  button discharging is the event, and the icons only say whose it was.
+- **Enemy ultimates** still come out of the audio peak; what is off without
+  `ults/` is only recognising which ultimate showed up in the killfeed. The
+  service says so in the log instead of pretending it detected something.
+- **Ability kills** stay off without `abilities/` — on purpose. A kill without
+  knowing what it was made with is already what the crosshair detector
+  reports; repeating it here would only duplicate the event.

@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""Sobe o sistema inteiro em modo local -- sem Docker, sem Redis, sem MinIO.
+"""Starts the whole system in local mode -- no Docker, no Redis, no S3.
 
-Cada microsservico continua sendo um processo separado falando pelo
-barramento; o que muda e so a implementacao por tras das interfaces (fila em
-disco, storage em pasta, SQLite).
+Each microservice is still a separate process talking over the bus; only the
+implementation behind the interfaces changes (disk queue, folder storage,
+SQLite).
 
-    python tools/dev.py            # tudo
+    python tools/dev.py            # everything
     python tools/dev.py --only gateway editor
 """
 
@@ -41,37 +41,37 @@ SERVICES: dict[str, list[str]] = {
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--only", nargs="*", default=None, help="sobe so estes servicos")
+    ap.add_argument("--only", nargs="*", default=None, help="start only these services")
     args = ap.parse_args()
 
     chosen = args.only or list(SERVICES)
     unknown = [c for c in chosen if c not in SERVICES]
     if unknown:
-        print(f"servico desconhecido: {', '.join(unknown)}", file=sys.stderr)
-        print(f"disponiveis: {', '.join(SERVICES)}", file=sys.stderr)
+        print(f"unknown service: {', '.join(unknown)}", file=sys.stderr)
+        print(f"available: {', '.join(SERVICES)}", file=sys.stderr)
         return 2
 
     env = {**os.environ, "OW_MODE": "local", "PYTHONUNBUFFERED": "1"}
     procs: list[tuple[str, subprocess.Popen]] = []
 
-    print("modo local: fila em disco + storage em pasta + SQLite\n")
+    print("local mode: disk queue + folder storage + SQLite\n")
     for name in chosen:
         p = subprocess.Popen(SERVICES[name], cwd=str(ROOT), env=env)
         procs.append((name, p))
         print(f"  [{p.pid:>6}] {name}")
 
-    print("\napi em http://localhost:8000/docs   (ctrl+c encerra tudo)\n")
+    print("\napi at http://localhost:8000/docs   (ctrl+c stops everything)\n")
 
     try:
         while True:
             for name, p in procs:
                 code = p.poll()
                 if code is not None:
-                    print(f"\n!! '{name}' terminou com codigo {code}", file=sys.stderr)
+                    print(f"\n!! '{name}' exited with code {code}", file=sys.stderr)
                     raise KeyboardInterrupt
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\nencerrando...")
+        print("\nshutting down...")
     finally:
         for _name, p in procs:
             if p.poll() is None:

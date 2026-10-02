@@ -48,7 +48,7 @@ class Thumbs(Worker):
         with session() as s:
             job = s.get(Job, job_id)
             if job is None:
-                self.log.warning("job %s sumiu; ignorando", job_id)
+                self.log.warning("job %s is gone; skipping", job_id)
                 return
             video_key = job.video_key
 
@@ -68,7 +68,7 @@ class Thumbs(Worker):
                 break
 
         if not instants:
-            self.log.info("job %s: nada a extrair", job_id)
+            self.log.info("job %s: nothing to extract", job_id)
             return
 
         work = Path(get_settings().work_dir) / job_id / "frames"
@@ -87,20 +87,20 @@ class Thumbs(Worker):
             except ffmpeg.FFmpegError:
                 # a frame that fails must not cost the others: the sidebar can
                 # live with one item having no picture
-                self.log.warning("sem miniatura para %.2fs do job %s", t, job_id)
+                self.log.warning("no thumbnail for %.2fs of job %s", t, job_id)
                 continue
             storage.put_file(frame_key(job_id, t), dest)
             dest.unlink(missing_ok=True)
             done += 1
 
-        self.log.info("job %s: %d miniatura(s) de %d momento(s)",
+        self.log.info("job %s: %d thumbnail(s) of %d moment(s)",
                       job_id, done, len(instants))
 
     def on_error(self, payload: dict[str, Any], exc: Exception) -> None:
         """A failed thumbnail does not bring the job down: the analysis is over
         and the video can still be built, just without the pictures."""
         self.log.warning(
-            "nao consegui extrair as miniaturas de %s: %s",
+            "could not extract the thumbnails of %s: %s",
             payload.get("job_id"), exc,
         )
 

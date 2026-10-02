@@ -104,18 +104,18 @@ class Preprocessor(Worker):
         with session() as s:
             job = s.get(Job, job_id)
             if job is None:
-                self.log.warning("job %s sumiu; ignorando", job_id)
+                self.log.warning("job %s is gone; skipping", job_id)
                 return
             video_key = job.video_key
 
-        set_status(job_id, JobStatus.PREPROCESSING, stage="baixando o video", progress=0.0)
+        set_status(job_id, JobStatus.PREPROCESSING, stage="downloading the video", progress=0.0)
 
         work = Path(settings.work_dir) / job_id
         work.mkdir(parents=True, exist_ok=True)
         report = _progress_reporter(job_id)
         source = local_copy(
             video_key, work,
-            on_progress=lambda f: report("baixando o video", BAND_DOWNLOAD, f),
+            on_progress=lambda f: report("downloading the video", BAND_DOWNLOAD, f),
         )
 
         info = probe(source)
@@ -134,7 +134,7 @@ class Preprocessor(Worker):
         params = get_params(job_id)
         profile = load_profile(params.profile or settings.profile)
 
-        set_status(job_id, stage="recortando as regioes da HUD",
+        set_status(job_id, stage="cropping the HUD regions",
                    progress=BAND_CROP[0])
         wanted = sorted({r for rois in DETECTOR_ROIS.values() for r in rois})
         # the editor's proxy comes along: one more output in the same decode,
@@ -142,7 +142,7 @@ class Preprocessor(Worker):
         crops = extract_rois(
             source, [*profile.rois(wanted), proxy_roi()], work / "rois",
             on_progress=lambda f: report(
-                "recortando as regioes da HUD", BAND_CROP, f
+                "cropping the HUD regions", BAND_CROP, f
             ),
         )
 
@@ -165,7 +165,7 @@ class Preprocessor(Worker):
         audio_key: str | None = None
         waveform_points: list[float] = []
         if info.has_audio:
-            set_status(job_id, stage="extraindo o audio",
+            set_status(job_id, stage="extracting the audio",
                        progress=BAND_AUDIO[0])
             wav = extract_audio(source, work / "audio.wav")
             if wav is not None:
@@ -182,7 +182,7 @@ class Preprocessor(Worker):
                 job.proxy_key = proxy_key
                 job.waveform = waveform_points
 
-        set_status(job_id, JobStatus.DETECTING, stage="detectando eventos",
+        set_status(job_id, JobStatus.DETECTING, stage="detecting events",
                    progress=DETECTION_START)
 
         bus = get_bus()
@@ -205,7 +205,7 @@ class Preprocessor(Worker):
                 ).model_dump(),
             )
 
-        self.log.info("job %s distribuido para os detectores", job_id)
+        self.log.info("job %s dispatched to the detectors", job_id)
 
 
 if __name__ == "__main__":

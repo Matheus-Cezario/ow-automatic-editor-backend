@@ -59,7 +59,7 @@ class LocalStorage(Storage):
         # normalises the path and prevents escaping the root
         p = (self.root / key.lstrip("/")).resolve()
         if not str(p).startswith(str(self.root.resolve())):
-            raise ValueError(f"chave inválida: {key!r}")
+            raise ValueError(f"invalid key: {key!r}")
         return p
 
     def put_file(self, key: str, path: Path) -> str:

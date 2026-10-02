@@ -1,7 +1,7 @@
-# Cuidado ao editar: o Git só entende `#` como comentário quando ele abre a
-# linha. Escrever `data/   # o que é isto` transforma o padrão inteiro numa
-# string literal que não casa com nada — foi assim que 492 MB de gravações e o
-# banco quase entraram num commit. Comentário fica sempre em linha própria.
+# Careful when editing: Git only reads `#` as a comment when it starts the
+# line. Writing `data/   # what this is` turns the whole pattern into a literal
+# string that matches nothing — that is how 492 MB of recordings and the
+# database almost got into a commit. A comment always goes on its own line.
 
 # ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
@@ -15,36 +15,36 @@ venv/
 .coverage
 htmlcov/
 
-# ── configuração da máquina ───────────────────────────────────────────────
-# `.env.example` continua versionado: é ele que documenta as variáveis.
+# ── machine configuration ─────────────────────────────────────────────────
+# `.env.example` stays versioned: it is what documents the variables.
 .env
 
-# ── tudo o que o sistema produz rodando ───────────────────────────────────
-# Gravações enviadas, recortes das ROIs, clipes gerados, miniaturas, fila em
-# disco e o banco. Nada aqui é fonte: o `data/sample` sai do
-# `tools/make_sample.py` e o resto aparece sozinho ao usar o sistema.
+# ── everything the system produces while running ──────────────────────────
+# Uploaded recordings, ROI crops, rendered clips, thumbnails, the disk queue
+# and the database. Nothing here is source: `data/sample` comes from
+# `tools/make_sample.py` and the rest appears by itself when using the system.
 data/
 
-# O banco pode cair fora de `data/` quando alguém aponta OW_DATA_DIR para
-# outro lugar; o WAL do SQLite vem junto.
+# The database can land outside `data/` when someone points OW_DATA_DIR
+# elsewhere; SQLite's WAL comes along.
 *.db
 *.db-shm
 *.db-wal
 
-# ── assets do jogo ────────────────────────────────────────────────────────
-# Ícones de ultimate e de eliminação são material do Overwatch, recortado por
-# quem usa. As pastas ficam no repositório (vazias) para o sistema achar o
-# caminho — daí a exceção para o `.gitkeep`.
+# ── game assets ───────────────────────────────────────────────────────────
+# Ultimate and kill icons are Overwatch material, cropped by whoever uses the
+# system. The folders stay in the repository (empty) so the system finds the
+# path — hence the exception for `.gitkeep`.
 #
-# `abilities/` é a mesma coisa por outro caminho: os ícones oficiais de todas
-# as habilidades, baixados por `tools/fetch_ability_icons.py`. São 270 imagens
-# da Blizzard — material do jogo, não fonte deste repositório.
+# `abilities/` is the same thing by another route: the official icons of every
+# ability, downloaded by `tools/fetch_ability_icons.py`. That is 270 Blizzard
+# images — game material, not this repository's source.
 templates/kills/*
 templates/ults/*
 templates/abilities/*
 !templates/**/.gitkeep
 
-# ── editores ──────────────────────────────────────────────────────────────
+# ── editors ───────────────────────────────────────────────────────────────
 .idea/
 .vscode/
 *.swp

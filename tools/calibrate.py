@@ -1,21 +1,21 @@
 #!/usr/bin/env python
-"""Calibra o perfil da HUD para a *sua* gravacao.
+"""Calibrates the HUD profile for *your* recording.
 
-O sistema so acerta se souber onde a HUD do Overwatch fica na sua tela e de
-que cor ela e. Isso muda com resolucao, proporcao, idioma, modo daltonico e
-patch do jogo -- entao em vez de chutar constantes, esta ferramenta mostra o
-que o detector esta enxergando.
+The system only gets it right if it knows where the Overwatch HUD sits on your
+screen and what colour it is. That changes with resolution, aspect ratio,
+language, colour-blind mode and game patch -- so instead of guessing constants,
+this tool shows what the detector is seeing.
 
-Dois modos:
+Two modes:
 
-    # 1. Onde estao as regioes? Desenha os retangulos sobre quadros reais.
-    python tools/calibrate.py preview --video partida.mp4 --at 30 90 150
+    # 1. Where are the regions? Draws the rectangles over real frames.
+    python tools/calibrate.py preview --video match.mp4 --at 30 90 150
 
-    # 2. Que limiar usar? Mede a regiao quadro a quadro e sugere os numeros.
-    python tools/calibrate.py scan --video partida.mp4 --roi kills
+    # 2. Which threshold? Measures the region frame by frame and suggests numbers.
+    python tools/calibrate.py scan --video match.mp4 --roi kills
 
-Depois copie `config/profiles/ow2_default.json` para um perfil seu, ajuste os
-valores e rode com `OW_PROFILE=meu_perfil`.
+Then copy `config/profiles/ow2_default.json` to a profile of your own, adjust
+the values and run with `OW_PROFILE=my_profile`.
 """
 
 from __future__ import annotations
@@ -64,16 +64,16 @@ def cmd_preview(args: argparse.Namespace) -> int:
     print(f"video: {info.width}x{info.height}, {info.duration_s:.1f}s")
     if abs(info.width / info.height - 16 / 9) > 0.02:
         print(
-            "  aviso: o perfil padrao foi feito para 16:9. Numa proporcao "
-            "diferente as regioes vao sair do lugar -- use este preview para "
-            "corrigi-las."
+            "  warning: the default profile was made for 16:9. At a different "
+            "aspect ratio the regions will be off -- use this preview to fix "
+            "them."
         )
 
     names = [n for n in profile.data["rois"] if not profile.roi(n).fullscreen]
     for t in args.at:
         frame = grab_frame(Path(args.video), t)
         if frame is None:
-            print(f"  nao consegui ler o quadro em {t}s")
+            print(f"  could not read the frame at {t}s")
             continue
         h, w = frame.shape[:2]
         canvas = frame.copy()
@@ -91,12 +91,12 @@ def cmd_preview(args: argparse.Namespace) -> int:
             if crop.size:
                 cv2.imwrite(str(out / f"roi_{name}_{t:g}s.png"), crop)
 
-        cv2.imwrite(str(out / f"quadro_{t:g}s.png"), canvas)
-        print(f"  {t:g}s -> quadro_{t:g}s.png + recortes")
+        cv2.imwrite(str(out / f"frame_{t:g}s.png"), canvas)
+        print(f"  {t:g}s -> frame_{t:g}s.png + crops")
 
-    print(f"\nimagens em {out.resolve()}")
-    print("Se um retangulo nao cobre o elemento da HUD, ajuste x/y/w/h "
-          "(fracoes de 0 a 1) no perfil.")
+    print(f"\nimages in {out.resolve()}")
+    print("If a rectangle does not cover the HUD element, adjust x/y/w/h "
+          "(fractions from 0 to 1) in the profile.")
     return 0
 
 
@@ -105,8 +105,8 @@ def cmd_preview(args: argparse.Namespace) -> int:
 
 def sparkline(values: list[float], width: int = 900, height: int = 260,
               threshold: float | None = None) -> np.ndarray:
-    """Grafico da serie temporal desenhado com OpenCV -- evita arrastar
-    matplotlib so para isto."""
+    """Time-series chart drawn with OpenCV -- avoids pulling in matplotlib just
+    for this."""
     img = np.full((height, width, 3), 26, np.uint8)
     if not values:
         return img
@@ -119,7 +119,7 @@ def sparkline(values: list[float], width: int = 900, height: int = 260,
     if threshold is not None and top > 0:
         ty = int(height - 20 - (threshold / top) * (height - 40))
         cv2.line(img, (0, ty), (width, ty), (80, 80, 220), 1, cv2.LINE_AA)
-        cv2.putText(img, f"limiar {threshold:.4f}", (8, max(12, ty - 6)),
+        cv2.putText(img, f"threshold {threshold:.4f}", (8, max(12, ty - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 240), 1)
     cv2.polylines(img, [np.array(pts, np.int32)], False, (120, 230, 120), 1,
                   cv2.LINE_AA)
@@ -139,10 +139,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     cfg = profile.section(section)
     ranges = cfg.get("hsv_ranges", [])
     if not ranges:
-        print(f"a secao '{section}' do perfil nao tem hsv_ranges; nada a medir")
+        print(f"the profile section '{section}' has no hsv_ranges; nothing to measure")
         return 2
 
-    print(f"recortando a regiao '{roi_name}' ({roi.fps} fps)...")
+    print(f"cropping region '{roi_name}' ({roi.fps} fps)...")
     crops = extract_rois(Path(args.video), [roi], out / "_rois")
     path = crops[roi_name]
 
@@ -160,43 +160,43 @@ def cmd_scan(args: argparse.Namespace) -> int:
         times.append(frame.t)
 
     if not values:
-        print("nenhum quadro lido")
+        print("no frame read")
         return 2
 
     arr = np.array(values)
     p = {q: float(np.percentile(arr, q)) for q in (50, 90, 99, 99.9)}
     peak = float(arr.max())
     base = p[50]
-    # o elemento da HUD aparece numa fracao pequena do tempo: o "fundo" e a
-    # mediana e o "evento" e a cauda de cima. Meio caminho entre os dois separa
-    # bem sem grudar em nenhum dos lados.
+    # the HUD element shows up for a small fraction of the time: the
+    # "background" is the median and the "event" is the upper tail. Part way
+    # between the two separates well without sticking to either side.
     suggested = base + 0.35 * (peak - base)
     release = base + 0.15 * (peak - base)
 
-    print(f"\nquadros medidos : {len(values)} ({times[-1]:.1f}s)")
-    print(f"mediana (fundo) : {base:.5f}")
-    print(f"p90 / p99       : {p[90]:.5f} / {p[99]:.5f}")
-    print(f"maximo (evento) : {peak:.5f}")
+    print(f"\nframes measured   : {len(values)} ({times[-1]:.1f}s)")
+    print(f"median (background): {base:.5f}")
+    print(f"p90 / p99          : {p[90]:.5f} / {p[99]:.5f}")
+    print(f"maximum (event)    : {peak:.5f}")
     if peak <= base * 1.5:
         print(
-            "\n  A regiao nunca ficou muito mais vermelha do que o normal.\n"
-            "  Ou o retangulo esta no lugar errado (rode o modo preview),\n"
-            "  ou a cor da HUD e outra (modo daltonico muda o vermelho)."
+            "\n  The region never got much redder than usual.\n"
+            "  Either the rectangle is in the wrong place (run preview mode),\n"
+            "  or the HUD colour is different (colour-blind mode changes red)."
         )
         return 1
 
-    print("\nsugestao para o perfil:")
+    print("\nsuggestion for the profile:")
     print(json.dumps(
         {section: {"min_ratio": round(suggested, 5),
                    "release_ratio": round(release, 5)}},
         indent=2,
     ))
 
-    chart = out / f"serie_{roi_name}.png"
+    chart = out / f"series_{roi_name}.png"
     cv2.imwrite(str(chart), sparkline(values, threshold=suggested))
-    print(f"\ngrafico da serie: {chart.resolve()}")
-    print("Cada pico deveria ser um evento. Se houver picos demais, suba o "
-          "min_ratio; se faltarem, baixe.")
+    print(f"\nseries chart: {chart.resolve()}")
+    print("Each peak should be an event. If there are too many peaks, raise "
+          "min_ratio; if some are missing, lower it.")
     return 0
 
 
@@ -209,15 +209,15 @@ def main() -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    pv = sub.add_parser("preview", help="desenha as regioes sobre quadros reais")
+    pv = sub.add_parser("preview", help="draws the regions over real frames")
     pv.add_argument("--video", required=True)
     pv.add_argument("--at", type=float, nargs="+", default=[10.0, 60.0, 120.0],
-                    help="instantes (s) para amostrar")
+                    help="instants (s) to sample")
     pv.add_argument("--profile", default=None)
     pv.add_argument("--out", default="data/calib")
     pv.set_defaults(func=cmd_preview)
 
-    sc = sub.add_parser("scan", help="mede uma regiao e sugere limiares")
+    sc = sub.add_parser("scan", help="measures a region and suggests thresholds")
     sc.add_argument("--video", required=True)
     sc.add_argument("--roi", default="kills")
     sc.add_argument("--profile", default=None)

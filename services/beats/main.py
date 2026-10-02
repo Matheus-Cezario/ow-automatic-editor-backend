@@ -59,10 +59,10 @@ class MediaAnalyzer(Worker):
         with session() as s:
             item = s.get(Media, media_id)
             if item is None:
-                self.log.warning("midia %s sumiu; ignorando", media_id)
+                self.log.warning("media %s is gone; skipping", media_id)
                 return
             if item.status == TrackStatus.READY:
-                self.log.info("midia %s ja analisada; ignorando", media_id)
+                self.log.info("media %s already analysed; skipping", media_id)
                 return
             job_id, key, kind = item.job_id, item.key, item.kind
 
@@ -89,7 +89,7 @@ class MediaAnalyzer(Worker):
             for field, value in fields.items():
                 setattr(item, field, value)
 
-        self.log.info("midia %s (%s) analisada: %s", media_id, kind,
+        self.log.info("media %s (%s) analysed: %s", media_id, kind,
                       ", ".join(f"{k}={v}" for k, v in fields.items()
                                 if k not in ("beats", "peaks")))
 
@@ -126,7 +126,7 @@ class MediaAnalyzer(Worker):
         except ffmpeg.FFmpegError:
             # an item with no thumbnail can still be built with; the list shows
             # the space where it would be
-            self.log.warning("sem miniatura para a midia %s", media_id)
+            self.log.warning("no thumbnail for media %s", media_id)
 
         if kind == MediaKind.VIDEO:
             try:
@@ -135,7 +135,7 @@ class MediaAnalyzer(Worker):
                     f"{job_id}/media/{media_id}_proxy.mp4", proxy
                 )
             except ffmpeg.FFmpegError:
-                self.log.warning("sem proxy para a midia %s", media_id)
+                self.log.warning("no proxy for media %s", media_id)
 
         return fields
 

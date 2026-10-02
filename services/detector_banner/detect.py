@@ -115,8 +115,8 @@ def _load_abilities(cfg: dict, shapes_dir: Path) -> list[Ability]:
         template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if template is None:
             log.warning(
-                "molde de '%s' nao encontrado em %s -- sem ele nao da para "
-                "distinguir este aviso dos outros do rodape",
+                "template for '%s' not found in %s -- without it this banner "
+                "cannot be told apart from the others in the footer",
                 spec["key"], path,
             )
             continue
@@ -139,7 +139,7 @@ def detect_abilities(
 
     abilities = _load_abilities(cfg, shapes_dir)
     if not abilities:
-        log.warning("nenhum molde de icon disponivel; nada a detectar")
+        log.warning("no icon template available; nothing to detect")
         return []
 
     ranges = cfg.get("hsv_ranges", [])

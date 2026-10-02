@@ -58,7 +58,7 @@ class Planner(Worker):
         expected = expected_detectors(job_id)
         if not all_detectors_done(job_id, expected):
             missing = set(expected) - reported_detectors(job_id)
-            self.log.info("job %s ainda espera: %s", job_id, ", ".join(sorted(missing)))
+            self.log.info("job %s still waiting for: %s", job_id, ", ".join(sorted(missing)))
             return
         self._close_analysis(job_id)
 
@@ -69,13 +69,13 @@ class Planner(Worker):
         for job_id in stale_detecting_jobs(timeout):
             missing = set(expected_detectors(job_id)) - reported_detectors(job_id)
             self.log.warning(
-                "job %s parado ha mais de %.0fs sem %s; fecho com o que tenho",
-                job_id, timeout, ", ".join(sorted(missing)) or "ninguem",
+                "job %s stuck for over %.0fs without %s; closing with what I have",
+                job_id, timeout, ", ".join(sorted(missing)) or "nobody",
             )
             try:
                 self._close_analysis(job_id)
             except Exception:
-                self.log.exception("resgate do job %s falhou", job_id)
+                self.log.exception("rescuing job %s failed", job_id)
 
     # -- end of the analysis ------------------------------------------------
 
@@ -83,7 +83,7 @@ class Planner(Worker):
         # the detectors finish almost together and all of them notify; the
         # atomic claim guarantees the crossing runs exactly once
         if not claim_for_planning(job_id):
-            self.log.debug("job %s ja foi fechado", job_id)
+            self.log.debug("job %s was already closed", job_id)
             return
 
         with session() as s:
@@ -97,14 +97,14 @@ class Planner(Worker):
 
         total = len(events) + len(derived)
         self.log.info(
-            "job %s: %d evento(s), %d deles cruzados aqui",
+            "job %s: %d event(s), %d of them derived here",
             job_id, total, len(derived),
         )
         set_status(
             job_id, JobStatus.READY,
             stage=(
-                f"{total} momento(s) encontrados — abra o editor"
-                if total else "nenhum momento encontrado"
+                f"{total} moment(s) found — open the editor"
+                if total else "no moments found"
             ),
             progress=1.0,
         )

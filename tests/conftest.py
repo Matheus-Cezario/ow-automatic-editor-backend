@@ -16,12 +16,12 @@ ABILITY_ICONS = ROOT / "data" / "sample" / "ability_icons"
 
 
 def service_module(service: str, module: str = "detect") -> ModuleType:
-    """Carrega `services/<service>/<module>.py` pelo caminho.
+    """Loads `services/<service>/<module>.py` by path.
 
-    Cinco servicos tem um arquivo chamado `detect.py`. Em producao cada um roda
-    no seu processo, com o proprio diretorio no sys.path, e nao ha ambiguidade
-    -- mas num unico processo de teste `import detect` pegaria sempre o mesmo.
-    Carregar pelo caminho e o jeito de nomear exatamente o que se quer testar.
+    Five services have a file called `detect.py`. In production each runs in
+    its own process, with its own directory on sys.path, and there is no
+    ambiguity -- but in a single test process `import detect` would always pick
+    the same one. Loading by path is how to name exactly what is under test.
     """
     path = ROOT / "services" / service / f"{module}.py"
     name = f"_svc_{service}_{module}"
@@ -29,14 +29,14 @@ def service_module(service: str, module: str = "detect") -> ModuleType:
         return sys.modules[name]
 
     spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader, f"nao consegui carregar {path}"
+    assert spec and spec.loader, f"could not load {path}"
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
 
-    # `main.py` faz `from detect import ...`, contando com o proprio diretorio
-    # no sys.path -- que e como o servico roda no container. Aqui esse contexto
-    # e montado so durante a execucao do modulo, e o nome curto `detect` e
-    # descartado depois para nao vazar de um servico para outro.
+    # `main.py` does `from detect import ...`, relying on its own directory
+    # being on sys.path -- which is how the service runs in the container. Here
+    # that context is set up only while the module executes, and the short
+    # name `detect` is dropped afterwards so it does not leak between services.
     svc_dir = str(ROOT / "services" / service)
     stale = sys.modules.pop("detect", None)
     sys.path.insert(0, svc_dir)
@@ -52,8 +52,8 @@ def service_module(service: str, module: str = "detect") -> ModuleType:
 
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):
-    """Aponta toda a infra (fila, storage, banco) para um diretorio temporario
-    e zera os singletons, para um teste nunca ver o estado de outro."""
+    """Points all the infrastructure (queue, storage, database) at a temporary
+    directory and resets the singletons, so a test never sees another's state."""
     monkeypatch.setenv("OW_MODE", "local")
     monkeypatch.setenv("OW_DATA_DIR", str(tmp_path))
 
@@ -79,20 +79,20 @@ def isolated(tmp_path, monkeypatch):
 
 needs_sample = pytest.mark.skipif(
     not SAMPLE.exists(),
-    reason="rode: python tools/make_sample.py --out data/sample/match.mp4 "
+    reason="run: python tools/make_sample.py --out data/sample/match.mp4 "
            "--music data/sample/music.wav --ult-templates data/sample/ult_templates "
            "--ability-icons data/sample/ability_icons",
 )
 
 
 def tools_module(module: str):
-    """Mesma ideia de `service_module`, para os utilitarios em `tools/`."""
+    """Same idea as `service_module`, for the utilities in `tools/`."""
     path = ROOT / "tools" / f"{module}.py"
     name = f"_tool_{module}"
     if name in sys.modules:
         return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader, f"nao consegui carregar {path}"
+    assert spec and spec.loader, f"could not load {path}"
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
@@ -101,8 +101,8 @@ def tools_module(module: str):
 
 @pytest.fixture(scope="session")
 def short_sample(tmp_path_factory) -> Path:
-    """Um recorte curto do video sintetico -- rapido o bastante para um teste
-    de integracao rodar o pipeline inteiro."""
+    """A short cut of the synthetic video -- fast enough for an integration
+    test to run the whole pipeline."""
     make_sample = tools_module("make_sample")
     out = tmp_path_factory.mktemp("short") / "match.mp4"
     make_sample.render(out, 12.0, "ffmpeg")
