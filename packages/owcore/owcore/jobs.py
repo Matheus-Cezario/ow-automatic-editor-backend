@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from .db import session
 from .models import (
@@ -69,6 +69,23 @@ def save_events(job_id: str, detector: str, events: Sequence[DetectionEvent]) ->
                     meta={**e.meta, "detector": detector},
                 )
             )
+
+
+def delete_events(
+    job_id: str, kind: str, times: Sequence[float] | None = None
+) -> int:
+    """Deletes a job's events of one kind -- all of them, or those at `times`.
+
+    The instants are compared as stored: `times` comes from `load_events`, which
+    reads the same floats back. Returns how many were deleted.
+    """
+    with session() as s:
+        query = delete(Event).where(Event.job_id == job_id, Event.kind == str(kind))
+        if times is not None:
+            if not times:
+                return 0
+            query = query.where(Event.t.in_(list(times)))
+        return s.execute(query).rowcount or 0
 
 
 def record_report(

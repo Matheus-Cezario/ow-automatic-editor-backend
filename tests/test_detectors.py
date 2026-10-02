@@ -62,10 +62,13 @@ def test_the_crop_is_much_smaller_than_the_original(rois):
 
 
 def test_kills_match_the_ground_truth(rois, truth):
+    """The crosshair sees every skull -- the turret's too. Telling them apart
+    takes the killfeed, which this detector does not see: that is the
+    planner's job (`rules.unconfirmed_kills`)."""
     detect = service_module("detector_kills")
     ev = detect.detect_kills(rois["kills"], load_profile("ow2_default"))
     assert [e.kind for e in ev] == [EventKind.KILL] * len(ev)
-    assert match([e.t for e in ev], truth["kills"])
+    assert match([e.t for e in ev], truth["kills"] + truth["object_kills"])
 
 
 def test_survival_matches_the_ground_truth(rois, truth):
@@ -340,6 +343,53 @@ def test_ability_kills_match_the_ground_truth(rois, truth):
     assert [e.kind for e in ev] == [EventKind.ABILITY_KILL] * len(ev)
     assert match([e.t for e in ev], truth["ability_kills"])
     assert all(e.meta["ability"] == "sample/ability_kill" for e in ev)
+
+
+def killfeed_lines(rois, player=...):
+    detect = service_module("detector_killfeed")
+    return [
+        e
+        for e in detect.read_killfeed(
+            rois["killfeed"],
+            rois["player"] if player is ... else player,
+            load_profile("ow2_default"),
+            ABILITY_ICONS,
+        )
+        if e.kind == EventKind.KILLFEED_LINE
+    ]
+
+
+def test_every_killfeed_line_is_read_with_whose_it_was(rois, truth):
+    """Gun kills have no icon, and their line still has to be seen: it is what
+    confirms the crosshair skull."""
+    ev = killfeed_lines(rois)
+    mine = [e.t for e in ev if e.meta["killer"] == "player"]
+    others = [e.t for e in ev if e.meta["killer"] == "other"]
+    assert match(mine, truth["kills"] + truth["ability_kills"])
+    # the sample's damage vignette covers the killfeed corner during the low
+    # health moments, and hides the 16 s line's red plate for its first 1.5 s
+    # -- a limit of the test drawing (see `ABILITY_KILLS` in make_sample)
+    assert len(others) == len(truth["teammate_kills"])
+    assert all(
+        abs(d - e) <= 2.0
+        for d, e in zip(sorted(others), sorted(truth["teammate_kills"]))
+    )
+
+
+def test_a_destroyed_turret_puts_no_line_in_the_killfeed(rois, truth):
+    ev = killfeed_lines(rois)
+    for t in truth["object_kills"]:
+        assert not any(abs(e.t - t) <= 2.0 for e in ev)
+
+
+def test_without_the_players_name_the_lines_still_come_with_no_owner(rois, truth):
+    """No name, no ability kill -- but the lines are still evidence: they
+    tell a kill from a turret even without knowing whose they were."""
+    ev = killfeed_lines(rois, player=None)
+    assert {e.meta["killer"] for e in ev} == {"unknown"}
+    assert len(ev) == len(
+        truth["kills"] + truth["ability_kills"] + truth["teammate_kills"]
+    )
 
 
 def test_a_teammates_kill_does_not_count(rois, truth):

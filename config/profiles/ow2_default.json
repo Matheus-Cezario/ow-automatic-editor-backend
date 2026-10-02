@@ -90,6 +90,11 @@
     "min_gap_s": 0.8,
     "min_pulse_s": 0.0,
     "template_threshold": 0.85,
+    "_note_confirm": "A skull only counts if a killfeed line appears near it: destroying a deployable (a Symmetra turret, a teleporter) draws the same skull and puts nothing in the killfeed. confirm_window_s = [seconds before, seconds after] the skull in which the line may appear; the killfeed ROI runs at 5 fps, so the line is seen up to 0.2 s late.",
+    "confirm_window_s": [
+      1.0,
+      2.0
+    ],
     "headshot": {
       "_note": "Critical hit: OW2 draws the hit marker in RED (a normal hit is white). It is four thick strokes in an X, centred on the crosshair, born small and growing for ~0.3s. The decision is not by colour -- it is by SHAPE: the four diagonals must be red and the four straight directions (up, down, left, right) must NOT. Without that second half the kill skull, which is also red and also born on the crosshair, became a headshot: it fills all eight directions.",
       "_note_measured": "Measured on a real 2558x1438 recording: the X scores 0.81 at its peak and the scene stays at 0.06 at the 99th percentile. The crosshair is the centre of the SCREEN, and its position inside the crop comes from the ROI's own geometry -- there is no number to calibrate here.",

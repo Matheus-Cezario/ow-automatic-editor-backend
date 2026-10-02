@@ -1,4 +1,5 @@
-"""Killfeed microservice: which ability each kill was made with.
+"""Killfeed microservice: which ability each kill was made with, and which
+lines appeared at all -- the evidence that confirms a crosshair skull.
 
 One detector per *screen region* -- not per ability. The killfeed line is a
 single one, and what changes from one kill to the next is the icon in the
@@ -17,7 +18,7 @@ from owcore.models import DetectionEvent, JobParams
 from owcore.profiles import Profile
 from owcore.worker import run_worker
 
-from detect import detect_ability_kills
+from detect import read_killfeed
 
 
 class KillfeedDetector(DetectorWorker):
@@ -34,7 +35,7 @@ class KillfeedDetector(DetectorWorker):
         duration_s: float,
     ) -> list[DetectionEvent]:
         icons = Path(get_settings().templates_dir) / "abilities"
-        return detect_ability_kills(
+        return read_killfeed(
             artifacts["killfeed"], artifacts.get("player"), profile, icons
         )
 

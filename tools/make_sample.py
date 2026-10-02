@@ -19,6 +19,7 @@ import math
 import subprocess
 import sys
 import wave
+from typing import NamedTuple
 from pathlib import Path
 
 import cv2
@@ -35,6 +36,10 @@ KILLS = [
     41.5,                     # single
     52.0,                     # single
 ]
+# a destroyed deployable -- a Symmetra turret: the crosshair draws the same
+# skull as a kill, and NOTHING appears in the killfeed. It must not count.
+# Inside the first 12 s, so the short sample of the pipeline tests has it too.
+OBJECT_KILLS = [2.5]
 # When you die in OW2 you start spectating a teammate: health drops to zero for
 # an instant and comes back full. That is the signature the detector looks for.
 DEATHS = [28.0]
@@ -91,6 +96,17 @@ ABILITY_ROW_S = 6.0
 TEAMMATE_KILLS = [16.0, 51.0]
 PLAYER_NAME = "HUNTER7"
 TEAMMATE_NAME = "PATRICK"
+# every kill of `KILLS` puts the player's line in the killfeed too, the way a
+# gun kill does in the game: no icon between the plates. It is that line that
+# tells the kill from the turret of `OBJECT_KILLS`.
+KILL_ROW_S = 4.0
+#: how much shorter each kill's victim plate is. In the game a plate is as long
+#: as the name on it, and the tracker tells lines apart by that width: two
+#: lines less than `hold_s` apart with the same width would be one line to it.
+#: These differ by at least 20 px from every other line alive near them, and
+#: none goes past -100: a shorter plate falls under `killfeed.min_aspect` and
+#: is no plate at all to the detector.
+KILL_VICTIMS = [-20, -80, -100, -20, -100, -40, -80, -100, -20, -60]
 
 DURATION = 60.0
 
@@ -219,12 +235,15 @@ def draw_crit_marker(img: np.ndarray) -> None:
 
 #: geometry of a killfeed line, inside the `killfeed` ROI
 KF_Y0, KF_H = 30, 26
+#: distance between two stacked lines
+KF_STEP = 34
 KF_ALLY = (900, 1060)     # cyan plate: the killer
 KF_ENEMY = (1120, 1270)   # red plate: the victim
 
 
 def draw_killfeed_row(img: np.ndarray, victim: int = 0,
-                      killer: str = PLAYER_NAME) -> None:
+                      killer: str = PLAYER_NAME, row: int = 0,
+                      icon: bool = True) -> None:
     """`[ killer plate ] [ icon ] > [ victim plate ]`.
 
     `victim` shortens the red plate. In the game the length of each plate is
@@ -238,18 +257,23 @@ def draw_killfeed_row(img: np.ndarray, victim: int = 0,
     whose kill it was -- blue is the killer and red the victim, on both sides
     of the match -- so it is this name, and only it, that separates the
     player's kill from a teammate's.
+
+    `row` stacks the line under the ones already on screen. `icon` False is a
+    gun kill: the gap between the plates holds only the `>`.
     """
-    y0, y1 = KF_Y0, KF_Y0 + KF_H
+    y0 = KF_Y0 + row * KF_STEP
+    y1 = y0 + KF_H
     cv2.rectangle(img, (KF_ALLY[0], y0), (KF_ALLY[1], y1), (190, 140, 70), -1)
     _draw_name(img, killer, KF_ALLY[0] + 6, y0, KF_H, 0.5, 2)
     cv2.rectangle(img, (KF_ENEMY[0], y0), (KF_ENEMY[1] + victim, y1),
                   (90, 60, 200), -1)
-    # the icon box and the chevron fill the gap between the two plates
-    cv2.rectangle(img, (KF_ALLY[1] + 4, y0 - 3), (KF_ALLY[1] + 36, y1 + 3),
-                  (55, 52, 50), -1)
-    side = 22
-    _stamp(img, glyph_mask("ability_kill", side),
-           KF_ALLY[1] + 9, (y0 + y1) // 2 - side // 2, (240, 240, 240))
+    if icon:
+        # the icon box and the chevron fill the gap between the two plates
+        cv2.rectangle(img, (KF_ALLY[1] + 4, y0 - 3), (KF_ALLY[1] + 36, y1 + 3),
+                      (55, 52, 50), -1)
+        side = 22
+        _stamp(img, glyph_mask("ability_kill", side),
+               KF_ALLY[1] + 9, (y0 + y1) // 2 - side // 2, (240, 240, 240))
     # the `>` takes the LAST quarter of the gap, as on the real HUD: measured on
     # the reference recording, the icon box goes up to ~0.73 of the gap and the
     # chevron starts there. `killfeed.icon_span` stops at 0.66 precisely so it
@@ -452,7 +476,7 @@ def frame_at(t: float) -> np.ndarray:
             draw_damage_vignette(img, 0.6 + 0.4 * abs(math.sin((t - s) * 6.0)))
     draw_hud(img, hp)
 
-    for k in KILLS:
+    for k in KILLS + OBJECT_KILLS:
         if k <= t < k + SKULL_DURATION:
             phase = (t - k) / SKULL_DURATION
             alpha = min(1.0, (1.0 - phase) * 2.2)
@@ -473,7 +497,9 @@ def frame_at(t: float) -> np.ndarray:
 
     for u in ULTS:
         if u <= t < u + 2.5:
-            draw_ult_icon(img, int(W * 0.80), int(H * 0.12))
+            # below the stack of killfeed lines: at 0.12 the lines of
+            # `KILLFEED` covered it
+            draw_ult_icon(img, int(W * 0.80), int(H * 0.27))
             cv2.putText(img, "ULTIMATE", (int(W * 0.66), int(H * 0.20)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (240, 240, 240), 2)
 
@@ -481,20 +507,56 @@ def frame_at(t: float) -> np.ndarray:
     for hs in HEADSHOTS:
         if hs <= t < hs + HEADSHOT_S:
             draw_crit_marker(img)
-    for i, ak in enumerate(ABILITY_KILLS):
-        if ak <= t < ak + ABILITY_ROW_S:
-            # different victims, plates of different lengths
-            draw_killfeed_row(img, victim=-40 * i)
-    for i, tk in enumerate(TEAMMATE_KILLS):
-        if tk <= t < tk + ABILITY_ROW_S:
-            # widths that do not coincide with ABILITY_KILLS': in the game the
-            # plate's length is that of the name on it, and two lines only have
-            # the same width when they are the same pair. Drawing two different
-            # kills with the same width, less than `hold_s` apart, would make
-            # the tracker see them as one line that vanished and came back --
-            # which is what it exists not to confuse.
-            draw_killfeed_row(img, victim=-60 - 35 * i, killer=TEAMMATE_NAME)
+    for ln in KILLFEED:
+        if ln.start <= t < ln.start + ln.duration:
+            draw_killfeed_row(img, victim=ln.victim, killer=ln.killer,
+                              row=ln.row, icon=ln.icon)
     return img
+
+
+class _FeedLine(NamedTuple):
+    start: float
+    duration: float
+    victim: int
+    killer: str
+    icon: bool
+    row: int = 0
+
+
+def _stack(lines: list[_FeedLine]) -> list[_FeedLine]:
+    """Gives each line the first row free when it appears, and keeps it there.
+
+    In the game the lines stack and slide; here they only stack. The tracker
+    does not follow a line by its height, so the slide adds nothing to test.
+    """
+    placed: list[_FeedLine] = []
+    for ln in sorted(lines, key=lambda x: x.start):
+        busy = {
+            p.row for p in placed
+            if p.start <= ln.start < p.start + p.duration
+        }
+        row = next(r for r in range(len(lines) + 1) if r not in busy)
+        placed.append(ln._replace(row=row))
+    return placed
+
+
+#: every killfeed line of the sample, already stacked
+KILLFEED = _stack(
+    # ability kills: different victims, plates of different lengths
+    [_FeedLine(ak, ABILITY_ROW_S, -40 * i, PLAYER_NAME, True)
+     for i, ak in enumerate(ABILITY_KILLS)]
+    # a teammate's, with widths that do not coincide with ABILITY_KILLS': in
+    # the game the plate's length is that of the name on it, and two lines
+    # only have the same width when they are the same pair. Drawing two
+    # different kills with the same width, less than `hold_s` apart, would
+    # make the tracker see them as one line that vanished and came back --
+    # which is what it exists not to confuse.
+    + [_FeedLine(tk, ABILITY_ROW_S, -60 - 35 * i, TEAMMATE_NAME, True)
+       for i, tk in enumerate(TEAMMATE_KILLS)]
+    # the player's gun kills, which confirm the crosshair's skulls
+    + [_FeedLine(k, KILL_ROW_S, v, PLAYER_NAME, False)
+       for k, v in zip(KILLS, KILL_VICTIMS, strict=True)]
+)
 
 
 def ult_charged(t: float) -> bool:
@@ -610,6 +672,8 @@ def main() -> None:
         "fps": FPS,
         "size": [W, H],
         "kills": KILLS,
+        # skulls with no killfeed line: they must not end up as kills
+        "object_kills": OBJECT_KILLS,
         "deaths": list(DEATHS),
         "low_hp": [d[0] for d in LOW_HP],
         "ults": ULTS,
