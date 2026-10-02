@@ -172,7 +172,7 @@ def _render_timeline(
     zip_path = _zip_segments(
         [p for p, _ in cut_files],
         [span for _, span in cut_files],
-        out_dir / f"{index:02d}_cortes.zip",
+        out_dir / f"{index:02d}_cuts.zip",
     )
 
     dest: Path | None = out_dir / f"{index:02d}_custom.mp4"

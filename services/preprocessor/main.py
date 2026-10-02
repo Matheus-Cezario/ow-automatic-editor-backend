@@ -22,6 +22,7 @@ from owcore.models import (
     PROXY_ROI,
     Artifact,
     Job,
+    JobStage,
     JobStatus,
     RoiReady,
     STREAM_JOBS,
@@ -79,7 +80,7 @@ def _progress_reporter(job_id: str):
     """Returns the function that carries a phase's progress to the job's bar."""
     last = 0.0
 
-    def report(stage: str, band: tuple[float, float], fraction: float) -> None:
+    def report(stage: JobStage, band: tuple[float, float], fraction: float) -> None:
         nonlocal last
         lo, hi = band
         value = lo + (hi - lo) * max(0.0, min(1.0, fraction))
@@ -108,14 +109,14 @@ class Preprocessor(Worker):
                 return
             video_key = job.video_key
 
-        set_status(job_id, JobStatus.PREPROCESSING, stage="downloading the video", progress=0.0)
+        set_status(job_id, JobStatus.PREPROCESSING, stage=JobStage.DOWNLOADING, progress=0.0)
 
         work = Path(settings.work_dir) / job_id
         work.mkdir(parents=True, exist_ok=True)
         report = _progress_reporter(job_id)
         source = local_copy(
             video_key, work,
-            on_progress=lambda f: report("downloading the video", BAND_DOWNLOAD, f),
+            on_progress=lambda f: report(JobStage.DOWNLOADING, BAND_DOWNLOAD, f),
         )
 
         info = probe(source)
@@ -134,7 +135,7 @@ class Preprocessor(Worker):
         params = get_params(job_id)
         profile = load_profile(params.profile or settings.profile)
 
-        set_status(job_id, stage="cropping the HUD regions",
+        set_status(job_id, stage=JobStage.CROPPING,
                    progress=BAND_CROP[0])
         wanted = sorted({r for rois in DETECTOR_ROIS.values() for r in rois})
         # the editor's proxy comes along: one more output in the same decode,
@@ -142,7 +143,7 @@ class Preprocessor(Worker):
         crops = extract_rois(
             source, [*profile.rois(wanted), proxy_roi()], work / "rois",
             on_progress=lambda f: report(
-                "cropping the HUD regions", BAND_CROP, f
+                JobStage.CROPPING, BAND_CROP, f
             ),
         )
 
@@ -165,7 +166,7 @@ class Preprocessor(Worker):
         audio_key: str | None = None
         waveform_points: list[float] = []
         if info.has_audio:
-            set_status(job_id, stage="extracting the audio",
+            set_status(job_id, stage=JobStage.EXTRACTING_AUDIO,
                        progress=BAND_AUDIO[0])
             wav = extract_audio(source, work / "audio.wav")
             if wav is not None:
@@ -182,7 +183,7 @@ class Preprocessor(Worker):
                 job.proxy_key = proxy_key
                 job.waveform = waveform_points
 
-        set_status(job_id, JobStatus.DETECTING, stage="detecting events",
+        set_status(job_id, JobStatus.DETECTING, stage=JobStage.DETECTING,
                    progress=DETECTION_START)
 
         bus = get_bus()

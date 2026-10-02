@@ -22,7 +22,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFil
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from owcore.bus import get_bus
 from owcore.config import get_settings
@@ -33,9 +33,11 @@ from owcore.models import (
     STREAM_RENDER_READY,
     STREAM_THUMBS,
     Clip,
+    Event,
     Job,
     JobCreated,
     JobParams,
+    JobStage,
     JobStatus,
     Media,
     MediaKind,
@@ -47,6 +49,7 @@ from owcore.models import (
     Render,
     RenderRequested,
     Recipe,
+    RenderStage,
     RenderStatus,
     ThumbsRequested,
     Timeline,
@@ -181,6 +184,7 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         "id": job.id,
         "status": job.status,
         "stage": job.stage,
+        "n_moments": job.n_moments,
         "progress": round(job.progress, 3),
         "error": job.error,
         "video_name": job.video_name,
@@ -392,7 +396,7 @@ def create_job(
         job = Job(
             id=job_id,
             status=JobStatus.PENDING,
-            stage="queued",
+            stage=JobStage.QUEUED,
             video_key=video_key,
             video_name=video.filename or "recording",
             params=parsed.model_dump(),
@@ -469,7 +473,7 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
                 id=render_id,
                 job_id=job_id,
                 status=RenderStatus.PENDING,
-                stage="queued",
+                stage=RenderStage.QUEUED,
                 timelines=[m.model_dump() for m in montages],
             )
         )
@@ -729,7 +733,24 @@ def list_jobs(limit: int = 50, offset: int = 0) -> dict[str, Any]:
         jobs = s.scalars(
             select(Job).order_by(Job.created_at.desc()).limit(limit).offset(offset)
         ).all()
+        for j in jobs:
+            _backfill_moments(s, j)
         return {"jobs": [_job_dict(j) for j in jobs]}
+
+
+def _backfill_moments(s, job: Job) -> None:
+    """Counts the moments of a match analysed before `n_moments` existed.
+
+    Back then the count only lived inside a sentence in `stage` -- which is
+    also rewritten here as the plain code, so the app never has to parse old
+    prose. Once per job: the count is stored.
+    """
+    if job.status != JobStatus.READY or job.n_moments is not None:
+        return
+    job.n_moments = s.scalar(
+        select(func.count()).select_from(Event).where(Event.job_id == job.id)
+    ) or 0
+    job.stage = JobStage.READY
 
 
 #: while the analysis is not finished, the preprocessor is still going to
@@ -776,6 +797,7 @@ def get_job(job_id: str) -> dict[str, Any]:
         if job is None:
             raise HTTPException(404, "job not found")
         _backfill_size(job)
+        _backfill_moments(s, job)
         _adopt_old_draft(s, job)
         return _job_dict(job, full=True)
 

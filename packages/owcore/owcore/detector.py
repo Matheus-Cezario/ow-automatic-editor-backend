@@ -12,7 +12,7 @@ from typing import Any
 
 from .bus import get_bus
 from .config import get_settings
-from .jobs import record_report, save_events, set_status
+from .jobs import record_report, save_events
 from .models import (
     Artifact,
     DetectionEvent,
@@ -62,8 +62,9 @@ class DetectorWorker(Worker):
             msg.job_id, files, profile, msg.params, msg.duration_s
         )
         save_events(msg.job_id, self.detector, events)
+        # the stage stays `detecting`: how many events each detector found is
+        # its report, and the app shows it per detector
         record_report(msg.job_id, self.detector, len(events))
-        set_status(msg.job_id, stage=f"{self.detector}: {len(events)} evento(s)")
 
         get_bus().publish(
             STREAM_EDIT, EditRequested(job_id=msg.job_id).model_dump()

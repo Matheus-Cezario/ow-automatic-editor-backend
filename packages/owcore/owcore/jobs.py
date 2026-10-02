@@ -14,8 +14,10 @@ from .models import (
     Event,
     Job,
     JobParams,
+    JobStage,
     JobStatus,
     Render,
+    RenderStage,
     RenderStatus,
 )
 
@@ -24,9 +26,10 @@ def set_status(
     job_id: str,
     status: JobStatus | None = None,
     *,
-    stage: str | None = None,
+    stage: JobStage | None = None,
     progress: float | None = None,
     error: str | None = None,
+    n_moments: int | None = None,
 ) -> None:
     with session() as s:
         job = s.get(Job, job_id)
@@ -36,6 +39,8 @@ def set_status(
             job.status = status
         if stage is not None:
             job.stage = stage
+        if n_moments is not None:
+            job.n_moments = n_moments
         if progress is not None:
             job.progress = max(0.0, min(1.0, progress))
         if error is not None:
@@ -43,7 +48,7 @@ def set_status(
 
 
 def fail(job_id: str, message: str) -> None:
-    set_status(job_id, JobStatus.FAILED, stage="error", error=message[:4000])
+    set_status(job_id, JobStatus.FAILED, stage=JobStage.ERROR, error=message[:4000])
 
 
 def get_params(job_id: str) -> JobParams:
@@ -126,7 +131,7 @@ def claim_for_planning(job_id: str) -> bool:
         result = s.execute(
             update(Job)
             .where(Job.id == job_id, Job.status == JobStatus.DETECTING)
-            .values(status=JobStatus.READY, stage="analysis complete", progress=1.0)
+            .values(status=JobStatus.READY, stage=JobStage.PLANNING, progress=1.0)
         )
         return bool(result.rowcount)
 
@@ -135,7 +140,7 @@ def set_render_status(
     render_id: str,
     status: "RenderStatus | None" = None,
     *,
-    stage: str | None = None,
+    stage: RenderStage | None = None,
     progress: float | None = None,
     error: str | None = None,
 ) -> None:
@@ -155,7 +160,7 @@ def set_render_status(
 
 def fail_render(render_id: str, message: str) -> None:
     set_render_status(
-        render_id, RenderStatus.FAILED, stage="error", error=message[:4000]
+        render_id, RenderStatus.FAILED, stage=RenderStage.ERROR, error=message[:4000]
     )
 
 

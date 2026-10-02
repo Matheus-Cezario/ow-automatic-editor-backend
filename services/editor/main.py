@@ -27,6 +27,7 @@ from owcore.models import (
     Clip,
     Job,
     Render,
+    RenderStage,
     RenderStatus,
     Media,
     Timeline,
@@ -65,14 +66,14 @@ class Editor(Worker):
         if not timelines:
             set_render_status(
                 render_id, RenderStatus.FAILED,
-                stage="nothing chosen",
+                stage=RenderStage.NOTHING_CHOSEN,
                 error="the request brought no timeline at all",
             )
             return
 
         set_render_status(
             render_id, RenderStatus.RENDERING,
-            stage="preparing the cuts", progress=0.1,
+            stage=RenderStage.PREPARING, progress=0.1,
         )
 
         work = Path(settings.work_dir) / job_id / "renders" / render_id
@@ -83,7 +84,7 @@ class Editor(Worker):
         if not items:
             set_render_status(
                 render_id, RenderStatus.FAILED,
-                stage="montages not found",
+                stage=RenderStage.NOTHING_TO_CUT,
                 error="the request brought no montage that can be cut",
             )
             return
@@ -91,7 +92,7 @@ class Editor(Worker):
         def progress(done: float) -> None:
             set_render_status(
                 render_id, progress=0.1 + 0.85 * done,
-                stage=f"rendering ({int(done * 100)}%)",
+                stage=RenderStage.RENDERING,
             )
 
         clips = render.render_all(
@@ -126,7 +127,7 @@ class Editor(Worker):
                     )
                 if c.segments_zip is not None:
                     extras["segments_zip_key"] = storage.put_file(
-                        f"{job_id}/clips/{clip.id}_cortes.zip", c.segments_zip
+                        f"{job_id}/clips/{clip.id}_cuts.zip", c.segments_zip
                     )
                 if extras:
                     clip.meta = {**clip.meta, **extras}
@@ -136,15 +137,16 @@ class Editor(Worker):
         if not clips:
             set_render_status(
                 render_id, RenderStatus.FAILED,
-                stage="nothing can be cut", progress=1.0,
+                stage=RenderStage.NOTHING_TO_CUT, progress=1.0,
                 error="none of the requested videos can be rendered",
             )
             return
 
-        stage_text = f"{with_video} video(s) ready"
-        if cuts_only:
-            stage_text += f" + {cuts_only} with cuts only"
-        set_render_status(render_id, RenderStatus.DONE, stage=stage_text, progress=1.0)
+        # how many came out with video, and how many with cuts only, is read
+        # from the clips: the stage only says the request is done
+        set_render_status(
+            render_id, RenderStatus.DONE, stage=RenderStage.DONE, progress=1.0
+        )
         self.log.info(
             "request %s done: %d video(s), %d with cuts only",
             render_id, with_video, cuts_only,
