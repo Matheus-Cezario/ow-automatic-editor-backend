@@ -36,6 +36,7 @@ SERVICES: dict[str, list[str]] = {
     "thumbs": [sys.executable, str(ROOT / "services" / "thumbs" / "main.py")],
     "beats": [sys.executable, str(ROOT / "services" / "beats" / "main.py")],
     "editor": [sys.executable, str(ROOT / "services" / "editor" / "main.py")],
+    "previewer": [sys.executable, str(ROOT / "services" / "previewer" / "main.py")],
 }
 
 

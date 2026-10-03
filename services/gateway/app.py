@@ -30,6 +30,7 @@ from owcore.db import init_db, session
 from owcore.models import (
     STREAM_JOBS,
     STREAM_MEDIA,
+    STREAM_PREVIEW,
     STREAM_RENDER_READY,
     STREAM_THUMBS,
     Clip,
@@ -46,6 +47,8 @@ from owcore.models import (
     MontageDraft,
     MontageVersion,
     Preset,
+    Preview,
+    PreviewRequested,
     Render,
     RenderRequested,
     Recipe,
@@ -59,6 +62,7 @@ from owcore.models import (
     utcnow,
 )
 from owcore.ffmpeg import probe
+from owcore.preview import preview_window
 from owcore.storage import get_storage
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"}
@@ -441,31 +445,9 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
         music_ids = {m.id: m.status for m in job.media if m.is_audio}
         library = {m.id for m in job.media}
 
-    montages: list[Timeline] = []
-    for item in raw_timelines:
-        if not isinstance(item, dict):
-            raise HTTPException(422, "each timeline must be an object")
-        try:
-            spec = Timeline(**item)
-        except ValidationError as exc:
-            raise HTTPException(422, f"invalid timeline: {exc}") from exc
-        # a clip pointing at another job's media does not go in: the montage
-        # would come out without it, and with no warning
-        for clip in spec.clips:
-            if clip.media_id and clip.media_id not in library:
-                raise HTTPException(
-                    422,
-                    f"unknown media in this job: {clip.media_id!r}",
-                )
-        _check_layers(spec, music_ids)
-        # the watermark comes from the same library, and refusing it here is
-        # better than letting the whole render fail later because of it
-        if spec.export.watermark_id and spec.export.watermark_id not in library:
-            raise HTTPException(
-                422,
-                f"unknown watermark in this job: {spec.export.watermark_id!r}",
-            )
-        montages.append(spec)
+    montages = [
+        _validated_timeline(item, music_ids, library) for item in raw_timelines
+    ]
 
     with session() as s:
         s.add(
@@ -484,6 +466,130 @@ async def create_render(job_id: str, request: Request) -> dict[str, Any]:
         STREAM_RENDER_READY, RenderRequested(render_id=render_id).model_dump()
     )
     return {"id": render_id, "job_id": job_id, "status": RenderStatus.PENDING}
+
+
+def _validated_timeline(
+    item: Any, music_ids: dict[str, str], library: set[str]
+) -> Timeline:
+    """One montage from the app, checked against this job's library."""
+    if not isinstance(item, dict):
+        raise HTTPException(422, "each timeline must be an object")
+    try:
+        spec = Timeline(**item)
+    except ValidationError as exc:
+        raise HTTPException(422, f"invalid timeline: {exc}") from exc
+    # a clip pointing at another job's media does not go in: the montage
+    # would come out without it, and with no warning
+    for clip in spec.clips:
+        if clip.media_id and clip.media_id not in library:
+            raise HTTPException(
+                422,
+                f"unknown media in this job: {clip.media_id!r}",
+            )
+    _check_layers(spec, music_ids)
+    # the watermark comes from the same library, and refusing it here is
+    # better than letting the whole render fail later because of it
+    if spec.export.watermark_id and spec.export.watermark_id not in library:
+        raise HTTPException(
+            422,
+            f"unknown watermark in this job: {spec.export.watermark_id!r}",
+        )
+    return spec
+
+
+# ── the exact preview: a stretch rendered small by the server's own graph ───
+
+
+def _preview_dict(p: Preview) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "job_id": p.job_id,
+        "status": p.status,
+        "progress": round(p.progress, 3),
+        "error": p.error,
+        "from_s": p.from_s,
+        "to_s": p.to_s,
+        "video_url": f"/api/previews/{p.id}/video" if p.video_key else None,
+    }
+
+
+@app.post("/api/jobs/{job_id}/previews", status_code=201)
+async def create_preview(job_id: str, request: Request) -> dict[str, Any]:
+    """Renders a stretch of one montage, small and fast, through the same
+    graph as the final video.
+
+    JSON body: `{"timeline": {...}, "from_s": 0, "to_s": 10}` -- the window is
+    in seconds of the montage, and is capped. Only the latest preview of a
+    match is kept: asking for a new one discards the previous, finished or not.
+    """
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(422, "the body must be JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(422, "the body must be an object")
+
+    with session() as s:
+        job = s.get(Job, job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.status != JobStatus.READY:
+            raise HTTPException(
+                409, f"this job's analysis has not finished yet (status: {job.status})"
+            )
+        music_ids = {m.id: m.status for m in job.media if m.is_audio}
+        library = {m.id for m in job.media}
+
+    spec = _validated_timeline(body.get("timeline"), music_ids, library)
+    try:
+        from_s, to_s = preview_window(
+            spec.duration_s, body.get("from_s"), body.get("to_s")
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, f"invalid preview window: {exc}") from exc
+
+    storage = get_storage()
+    with session() as s:
+        for old in s.query(Preview).filter(Preview.job_id == job_id).all():
+            if old.video_key:
+                storage.delete(old.video_key)
+            s.delete(old)
+        preview = Preview(
+            job_id=job_id,
+            status=RenderStatus.PENDING,
+            timeline=spec.model_dump(mode="json"),
+            from_s=from_s,
+            to_s=to_s,
+        )
+        s.add(preview)
+        s.flush()
+        result = _preview_dict(preview)
+
+    get_bus().publish(
+        STREAM_PREVIEW, PreviewRequested(preview_id=result["id"]).model_dump()
+    )
+    return result
+
+
+@app.get("/api/previews/{preview_id}")
+def get_preview(preview_id: str) -> dict[str, Any]:
+    with session() as s:
+        p = s.get(Preview, preview_id)
+        if p is None:
+            raise HTTPException(404, "preview not found")
+        return _preview_dict(p)
+
+
+@app.get("/api/previews/{preview_id}/video")
+def preview_video(preview_id: str, request: Request) -> Response:
+    with session() as s:
+        p = s.get(Preview, preview_id)
+        if p is None:
+            raise HTTPException(404, "preview not found")
+        key = p.video_key
+    if not key:
+        raise HTTPException(404, "this preview is not ready")
+    return _serve_blob(key, request, "video/mp4")
 
 
 @app.get("/api/renders/{render_id}")

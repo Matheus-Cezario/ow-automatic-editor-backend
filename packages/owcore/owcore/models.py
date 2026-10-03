@@ -1126,6 +1126,9 @@ STREAM_RENDER_READY = "ow.render.ready"
 STREAM_MEDIA = "ow.media"
 #: analysis finished: someone to extract a thumbnail for each moment
 STREAM_THUMBS = "ow.thumbs"
+#: an exact preview of a montage, waiting for the previewer. A stream of its
+#: own so a preview never queues behind a full render
+STREAM_PREVIEW = "ow.preview"
 
 
 class JobCreated(BaseModel):
@@ -1157,6 +1160,10 @@ class RenderRequested(BaseModel):
 
 class MediaUploaded(BaseModel):
     media_id: str
+
+
+class PreviewRequested(BaseModel):
+    preview_id: str
 
 
 class ThumbsRequested(BaseModel):
@@ -1215,6 +1222,9 @@ class Job(Base):
     renders: Mapped[list["Render"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    previews: Mapped[list["Preview"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
     clips: Mapped[list["Clip"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -1251,6 +1261,40 @@ class Render(Base):
     clips: Mapped[list["Clip"]] = relationship(
         back_populates="render", cascade="all, delete-orphan"
     )
+
+
+class Preview(Base):
+    """An exact preview: a stretch of one montage rendered small and fast.
+
+    The editor's monitor composes the layers in the browser, which is instant
+    but approximate. This is the server's own graph -- the same
+    `compose_graph` the final video goes through -- on a reduced frame, so what
+    it shows is what will come out, only smaller.
+
+    It is not a [Render]: it never shows up among the generated videos, in the
+    match's zip or in its counts, and only the latest one of a match is kept.
+    """
+
+    __tablename__ = "previews"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String(24), default=RenderStatus.PENDING)
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: one serialised `Timeline`, its export window already set
+    timeline: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: where the stretch sits in the montage, so the app can line it up with
+    #: the ruler
+    from_s: Mapped[float] = mapped_column(Float, default=0.0)
+    to_s: Mapped[float] = mapped_column(Float, default=0.0)
+    video_key: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )
+
+    job: Mapped[Job] = relationship(back_populates="previews")
 
 
 class Media(Base):

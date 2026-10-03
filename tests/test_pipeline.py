@@ -28,10 +28,12 @@ from owcore.models import (
     DETECTORS,
     STREAM_EDIT,
     STREAM_JOBS,
+    STREAM_PREVIEW,
     STREAM_RENDER_READY,
     STREAM_ROI,
     Job,
     JobStage,
+    Preview,
     JobStatus,
     Render,
     RenderStage,
@@ -771,3 +773,81 @@ def test_the_video_of_a_clip_without_a_montage_returns_404(
     detail = client.get(f"/api/jobs/{job_id}").json()
     clip = detail["clips"][0]
     assert client.get(f"/api/clips/{clip['id']}/video").status_code == 404
+
+
+# ── the exact preview ───────────────────────────────────────────────────────
+
+
+def request_preview(job_id: str, timeline: dict, **window) -> dict:
+    resp = api().post(
+        f"/api/jobs/{job_id}/previews", json={"timeline": timeline, **window}
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def run_previews() -> None:
+    previewer = service_module("previewer", "main").Previewer()
+    for payload in drain(STREAM_PREVIEW, "previewer"):
+        previewer.handle(payload)
+
+
+def test_the_exact_preview_renders_a_small_stretch(isolated, short_sample, tmp_path):
+    job_id = run_analysis(short_sample)
+    preview = request_preview(
+        job_id, montage(job_id, count=3, duration=1.0), from_s=0.5, to_s=2.5
+    )
+    assert preview["status"] == RenderStatus.PENDING
+    run_previews()
+
+    client = api()
+    done = client.get(f"/api/previews/{preview['id']}").json()
+    assert done["status"] == RenderStatus.DONE, done["error"]
+    assert (done["from_s"], done["to_s"]) == (0.5, 2.5)
+
+    video = client.get(done["video_url"])
+    assert video.status_code == 200
+    out = tmp_path / "preview.mp4"
+    out.write_bytes(video.content)
+    from owcore.ffmpeg import probe
+
+    info = probe(out)
+    assert max(info.width, info.height) <= 640
+    assert abs(info.duration_s - 2.0) < 0.3
+
+    # a preview is not a generated video
+    detail = client.get(f"/api/jobs/{job_id}").json()
+    assert detail["renders"] == []
+
+
+def test_a_new_preview_replaces_the_previous_one(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    first = request_preview(job_id, montage(job_id), to_s=1)
+    run_previews()
+    second = request_preview(job_id, montage(job_id), to_s=2)
+
+    client = api()
+    assert client.get(f"/api/previews/{first['id']}").status_code == 404
+    with session() as s:
+        assert [p.id for p in s.query(Preview).all()] == [second["id"]]
+
+
+def test_a_preview_outside_the_montage_is_refused(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    resp = api().post(
+        f"/api/jobs/{job_id}/previews",
+        json={"timeline": montage(job_id, count=1), "from_s": 50, "to_s": 60},
+    )
+    assert resp.status_code == 422
+
+
+def test_a_preview_with_another_jobs_media_is_refused(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    resp = api().post(
+        f"/api/jobs/{job_id}/previews",
+        json={"timeline": {"layers": [{"clips": [{
+            "at_s": 0, "duration_s": 1, "start_s": 0,
+            "source": "media", "media_id": "made_up",
+        }]}]}},
+    )
+    assert resp.status_code == 422
