@@ -513,6 +513,32 @@ def _atempo_chain(factor: float) -> list[str]:
     return steps
 
 
+#: Ducking's shape around a play: fully down from DUCK_BEFORE seconds before
+#: it to DUCK_AFTER after, ramping down over DUCK_ATTACK and back up over
+#: DUCK_RELEASE. The editor's monitor uses the same numbers.
+DUCK_BEFORE = 0.15
+DUCK_AFTER = 0.5
+DUCK_ATTACK = 0.15
+DUCK_RELEASE = 0.4
+
+
+def _duck_curve(plays: list[float]) -> str:
+    """How ducked the mix is at `t`, 0 to 1, as an ffmpeg expression: a
+    trapezoid around each play, the highest one winning where they meet."""
+    shapes = []
+    for p in plays:
+        start = p - DUCK_BEFORE - DUCK_ATTACK
+        end = p + DUCK_AFTER + DUCK_RELEASE
+        shapes.append(
+            f"max(0,min(1,min((t-{start:.3f})/{DUCK_ATTACK},"
+            f"({end:.3f}-t)/{DUCK_RELEASE})))"
+        )
+    expr = shapes[0]
+    for shape in shapes[1:]:
+        expr = f"max({expr},{shape})"
+    return expr
+
+
 def _audio_chain(
     clip: TimelineClip,
     input_index: int,
@@ -763,7 +789,16 @@ def compose_graph(
     # building their chain is not a saving: an audio chain with no output makes
     # the graph invalid, and ffmpeg refuses the whole set.
     has_music = timeline.has_music
-    game_comes_in = not has_music or timeline.game_volume > 0
+    # the plays inside the stretch asked for, on its clock
+    plays = (
+        [p - start for p in timeline.play_times() if start - 2 <= p <= end + 2]
+        if timeline.duck_plays and has_music
+        else []
+    )
+    duck = _duck_curve(plays) if plays else None
+    # ducking brings the game sound up at the plays, even when it is
+    # otherwise left out of the mix
+    game_comes_in = not has_music or timeline.game_volume > 0 or duck is not None
 
     previous = "bg"
     #: the sound coming from the cuts -- what `game_volume` governs
@@ -926,6 +961,13 @@ def compose_graph(
             if timeline.music_volume != 1.0
             else ""
         )
+        if duck is not None:
+            # down to duck_level at each play, on the output's own clock
+            drop = 1 - timeline.duck_level
+            volume = (
+                f",volume='{timeline.music_volume:.4f}*(1-{drop:.4f}*({duck}))'"
+                ":eval=frame"
+            )
         if len(music_audio) == 1 and not volume:
             parts.append(music_audio[0])
         else:
@@ -953,6 +995,13 @@ def compose_graph(
                 if timeline.game_volume != 1.0
                 else ""
             )
+            if duck is not None:
+                # up to full at each play: the shot over the song
+                low = timeline.game_volume
+                boost = max(low, 1.0) - low
+                volume = (
+                    f",volume='{low:.4f}+{boost:.4f}*({duck})':eval=frame"
+                )
             c.filters.append(f"{game}{join}{volume}[game]")
             parts.append("game")
         else:

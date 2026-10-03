@@ -1129,6 +1129,8 @@ class MontageDraft(BaseModel):
     #: volume and chose 9:16 does not want to redo both after an F5
     music_volume: float = 1.0
     game_volume: float = 0.0
+    duck_plays: bool = False
+    duck_level: float = 0.3
     export: ExportSpec = Field(default_factory=ExportSpec)
 
     @model_validator(mode="after")
@@ -1193,6 +1195,12 @@ class Timeline(BaseModel):
     music_volume: float = 1.0
     game_volume: float = 0.0
 
+    #: Ducking: at each play the music drops to `duck_level` of its volume
+    #: and the game sound comes up to full, so the shot is heard over the
+    #: song. A play is a moment clip's instant -- the kill, the dart.
+    duck_plays: bool = False
+    duck_level: float = 0.3
+
     #: how the final video is written. The same montage becomes 16:9 and 9:16
     #: without anything in it changing -- what changes is the window you look
     #: through
@@ -1222,6 +1230,8 @@ class Timeline(BaseModel):
                         ("game_volume", self.game_volume)):
             if not 0.0 <= v <= 2.0:
                 raise ValueError(f"{nome} fica entre 0 e 2")
+        if not 0.0 <= self.duck_level <= 1.0:
+            raise ValueError("duck_level goes from 0 to 1")
         if not any(l.clips for l in self.layers):
             raise ValueError("an empty timeline does not make a video")
         return self
@@ -1273,6 +1283,25 @@ class Timeline(BaseModel):
         if len(visible) != 1:
             return False
         return all(c.is_simple for c in visible[0].clips)
+
+    def play_times(self) -> list[float]:
+        """When each play happens in the video: the instant of every moment
+        clip on a visible picture layer, where its source reaches the event
+        (the speed, ramps included, taken into account)."""
+        out: list[float] = []
+        for layer in self.layers:
+            if layer.hidden or layer.is_audio:
+                continue
+            for c in layer.clips:
+                if c.source is not ClipSource.RECORDING or c.source_t <= 0:
+                    continue
+                into = c.source_t - c.start_s
+                if into < 0 or c.freeze or c.reverse:
+                    continue
+                local = c.local_for_source(into)
+                if local <= c.duration_s:
+                    out.append(c.at_s + local)
+        return sorted(out)
 
     @property
     def has_music(self) -> bool:

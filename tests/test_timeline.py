@@ -3068,3 +3068,96 @@ def test_an_unknown_font_is_refused_up_front(isolated, short_sample):
     assert {"anton", "dejavu-sans-bold"} <= {f["id"] for f in fonts}
     assert api().get("/api/fonts/anton").status_code == 200
     assert api().get("/api/fonts/nope").status_code == 404
+
+
+# ── ducking at the plays ───────────────────────────────────────────────────
+
+
+def test_play_times_follow_the_clip_and_its_speed(isolated):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[
+        Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=10, source_t=11),
+            TimelineClip(at_s=3, duration_s=2, start_s=20, source_t=21, speed=2),
+            TimelineClip(at_s=6, duration_s=2, start_s=30, source_t=31, freeze=True),
+            TimelineClip(at_s=9, duration_s=2, start_s=40),  # no play
+        ]),
+    ])
+    assert t.play_times() == [1.0, 3.5]
+
+
+def _ducked_graph(**kw):
+    from owcore.compose import compose_graph
+    from owcore.compose import LibraryFile
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(
+        duck_plays=True, duck_level=0.25, **kw,
+        layers=[
+            Layer(clips=[TimelineClip(at_s=0, duration_s=3, start_s=10, source_t=11)]),
+            Layer(kind="audio", clips=[
+                TimelineClip(at_s=0, duration_s=3, start_s=0, source="media",
+                             media_id="song"),
+            ]),
+        ],
+    )
+    return compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                         source_duration_s=60,
+                         library={"song": LibraryFile(path=Path("s.wav"), kind="audio")})
+
+
+def test_ducking_lowers_the_music_and_brings_the_game_in(isolated):
+    g = _ducked_graph().filter_complex
+    assert "volume='1.0000*(1-0.7500*(max(0,min(1,min((t-0.700)" in g
+    # the game sound comes in although game_volume is 0, up to full at plays
+    assert "[game]" in g and "volume='0.0000+1.0000*(" in g
+
+
+def test_without_music_there_is_nothing_to_duck(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(duck_plays=True, layers=[
+        Layer(clips=[TimelineClip(at_s=0, duration_s=3, start_s=10, source_t=11)]),
+    ])
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60).filter_complex
+    assert "eval=frame" not in g
+
+
+def test_ducking_dips_the_music_at_the_play(isolated, tmp_path):
+    """Rendered: a steady tone as music, a silent recording, a play at 1.5s."""
+    import numpy as np
+
+    from owcore import ffmpeg
+    from owcore.compose import LibraryFile, compose_graph
+    from owcore.config import get_settings
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    source = _time_coded_source(tmp_path)  # silent audio track
+    tone = tmp_path / "tone.wav"
+    subprocess.run([get_settings().ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=4", str(tone)], check=True)
+    t = Timeline(duck_plays=True, duck_level=0.25, layers=[
+        Layer(clips=[TimelineClip(at_s=0, duration_s=3, start_s=1, source_t=2.5)]),
+        Layer(kind="audio", clips=[TimelineClip(at_s=0, duration_s=3, start_s=0,
+                                                source="media", media_id="tone")]),
+    ])
+    c = compose_graph(t, source=source, width=160, height=90, fps=30,
+                      source_duration_s=10,
+                      library={"tone": LibraryFile(path=tone, kind="audio")})
+    out = tmp_path / "ducked.mp4"
+    ffmpeg.compose(c, out)
+
+    pcm = subprocess.run([get_settings().ffmpeg, "-v", "error", "-i", str(out),
+                          "-f", "f32le", "-ac", "1", "-ar", "8000", "-"],
+                         capture_output=True).stdout
+    a = np.frombuffer(pcm, dtype=np.float32)
+
+    def rms(t0, t1):
+        return float(np.sqrt(np.mean(a[int(t0 * 8000):int(t1 * 8000)] ** 2)))
+
+    away, at_play = rms(0.1, 0.8), rms(1.45, 1.9)
+    assert at_play == pytest.approx(0.25 * away, rel=0.2), (away, at_play)
+    assert rms(2.6, 2.9) == pytest.approx(away, rel=0.1), "and back up after"
