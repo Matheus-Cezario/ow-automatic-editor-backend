@@ -639,6 +639,8 @@ class KeyProp(StrEnum):
     OPACITY = "opacity"
     #: `audio.volume`
     VOLUME = "volume"
+    #: `speed`: how fast the source runs. Keyframed, it is a speed ramp
+    SPEED = "speed"
 
 
 #: the range each animated property accepts -- the same one its static field
@@ -649,7 +651,29 @@ KEY_RANGES: dict[KeyProp, tuple[float, float]] = {
     KeyProp.SCALE: (0.05, 8.0),
     KeyProp.OPACITY: (0.0, 1.0),
     KeyProp.VOLUME: (0.0, 4.0),
+    KeyProp.SPEED: (0.1, 10.0),
 }
+
+#: each easing as a function of the progress `u` (0 to 1) between two keys --
+#: the same shapes `owcore.compose` writes as ffmpeg expressions
+EASE_SHAPES = {
+    "linear": lambda u: u,
+    "in": lambda u: u * u,
+    "out": lambda u: u * (2 - u),
+    "in_out": lambda u: u * u * (3 - 2 * u),
+}
+
+
+def curve_at(points: list[tuple[float, float, str]], at: float) -> float:
+    """A value along (time, value, ease) points, in time order: the endpoint's
+    outside them, the ease of the point it leaves in between."""
+    if at < points[0][0]:
+        return points[0][1]
+    for (t0, v0, ease), (t1, v1, _) in zip(points, points[1:]):
+        if at < t1:
+            u = min(1.0, max(0.0, (at - t0) / max(1e-6, t1 - t0)))
+            return v0 + (v1 - v0) * EASE_SHAPES[str(ease)](u)
+    return points[-1][1]
 
 
 class ClipKey(BaseModel):
@@ -788,6 +812,8 @@ class TimelineClip(BaseModel):
                 raise ValueError(f"two {prop} keyframes at the same instant")
         if self.freeze and self.reverse:
             raise ValueError("freezing and reversing at the same time makes no sense")
+        if self.is_ramped and (self.freeze or self.reverse):
+            raise ValueError("a speed ramp cannot be frozen or reversed")
         if self.source is ClipSource.TEXT and not self.text.strip():
             raise ValueError("a text clip needs text")
         if self.transition and self.transition.duration_s > self.duration_s + 1e-6:
@@ -805,7 +831,58 @@ class TimelineClip(BaseModel):
         # a frozen clip eats one frame: the rest is that same frame, still
         if self.freeze:
             return MIN_CUT_S
-        return self.duration_s * self.speed
+        return self.source_offset(self.duration_s)
+
+    # -- speed, constant or ramped -----------------------------------------
+    #
+    # With a ramp the source no longer runs at one rate: how much of it has
+    # gone by at an instant is the integral of the speed. Every place that
+    # turns clip time into source time -- what the clip consumes, where a
+    # split cuts, where an export window starts -- goes through here.
+
+    @property
+    def is_ramped(self) -> bool:
+        return bool(self.keys_for(KeyProp.SPEED))
+
+    def speed_at(self, local: float, span: float | None = None) -> float:
+        """The speed `local` seconds into the clip. `span` is the clip's length
+        as placed, which keyframe fractions refer to (the drawn or windowed
+        copy of a clip is longer or shorter)."""
+        keys = self.keys_for(KeyProp.SPEED)
+        if not keys:
+            return self.speed
+        span = self.duration_s if span is None else span
+        return curve_at([(k.t * span, k.value, k.ease) for k in keys], local)
+
+    def source_offset(self, local: float, span: float | None = None) -> float:
+        """How much source has gone by `local` seconds into the clip."""
+        if not self.is_ramped:
+            return local * self.speed
+        if local <= 0:
+            return local * self.speed_at(0.0, span)
+        # Simpson over a fine grid: the curve is smooth between keys, and a
+        # few hundred samples put the error far below a frame
+        n = max(2, int(local * 240) // 2 * 2)
+        h = local / n
+        total = self.speed_at(0.0, span) + self.speed_at(local, span)
+        for i in range(1, n):
+            total += (4 if i % 2 else 2) * self.speed_at(i * h, span)
+        return total * h / 3
+
+    def local_for_source(self, offset: float, span: float | None = None) -> float:
+        """The clip instant at which `offset` seconds of source have gone by --
+        the inverse of `source_offset`; the speed is always positive, so it is
+        monotonic and bisection finds it."""
+        if not self.is_ramped:
+            return offset / self.speed
+        lo, hi = 0.0, max(1.0, offset / 0.1)
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            if self.source_offset(mid, span) < offset:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2
 
     @property
     def end_s(self) -> float:

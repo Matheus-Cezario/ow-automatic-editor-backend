@@ -190,6 +190,56 @@ class KeyClock:
         return fraction * self.span_s - self.skipped_s
 
 
+@dataclass(frozen=True)
+class Ramp:
+    """A speed ramp seen from the filters: how much source has gone by at each
+    instant of the drawn clip, and back.
+
+    `clip` is the clip as placed (its keys are fractions of it); the clock
+    says where the drawn copy starts inside it.
+    """
+
+    clip: TimelineClip
+    clock: KeyClock
+
+    def _base(self) -> float:
+        return self.clip.source_offset(self.clock.skipped_s, self.clock.span_s)
+
+    def src(self, local: float) -> float:
+        """Source seconds gone by `local` seconds into the drawn clip."""
+        at = self.clock.skipped_s + local
+        return self.clip.source_offset(at, self.clock.span_s) - self._base()
+
+    def local(self, src: float) -> float:
+        """The drawn clip's instant at which `src` source seconds have gone by."""
+        at = self.clip.local_for_source(self._base() + src, self.clock.span_s)
+        return at - self.clock.skipped_s
+
+    def setpts(self, length: float) -> str:
+        """`setpts` placing each source frame at its instant in the clip.
+
+        The map from source time to clip time is sampled every 1/30 s (at
+        most 600 points) and joined with straight lines, in a balanced tree
+        of `if`s so the expression stays shallow however long the clip.
+        """
+        n = max(1, min(600, int(length * 30)))
+        outs = [length * i / n for i in range(n + 1)]
+        pts = [(self.src(o), o) for o in outs]
+
+        def seg(i: int) -> str:
+            (s0, o0), (s1, o1) = pts[i], pts[i + 1]
+            k = (o1 - o0) / max(1e-9, s1 - s0)
+            return f"({o0:.5f}+(T-{s0:.5f})*{k:.6f})"
+
+        def tree(i: int, j: int) -> str:
+            if j - i == 1:
+                return seg(i)
+            mid = (i + j) // 2
+            return f"if(lt(T,{pts[mid][0]:.5f}),{tree(i, mid)},{tree(mid, j)})"
+
+        return f"setpts='({tree(0, n)})/TB'"
+
+
 #: the shape of each easing, as an ffmpeg expression of the progress `u`
 #: (0 to 1) between two keyframes
 _EASE = {
@@ -299,6 +349,7 @@ def _video_chain(
     dip_out: tuple[str, float] | None = None,
     fps: float = 30.0,
     clock: KeyClock | None = None,
+    ramp: Ramp | None = None,
 ) -> str:
     """What happens to a clip before it touches the canvas.
 
@@ -311,7 +362,8 @@ def _video_chain(
     """
     clock = clock or KeyClock(clip.duration_s)
     # the trim is on the source, so it counts the speed
-    steps = [f"[{input_index}:v]trim=duration={clip.source_consumed_s:.3f}"]
+    consumed = ramp.src(clip.duration_s) if ramp else clip.source_consumed_s
+    steps = [f"[{input_index}:v]trim=duration={consumed:.3f}"]
     steps.append("setpts=PTS-STARTPTS")
 
     if clip.reverse:
@@ -328,6 +380,9 @@ def _video_chain(
         # The `fps` in front says the rate again.
         steps.append(f"fps={fps:.3f}")
         steps.append(f"tpad=stop_mode=clone:stop_duration={clip.duration_s:.3f}")
+    elif ramp is not None:
+        # each source frame goes to the instant the ramp brings it to
+        steps.append(ramp.setpts(clip.duration_s))
     elif clip.speed != 1.0:
         # dividing the PTS speeds it up: at 2x, each frame is worth half the time
         steps.append(f"setpts=PTS/{clip.speed:.4f}")
@@ -499,7 +554,7 @@ def _audio_chain(
 
 
 def _within_window(
-    clip: TimelineClip, start: float, end: float
+    clip: TimelineClip, start: float, end: float, span: float | None = None
 ) -> TimelineClip | None:
     """The clip as seen through the export window, or `None` if it fell outside.
 
@@ -524,8 +579,9 @@ def _within_window(
             "at_s": max(0.0, clip.at_s - start),
             "duration_s": new_duration,
             # how much of the clip was skipped costs more source when it runs
-            # sped up; on a text or an image, `start_s` means nothing
-            "start_s": clip.start_s + eaten_before * clip.speed,
+            # sped up -- the integral, under a ramp; on a text or an image,
+            # `start_s` means nothing
+            "start_s": clip.start_s + clip.source_offset(eaten_before, span),
         }
     )
 
@@ -562,6 +618,7 @@ def _clip_input(
     width: int,
     height: int,
     fps: float,
+    ramp: Ramp | None = None,
 ) -> tuple[Input | None, float, bool]:
     """This clip's ffmpeg input, its usable duration, and whether it has sound.
 
@@ -569,10 +626,12 @@ def _clip_input(
     the background canvas, and the clips after it do not move from where they
     were placed.
     """
+    # what is asked of the source is what the speed consumes, not what the
+    # clip occupies in the video -- under a ramp, the integral of the speed
+    consumed = ramp.src(clip.duration_s) if ramp else clip.source_consumed_s
+
     if clip.source is ClipSource.RECORDING:
-        # what is asked of the source is what the speed consumes, not what the
-        # clip occupies in the video
-        wanted = clip.source_consumed_s
+        wanted = consumed
         if source_duration_s > 0:
             wanted = min(wanted, max(0.0, source_duration_s - clip.start_s))
         if wanted <= 0:
@@ -581,10 +640,17 @@ def _clip_input(
         # -- except when frozen, which consumes one frame and occupies the whole
         # block: there the duration in the video is not a consequence of what
         # was consumed.
+        if clip.freeze:
+            usable = clip.duration_s
+        elif ramp:
+            usable = ramp.local(wanted) if wanted < consumed - 1e-6 else clip.duration_s
+        else:
+            usable = wanted / clip.speed
+        # a ramp has no sound: `atempo` takes one rate, not a curve
         return (
             Input(path=str(source), seek=clip.start_s, duration=wanted),
-            clip.duration_s if clip.freeze else wanted / clip.speed,
-            True,
+            usable,
+            ramp is None,
         )
 
     if clip.source is ClipSource.TEXT:
@@ -633,10 +699,10 @@ def _clip_input(
             Input(
                 path=str(item.path),
                 seek=clip.start_s,
-                duration=clip.source_consumed_s,
+                duration=consumed,
             ),
             clip.duration_s,
-            True,
+            ramp is None,
         )
 
     # solid colour arrives when it is missed; ignoring it silently would be
@@ -742,13 +808,24 @@ def compose_graph(
                 if tail
                 else original
             )
-            clip = _within_window(drawn, start, end)
+            clip = _within_window(drawn, start, end, original.duration_s)
             if clip is None:
                 continue  # outside the stretch asked for
-            heard = _within_window(original, start, end) if tail else clip
+            heard = (
+                _within_window(original, start, end, original.duration_s)
+                if tail
+                else clip
+            )
             # a dip whose end fell outside the window would happen off screen
             if dip_out is not None and clip.until_s < original.until_s - start - 1e-6:
                 dip_out = None
+
+            # keyframes follow the clip as placed, not as drawn or windowed
+            clock = KeyClock(
+                span_s=original.duration_s,
+                skipped_s=max(0.0, start - original.at_s),
+            )
+            ramp = Ramp(original, clock) if original.is_ramped else None
 
             clip_input, usable_duration, has_sound = _clip_input(
                 clip,
@@ -758,6 +835,7 @@ def compose_graph(
                 width=width,
                 height=height,
                 fps=fps,
+                ramp=ramp,
             )
             if clip_input is None:
                 continue  # falls outside the source; its slot stays background
@@ -765,11 +843,6 @@ def compose_graph(
             n += 1
             c.inputs.append(clip_input)
             trimmed = clip.model_copy(update={"duration_s": usable_duration})
-            # keyframes follow the clip as placed, not as drawn or windowed
-            clock = KeyClock(
-                span_s=original.duration_s,
-                skipped_s=max(0.0, start - original.at_s),
-            )
 
             if not layer.is_audio:
                 c.filters.append(
@@ -783,6 +856,7 @@ def compose_graph(
                         dip_out=dip_out,
                         fps=fps,
                         clock=clock,
+                        ramp=ramp,
                     )
                 )
                 x, y = _position(trimmed, clock)
