@@ -61,6 +61,7 @@ from owcore.models import (
     new_id,
     utcnow,
 )
+from owcore import fonts
 from owcore.ffmpeg import probe
 from owcore.preview import preview_window
 from owcore.storage import get_storage
@@ -487,6 +488,13 @@ def _validated_timeline(
                 f"unknown media in this job: {clip.media_id!r}",
             )
     _check_layers(spec, music_ids)
+    # a font the server does not have would only fail at render time
+    for clip in spec.clips:
+        if clip.text_style.font:
+            try:
+                fonts.resolve(clip.text_style.font)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
     # the watermark comes from the same library, and refusing it here is
     # better than letting the whole render fail later because of it
     if spec.export.watermark_id and spec.export.watermark_id not in library:
@@ -495,6 +503,38 @@ def _validated_timeline(
             f"unknown watermark in this job: {spec.export.watermark_id!r}",
         )
     return spec
+
+
+# ── the text fonts ────────────────────────────────────────────────────────
+
+
+@app.get("/api/fonts")
+def list_fonts() -> list[dict[str, Any]]:
+    """The fonts a text can use. The app loads each file to draw its preview
+    with the same face the render uses."""
+    return [
+        {
+            "id": f.id,
+            "name": f.name,
+            "category": f.category,
+            "url": f"/api/fonts/{f.id}",
+            "default": f.id == fonts.DEFAULT_ID,
+        }
+        for f in fonts.catalog().values()
+    ]
+
+
+@app.get("/api/fonts/{font_id}")
+def font_file(font_id: str) -> Response:
+    font = fonts.catalog().get(font_id)
+    if font is None:
+        raise HTTPException(404, "font not found")
+    return Response(
+        content=font.path.read_bytes(),
+        media_type="font/ttf",
+        # a font file never changes under its id
+        headers={"cache-control": "public, max-age=604800"},
+    )
 
 
 # ── the exact preview: a stretch rendered small by the server's own graph ───

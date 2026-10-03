@@ -2960,3 +2960,111 @@ def test_a_ramp_shows_the_source_where_the_integral_says(isolated, tmp_path):
     assert rate(1.5, 1.9) == pytest.approx(expected(1.5, 1.9), abs=0.3), "fast end"
     assert rate(1.5, 1.9) > 2 * rate(0.1, 0.5), "it really ramps"
     assert shown(1.0) == pytest.approx(1 + _ramp_source_offset(1.0), abs=0.2)
+
+
+# ── fonts and animated text ────────────────────────────────────────────────
+
+
+def test_the_font_catalogue_resolves_ids_and_old_paths(isolated):
+    from owcore import fonts
+
+    cat = fonts.catalog()
+    for fid in ("anton", "bebas-neue", "inter", "permanent-marker", "press-start-2p"):
+        assert fid in cat, f"{fid} is bundled"
+        assert cat[fid].path.is_file()
+    assert fonts.resolve("anton").endswith("Anton-Regular.ttf")
+    # montages saved before the catalogue stored a path
+    assert fonts.resolve("/some/where/Font.ttf") == "/some/where/Font.ttf"
+    assert fonts.resolve("") == fonts.default_font()
+    with pytest.raises(ValueError, match="unknown font"):
+        fonts.resolve("comic-sans")
+
+
+def test_text_animations_become_expressions_in_t(isolated):
+    from owcore import textfx
+    from owcore.models import TimelineClip
+
+    def chain(**style):
+        return textfx.filter_chain(
+            TimelineClip(at_s=0, duration_s=2, source="text", text="ACE",
+                         text_style={"font": "anton", **style}),
+            720,
+        )
+
+    still = chain()
+    assert "alpha=" not in still and "fontsize=58" in still
+    fade = chain(anim_in="fade", anim_out="fade")
+    assert "alpha='" in fade
+    assert "fontsize='58*(1)'" in fade
+    pop = chain(anim_in="pop")
+    assert "fontsize='58*(1*(0.5+0.5*" in pop
+    slide = chain(anim_out="slide")
+    assert "+(0+0.08*(1-" in slide
+    typed = chain(anim_in="typewriter")
+    assert typed.count("drawtext=") == 3, "one step per letter"
+    assert "text='A'" in typed and "text='AC'" in typed and "text='ACE'" in typed
+
+
+def test_typewriter_is_an_entrance_only(isolated):
+    from owcore.models import TextStyle
+
+    with pytest.raises(ValueError, match="entrance"):
+        TextStyle(anim_out="typewriter")
+
+
+def _text_over_red(tmp_path, short_sample, name, **style):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    lib = _solid_colours(tmp_path)
+    t = Timeline(layers=[
+        Layer(clips=[TimelineClip(at_s=0, duration_s=2, source="media", media_id="red")]),
+        Layer(clips=[TimelineClip(at_s=0, duration_s=2, source="text", text="MMMM",
+                                  text_style={"size": 0.3, "outline": 0, **style})]),
+    ])
+    return _render_with_library(t, lib, short_sample, tmp_path / f"{name}.mp4")
+
+
+def _white(video, t) -> float:
+    q = raw_frame(video, t).reshape(-1, 3)
+    return float(((q[:, 1] > 200) & (q[:, 2] > 200)).mean())
+
+
+def test_a_bundled_font_draws(isolated, short_sample, tmp_path):
+    video = _text_over_red(tmp_path, short_sample, "anton", font="bangers")
+    assert _white(video, 1.0) > 0.02
+
+
+def test_a_fade_in_text_starts_faint(isolated, short_sample, tmp_path):
+    video = _text_over_red(tmp_path, short_sample, "fade", anim_in="fade", anim_s=1.0)
+    q_early = raw_frame(video, 0.4).reshape(-1, 3)
+    # part-faded white over red: not white yet, but lighter than plain red
+    assert _white(video, 0.4) < 0.005
+    assert q_early[:, 1].max() > 40
+    assert _white(video, 1.5) > 0.02
+
+
+def test_pop_and_typewriter_grow_into_the_full_text(isolated, short_sample, tmp_path):
+    pop = _text_over_red(tmp_path, short_sample, "pop", anim_in="pop", anim_s=1.0)
+    assert 0 < _white(pop, 0.35) < _white(pop, 1.5)
+
+    typed = _text_over_red(tmp_path, short_sample, "typed", anim_in="typewriter",
+                           anim_s=1.0)
+    assert _white(typed, 0.3) < 0.6 * _white(typed, 1.5), "fewer letters early on"
+
+
+def test_an_unknown_font_is_refused_up_front(isolated, short_sample):
+    import json as _json
+
+    from test_pipeline import api, run_analysis
+
+    job_id = run_analysis(short_sample)
+    resp = api().post(f"/api/jobs/{job_id}/renders", data={"timelines": _json.dumps([{
+        "layers": [{"clips": [{"at_s": 0, "duration_s": 1, "start_s": 0,
+                               "source": "text", "text": "hi",
+                               "text_style": {"font": "comic-sans"}}]}],
+    }])})
+    assert resp.status_code == 422
+    fonts = api().get("/api/fonts").json()
+    assert {"anton", "dejavu-sans-bold"} <= {f["id"] for f in fonts}
+    assert api().get("/api/fonts/anton").status_code == 200
+    assert api().get("/api/fonts/nope").status_code == 404
