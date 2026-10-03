@@ -38,7 +38,9 @@ from . import textfx
 from .models import (
     MIN_CUT_S,
     ClipSource,
+    Ease,
     Fit,
+    KeyProp,
     MediaKind,
     Timeline,
     TimelineClip,
@@ -111,7 +113,7 @@ class Composition:
         return [a for e in self.inputs for a in e.args()]
 
 
-def _position(clip: TimelineClip) -> tuple[str, str]:
+def _position(clip: TimelineClip, clock: "KeyClock") -> tuple[str, str]:
     """Where the clip is overlaid, as expressions ffmpeg evaluates.
 
     The transform's `x` and `y` are offsets from the centre normalised by half
@@ -125,9 +127,16 @@ def _position(clip: TimelineClip) -> tuple[str, str]:
     if clip.source is ClipSource.TEXT:
         x, y = "0", "0"
     else:
-        x = f"(W-w)/2+({clip.transform.x:.4f})*(W/2)"
-        y = f"(H-h)/2+({clip.transform.y:.4f})*(H/2)"
-    return _slide(clip, x, y)
+        # keyframes in the overlay's own clock, which is the final video's
+        local = f"(t-{clip.at_s:.3f})"
+        cx = _animated(clip, KeyProp.X, local, clock) or f"{clip.transform.x:.4f}"
+        cy = _animated(clip, KeyProp.Y, local, clock) or f"{clip.transform.y:.4f}"
+        x = f"(W-w)/2+({cx})*(W/2)"
+        y = f"(H-h)/2+({cy})*(H/2)"
+    x, y = _slide(clip, x, y)
+    # quoted when they carry commas: `if`/`min`/`max` would otherwise split
+    # filters in the graph
+    return tuple(f"'{e}'" if "," in e else e for e in (x, y))
 
 
 #: Where a sliding clip starts, as a multiple of the frame: it comes in from
@@ -152,11 +161,10 @@ def _slide(clip: TimelineClip, x: str, y: str) -> tuple[str, str]:
         return x, y
     dx, dy = _SLIDE_FROM[tr.kind]
     remaining = f"(1-min(1,max(0,(t-{clip.at_s:.3f})/{tr.duration_s:.3f})))"
-    # quoted: the commas of `min`/`max` would otherwise split filters in the graph
     if dx:
-        x = f"'{x}+({dx})*W*{remaining}'"
+        x = f"{x}+({dx})*W*{remaining}"
     if dy:
-        y = f"'{y}+({dy})*H*{remaining}'"
+        y = f"{y}+({dy})*H*{remaining}"
     return x, y
 
 
@@ -164,27 +172,69 @@ def _slide(clip: TimelineClip, x: str, y: str) -> tuple[str, str]:
 _DIP_COLOR = {TransitionKind.FADE_BLACK: "black", TransitionKind.FADE_WHITE: "white"}
 
 
-def _interpolate(
-    keys: list, field_name: str, duration_s: float, var: str = "t"
-) -> str:
-    """An ffmpeg expression interpolating the field between keyframes.
+@dataclass(frozen=True)
+class KeyClock:
+    """Where a clip's keyframes fall on the clock its filters see.
 
-    What comes out is a ladder of `if`s, from the first point to the last, with
-    a straight line between each pair. The `t` inside it is the clip's time with
-    the speed already applied -- which is why the keyframes are fractions and
-    not seconds: they follow the block when it stretches.
+    Keyframes are fractions of the clip **as the user placed it** (`span_s`).
+    What reaches the filters is not always that clip: under a dissolve its
+    picture runs longer, and through an export window it may start partway
+    (`skipped_s` already gone). Converting with the drawn clip's duration put
+    the zoom in the wrong place in both cases.
     """
-    points = [
-        (max(0.0, k.t * duration_s), float(getattr(k, field_name))) for k in keys
-    ]
 
-    # before the first point and after the last, the value is the endpoint's
+    span_s: float
+    skipped_s: float = 0.0
+
+    def at(self, fraction: float) -> float:
+        return fraction * self.span_s - self.skipped_s
+
+
+#: the shape of each easing, as an ffmpeg expression of the progress `u`
+#: (0 to 1) between two keyframes
+_EASE = {
+    Ease.LINEAR: "{u}",
+    Ease.IN: "({u})*({u})",
+    Ease.OUT: "({u})*(2-({u}))",
+    Ease.IN_OUT: "({u})*({u})*(3-2*({u}))",
+}
+
+
+def _curve(points: list[tuple[float, float, Ease]], var: str) -> str:
+    """An ffmpeg expression running through (time, value, ease) points.
+
+    What comes out is a ladder of `if`s, from the first point to the last;
+    between each pair the value follows the ease of the point it leaves.
+    Before the first point and after the last, the value is the endpoint's.
+    """
     expr = f"{points[-1][1]:.4f}"
-    for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:]))):
+    for (t0, v0, ease), (t1, v1, _) in reversed(list(zip(points, points[1:]))):
         span = max(1e-6, t1 - t0)
-        line = f"({v0:.4f}+({v1 - v0:.4f})*({var}-{t0:.4f})/{span:.4f})"
+        u = f"({var}-{t0:.4f})/{span:.4f}"
+        line = f"({v0:.4f}+({v1 - v0:.4f})*{_EASE[ease].format(u=u)})"
         expr = f"if(lt({var},{t1:.4f}),{line},{expr})"
     return f"if(lt({var},{points[0][0]:.4f}),{points[0][1]:.4f},{expr})"
+
+
+def _interpolate(keys: list, field_name: str, clock: KeyClock, var: str = "t") -> str:
+    """The zoom's field between its keyframes. The `t` inside it is the
+    clip's time with the speed already applied -- which is why keyframes are
+    fractions: they follow the block when it stretches."""
+    return _curve(
+        [(clock.at(k.t), float(getattr(k, field_name)), k.ease) for k in keys],
+        var,
+    )
+
+
+def _animated(
+    clip: TimelineClip, prop: KeyProp, var: str, clock: KeyClock
+) -> str | None:
+    """The expression for an animated property, or `None` when it has no
+    keyframes and its static value stands."""
+    keys = clip.keys_for(prop)
+    if not keys:
+        return None
+    return _curve([(clock.at(k.t), k.value, k.ease) for k in keys], var)
 
 
 def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
@@ -210,7 +260,9 @@ def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
     ]
 
 
-def _zoom_chain(clip: TimelineClip, width: int, height: int, fps: float) -> list[str]:
+def _zoom_chain(
+    clip: TimelineClip, width: int, height: int, fps: float, clock: KeyClock
+) -> list[str]:
     """The window that moves and tightens inside the clip.
 
     It used to be a `crop` with expressions in `t`, scaled back to the canvas.
@@ -224,9 +276,9 @@ def _zoom_chain(clip: TimelineClip, width: int, height: int, fps: float) -> list
     pixels, and at canvas size a slow zoom would visibly step a pixel at a
     time; working on a frame twice as large halves the step.
     """
-    z = _interpolate(clip.zoom, "scale", clip.duration_s, "it")
-    x = _interpolate(clip.zoom, "x", clip.duration_s, "it")
-    y = _interpolate(clip.zoom, "y", clip.duration_s, "it")
+    z = _interpolate(clip.zoom, "scale", clock, "it")
+    x = _interpolate(clip.zoom, "x", clock, "it")
+    y = _interpolate(clip.zoom, "y", clock, "it")
     return [
         f"scale={2 * int(width)}:{2 * int(height)}",
         f"zoompan=z='{z}'"
@@ -246,6 +298,7 @@ def _video_chain(
     fit: Fit,
     dip_out: tuple[str, float] | None = None,
     fps: float = 30.0,
+    clock: KeyClock | None = None,
 ) -> str:
     """What happens to a clip before it touches the canvas.
 
@@ -256,6 +309,7 @@ def _video_chain(
     clip's clock: a half-second fade has to last half a second in the final
     video, not half a second of the source.
     """
+    clock = clock or KeyClock(clip.duration_s)
     # the trim is on the source, so it counts the speed
     steps = [f"[{input_index}:v]trim=duration={clip.source_consumed_s:.3f}"]
     steps.append("setpts=PTS-STARTPTS")
@@ -292,7 +346,7 @@ def _video_chain(
     # it, a 16:9 recording exported as 9:16 was zoomed in its own aspect and
     # then stretched into the other.
     if clip.zoom:
-        steps += _zoom_chain(clip, width, height, fps)
+        steps += _zoom_chain(clip, width, height, fps, clock)
 
     if not clip.color.is_neutral:
         steps.append(
@@ -301,7 +355,28 @@ def _video_chain(
             f":saturation={clip.color.saturation:.4f}"
         )
 
-    if clip.transform.scale != 1.0:
+    # Keyframes run on the clip's own clock: `T` below is the frame's time
+    # with the speed applied, starting at the clip's first frame
+    scale = _animated(clip, KeyProp.SCALE, "T", clock)
+    opacity = _animated(clip, KeyProp.OPACITY, "T", clock)
+    if scale is not None:
+        # An animated size keeps the frame the canvas' size and resamples the
+        # picture inside it, transparent around. `scale` with `eval=frame`
+        # looked like the tool for this, but on ffmpeg 7.1 it keeps the first
+        # frame's size -- the clip never grew. `geq` is slower (per pixel), so
+        # only animated clips pay for it; it carries an animated opacity too.
+        s_ = f"max(0.001,{scale})"
+        sx = f"((X-W/2)/{s_}+W/2)"
+        sy = f"((Y-H/2)/{s_}+H/2)"
+        inside = f"between({sx},0,W-1)*between({sy},0,H-1)"
+        alpha = f"alpha({sx},{sy})" + (f"*({opacity})" if opacity else "")
+        steps.append("format=rgba")
+        steps.append(
+            f"geq=r='r({sx},{sy})':g='g({sx},{sy})':b='b({sx},{sy})'"
+            f":a='if({inside},{alpha},0)'"
+        )
+        opacity = None  # already applied
+    elif clip.transform.scale != 1.0:
         steps.append(
             f"scale=iw*{clip.transform.scale:.4f}:ih*{clip.transform.scale:.4f}"
         )
@@ -310,9 +385,12 @@ def _video_chain(
     dissolve = tr is not None and tr.kind is TransitionKind.DISSOLVE
 
     # alpha only exists in rgba, and from here down everything touches it
-    if (not clip.fade.is_neutral or clip.transform.opacity < 1.0 or dissolve) and (
-        clip.source is not ClipSource.TEXT
-    ):
+    if (
+        not clip.fade.is_neutral
+        or (clip.transform.opacity < 1.0 and not clip.keys_for(KeyProp.OPACITY))
+        or dissolve
+        or opacity is not None
+    ) and clip.source is not ClipSource.TEXT and scale is None:
         steps.append("format=rgba")
 
     # The entrance. A dissolve is a fade **of the alpha**: the previous clip
@@ -345,7 +423,14 @@ def _video_chain(
                 f"fade=t=out:st={start:.3f}:d={clip.fade.out_s:.3f}:alpha=1"
             )
 
-    if clip.transform.opacity < 1.0:
+    if opacity is not None:
+        # `colorchannelmixer` takes a number, not an expression: an animated
+        # alpha is computed per pixel, which is slower, so only when asked
+        steps.append(
+            "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
+            f":a='alpha(X,Y)*({opacity})'"
+        )
+    elif clip.transform.opacity < 1.0 and not clip.keys_for(KeyProp.OPACITY):
         steps.append(f"colorchannelmixer=aa={clip.transform.opacity:.4f}")
 
     # only now is the clip placed at its moment in the final video
@@ -373,9 +458,16 @@ def _atempo_chain(factor: float) -> list[str]:
     return steps
 
 
-def _audio_chain(clip: TimelineClip, input_index: int, output: str) -> str | None:
+def _audio_chain(
+    clip: TimelineClip,
+    input_index: int,
+    output: str,
+    clock: KeyClock | None = None,
+) -> str | None:
     """The clip's sound, delayed until the moment it comes in."""
-    if clip.audio.mute or clip.audio.volume <= 0:
+    clock = clock or KeyClock(clip.duration_s)
+    volume = _animated(clip, KeyProp.VOLUME, "t", clock)
+    if clip.audio.mute or (volume is None and clip.audio.volume <= 0):
         return None
     # a frozen frame has no sound running alongside it
     if clip.freeze:
@@ -396,7 +488,10 @@ def _audio_chain(clip: TimelineClip, input_index: int, output: str) -> str | Non
         steps.append(
             f"afade=t=out:st={start:.3f}:d={clip.audio.fade_out_s:.3f}"
         )
-    if clip.audio.volume != 1.0:
+    if volume is not None:
+        # the clock here is the clip's, before the delay that places it
+        steps.append(f"volume='{volume}':eval=frame")
+    elif clip.audio.volume != 1.0:
         steps.append(f"volume={clip.audio.volume:.4f}")
     if ms > 0:
         steps.append(f"adelay={ms}|{ms}")
@@ -670,6 +765,11 @@ def compose_graph(
             n += 1
             c.inputs.append(clip_input)
             trimmed = clip.model_copy(update={"duration_s": usable_duration})
+            # keyframes follow the clip as placed, not as drawn or windowed
+            clock = KeyClock(
+                span_s=original.duration_s,
+                skipped_s=max(0.0, start - original.at_s),
+            )
 
             if not layer.is_audio:
                 c.filters.append(
@@ -682,9 +782,10 @@ def compose_graph(
                         fit,
                         dip_out=dip_out,
                         fps=fps,
+                        clock=clock,
                     )
                 )
-                x, y = _position(trimmed)
+                x, y = _position(trimmed, clock)
                 output = f"t{n}"
                 c.filters.append(
                     f"[{previous}][v{n}]overlay=x={x}:y={y}:"
@@ -710,7 +811,7 @@ def compose_graph(
                 sound = trimmed.model_copy(
                     update={"duration_s": min(heard.duration_s, usable_duration)}
                 )
-                chain = _audio_chain(sound, n, f"a{n}")
+                chain = _audio_chain(sound, n, f"a{n}", clock)
                 if chain is not None:
                     c.filters.append(chain)
                     (music_audio if layer.is_audio else cut_audio).append(f"a{n}")

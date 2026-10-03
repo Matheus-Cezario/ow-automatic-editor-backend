@@ -2687,3 +2687,174 @@ def test_the_preview_timeline_only_changes_the_export():
     assert small.export.crf == PREVIEW_CRF
     assert small.export.fit == spec.export.fit
     assert (small.export.from_s, small.export.to_s) == (0.5, 1.5)
+
+
+# ── keyframes and easing ────────────────────────────────────────────────────
+
+
+def test_keyframes_are_validated_and_leave_the_simple_path(isolated):
+    from owcore.models import TimelineClip
+
+    c = TimelineClip(at_s=0, duration_s=2, keys=[
+        {"prop": "opacity", "t": 1, "value": 0},
+        {"prop": "opacity", "t": 0, "value": 1, "ease": "in_out"},
+    ])
+    assert not c.is_simple
+    assert [k.t for k in c.keys_for("opacity")] == [0, 1], "in time order"
+
+    with pytest.raises(ValueError, match="opacity"):
+        TimelineClip(at_s=0, duration_s=2,
+                     keys=[{"prop": "opacity", "t": 0, "value": 2}])
+    with pytest.raises(ValueError, match="same instant"):
+        TimelineClip(at_s=0, duration_s=2, keys=[
+            {"prop": "x", "t": 0.5, "value": 0},
+            {"prop": "x", "t": 0.5, "value": 1},
+        ])
+    with pytest.raises(ValueError):
+        TimelineClip(at_s=0, duration_s=2,
+                     keys=[{"prop": "spin", "t": 0, "value": 1}])
+
+
+def test_easing_shapes_the_curve(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1,
+                     zoom=[{"t": 0, "scale": 1, "ease": "in_out"},
+                           {"t": 1, "scale": 2}]),
+    ])])
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    # smoothstep: u*u*(3-2u)
+    assert "*(3-2*(" in g
+
+
+def test_zoom_keyframes_follow_the_clip_as_placed_not_as_drawn(isolated):
+    """Under a dissolve the clip's picture runs longer, and through an export
+    window it starts partway: the keyframes still sit where the user put them."""
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    zoom = [{"t": 0, "scale": 1}, {"t": 1, "scale": 2}]
+    tail = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, zoom=zoom),
+        TimelineClip(at_s=2, duration_s=2, start_s=6,
+                     transition={"kind": "dissolve", "duration_s": 0.5}),
+    ])])
+    g = compose_graph(tail, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60).filter_complex
+    assert "lt(it,2.0000)" in g, "the zoom ends at the cut, not under the dissolve"
+
+    windowed = Timeline(export={"from_s": 1}, layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, zoom=zoom),
+    ])])
+    g = compose_graph(windowed, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60).filter_complex
+    # the window starts halfway through the zoom: its first point is 1s gone
+    assert "lt(it,-1.0000)" in g
+
+
+def test_animated_volume_runs_on_the_clips_clock(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=3, duration_s=2, start_s=1, keys=[
+            {"prop": "volume", "t": 0, "value": 0},
+            {"prop": "volume", "t": 1, "value": 1},
+        ]),
+    ])])
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60).filter_complex
+    assert ":eval=frame" in g
+    # the volume comes before the delay that places the clip at 3s
+    assert g.index("volume='") < g.index("adelay=3000")
+
+
+def _blue_over_red(*keys, scale=1.0):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    return Timeline(layers=[
+        Layer(clips=[TimelineClip(at_s=0, duration_s=2, source="media",
+                                  media_id="red")]),
+        Layer(clips=[TimelineClip(at_s=0, duration_s=2, source="media",
+                                  media_id="blue", transform={"scale": scale},
+                                  keys=list(keys))]),
+    ])
+
+
+def test_scale_and_opacity_animate_together(isolated, short_sample, tmp_path):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _blue_over_red({"prop": "scale", "t": 0, "value": 0.5},
+                       {"prop": "scale", "t": 1, "value": 0.5},
+                       {"prop": "opacity", "t": 0, "value": 0},
+                       {"prop": "opacity", "t": 1, "value": 1}),
+        lib, short_sample, tmp_path / "both.mp4",
+    )
+    q = raw_frame(video, 1.95).reshape(45, 80, 3)
+    assert q[22, 40, 2] > 180, "the centre is blue at the end"
+    assert q[2, 2, 0] > 180, "the corner shows the red underneath"
+
+
+def test_opacity_keyframes_fade_the_upper_clip_in(isolated, short_sample, tmp_path):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _blue_over_red({"prop": "opacity", "t": 0, "value": 0},
+                       {"prop": "opacity", "t": 1, "value": 1}),
+        lib, short_sample, tmp_path / "opacity.mp4",
+    )
+    early, mid, late = (_rgb(video, s) for s in (0.05, 1.0, 1.95))
+    assert early[0] > 200 and early[2] < 40, "starts on the red underneath"
+    assert 90 < mid[2] < 170 and 90 < mid[0] < 170, "half way, half and half"
+    assert late[2] > 200 and late[0] < 40
+
+
+def test_an_ease_in_holds_back_the_first_half(isolated, short_sample, tmp_path):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _blue_over_red({"prop": "opacity", "t": 0, "value": 0, "ease": "in"},
+                       {"prop": "opacity", "t": 1, "value": 1}),
+        lib, short_sample, tmp_path / "ease.mp4",
+    )
+    # u² at the half: a quarter of the blue, where linear gives half
+    assert 30 < _rgb(video, 1.0)[2] < 100
+
+
+def test_position_keyframes_move_the_clip_across(isolated, short_sample, tmp_path):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _blue_over_red({"prop": "x", "t": 0, "value": -0.5},
+                       {"prop": "x", "t": 1, "value": 0.5}, scale=0.5),
+        lib, short_sample, tmp_path / "move.mp4",
+    )
+
+    def blue_side(t):
+        q = raw_frame(video, t).reshape(45, 80, 3)
+        return q[:, :40, 2].mean(), q[:, 40:, 2].mean()
+
+    left, right = blue_side(0.05)
+    assert left > right + 60, "starts on the left"
+    left, right = blue_side(1.95)
+    assert right > left + 60, "ends on the right"
+
+
+def test_scale_keyframes_grow_the_clip(isolated, short_sample, tmp_path):
+    lib = _solid_colours(tmp_path)
+    video = _render_with_library(
+        _blue_over_red({"prop": "scale", "t": 0, "value": 0.2},
+                       {"prop": "scale", "t": 1, "value": 1}),
+        lib, short_sample, tmp_path / "grow.mp4",
+    )
+    import numpy as np
+
+    def blue_width(t):
+        q = raw_frame(video, t).reshape(45, 80, 3)
+        blue = (q[:, :, 2] > 180) & (q[:, :, 0] < 80)
+        cols = np.where(blue.any(axis=0))[0]
+        return (cols.max() - cols.min() + 1) / 80 if len(cols) else 0.0
+
+    # it really grows -- `scale` with `eval=frame` once kept the first size
+    assert blue_width(0.1) < 0.35
+    assert 0.5 < blue_width(1.0) < 0.7, "half way: 0.6 of the frame"
+    assert blue_width(1.95) > 0.9
