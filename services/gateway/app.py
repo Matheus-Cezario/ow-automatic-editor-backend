@@ -1466,7 +1466,21 @@ _web = Path(get_settings().web_dir)
 if (_web / "index.html").is_file():
     from fastapi.staticfiles import StaticFiles
 
-    app.mount("/", StaticFiles(directory=str(_web), html=True), name="web")
+    class _Revalidated(StaticFiles):
+        """The app's files, with the browser told to ask before reusing them.
+
+        Flutter names its bundles the same on every build (`main.dart.js`), and
+        with no `Cache-Control` the browser caches them by heuristic: a fresh
+        build kept loading the previous one. `no-cache` still lets it keep the
+        file -- it only revalidates, and an unchanged file costs a 304.
+        """
+
+        async def get_response(self, path, scope):
+            response = await super().get_response(path, scope)
+            response.headers["Cache-Control"] = "no-cache"
+            return response
+
+    app.mount("/", _Revalidated(directory=str(_web), html=True), name="web")
 
 
 # The mount comes **last** on purpose: it matches any path, and every route
