@@ -2858,3 +2858,105 @@ def test_scale_keyframes_grow_the_clip(isolated, short_sample, tmp_path):
     assert blue_width(0.1) < 0.35
     assert 0.5 < blue_width(1.0) < 0.7, "half way: 0.6 of the frame"
     assert blue_width(1.95) > 0.9
+
+
+# ── speed ramps ─────────────────────────────────────────────────────────────
+
+_RAMP = [  # 0.5x → 2x across a 2s clip, linear: speed(t) = 0.5 + 0.75 t
+    {"prop": "speed", "t": 0, "value": 0.5},
+    {"prop": "speed", "t": 1, "value": 2},
+]
+
+
+def _ramp_source_offset(t: float) -> float:
+    """∫ (0.5 + 0.75 τ) dτ from 0 to t."""
+    return 0.5 * t + 0.375 * t * t
+
+
+def test_a_ramp_integrates_the_speed(isolated):
+    from owcore.models import TimelineClip
+
+    c = TimelineClip(at_s=0, duration_s=2, start_s=1, keys=_RAMP)
+    assert c.is_ramped
+    assert c.source_offset(1.0) == pytest.approx(_ramp_source_offset(1.0), abs=1e-4)
+    assert c.source_consumed_s == pytest.approx(_ramp_source_offset(2.0), abs=1e-4)
+    assert c.local_for_source(_ramp_source_offset(1.3)) == pytest.approx(1.3, abs=1e-3)
+    # without keys it is the old constant speed
+    plain = TimelineClip(at_s=0, duration_s=2, start_s=1, speed=2)
+    assert plain.source_consumed_s == 4
+    assert plain.local_for_source(3) == 1.5
+
+
+def test_a_ramp_cannot_be_frozen_or_reversed(isolated):
+    from owcore.models import TimelineClip
+
+    for flag in ("freeze", "reverse"):
+        with pytest.raises(ValueError, match="ramp"):
+            TimelineClip(at_s=0, duration_s=2, keys=_RAMP, **{flag: True})
+
+
+def test_a_ramp_is_retimed_and_has_no_clip_sound(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, keys=_RAMP),
+    ])])
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60).filter_complex
+    assert f"trim=duration={_ramp_source_offset(2.0):.3f}" in g
+    assert "setpts='(if(lt(T," in g
+    assert "atrim" not in g, "atempo takes one rate, not a curve"
+
+
+def test_an_export_window_starts_a_ramp_where_its_source_is(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(export={"from_s": 1}, layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=10, keys=_RAMP),
+    ])])
+    c = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30,
+                      source_duration_s=60)
+    seek = c.inputs[1].seek
+    assert seek == pytest.approx(10 + _ramp_source_offset(1.0), abs=1e-3)
+
+
+def _time_coded_source(tmp_path) -> Path:
+    """A video whose red channel says what second it is: 20 levels a second."""
+    from owcore.config import get_settings
+
+    out = tmp_path / "clock.mp4"
+    subprocess.run(
+        [get_settings().ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+         "-i", "color=black:s=160x90:r=30:d=10",
+         "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+         "-vf", "format=rgb24,geq=r='min(255,20*T)':g=0:b=0,format=yuv420p",
+         "-c:v", "libx264", "-qp", "0", "-c:a", "aac", "-shortest", str(out)],
+        check=True,
+    )
+    return out
+
+
+def test_a_ramp_shows_the_source_where_the_integral_says(isolated, tmp_path):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    source = _time_coded_source(tmp_path)
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, keys=_RAMP),
+    ])])
+    video = compose_and_render(t, source, tmp_path / "ramp.mp4")
+
+    def shown(at: float) -> float:
+        return raw_frame(video, at).reshape(-1, 3)[:, 0].mean() / 20
+
+    def rate(a: float, b: float) -> float:
+        # a difference cancels the reading's own lag (~0.1s, measured at 1x
+        # and 2x), which an absolute comparison would trip on
+        return (shown(b) - shown(a)) / (b - a)
+
+    expected = lambda a, b: (_ramp_source_offset(b) - _ramp_source_offset(a)) / (b - a)
+    assert rate(0.1, 0.5) == pytest.approx(expected(0.1, 0.5), abs=0.3), "slow start"
+    assert rate(1.5, 1.9) == pytest.approx(expected(1.5, 1.9), abs=0.3), "fast end"
+    assert rate(1.5, 1.9) > 2 * rate(0.1, 0.5), "it really ramps"
+    assert shown(1.0) == pytest.approx(1 + _ramp_source_offset(1.0), abs=0.2)
