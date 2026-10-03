@@ -2645,3 +2645,45 @@ def test_a_transition_cut_off_by_the_export_window_is_dropped(isolated):
 
     # the entrance happened before the window: the clip is already in place
     assert "*W*" not in c.filter_complex
+
+
+# ── the exact preview's frame and window ────────────────────────────────────
+
+
+def test_the_preview_keeps_the_export_shape_on_a_small_frame():
+    from owcore.preview import preview_size
+
+    assert preview_size(0, 0, 2560, 1440) == (640, 360)
+    # a vertical export stays vertical
+    assert preview_size(1080, 1920, 2560, 1440) == (360, 640)
+    assert preview_size(1080, 1080, 1920, 1080) == (640, 640)
+
+
+def test_the_preview_window_is_clamped_to_the_montage():
+    import pytest
+    from owcore.preview import PREVIEW_MAX_S, preview_window
+
+    assert preview_window(10, None, None) == (0, 10)
+    assert preview_window(10, 4, 30) == (4, 10)
+    assert preview_window(500, 0, None) == (0, PREVIEW_MAX_S)
+    with pytest.raises(ValueError):
+        preview_window(10, 12, 20)
+
+
+def test_the_preview_timeline_only_changes_the_export():
+    from owcore.preview import PREVIEW_CRF, preview_timeline
+
+    spec = Timeline(
+        cuts=[{"start_s": 1, "duration_s": 2, "at_s": 0}],
+        export={"fit": "contain", "fps": 60},
+    )
+    small = preview_timeline(
+        spec, from_s=0.5, to_s=1.5,
+        source_width=640, source_height=360, source_fps=24,
+    )
+    assert small.layers == spec.layers
+    assert (small.export.width, small.export.height) == (640, 360)
+    assert small.export.fps == 30
+    assert small.export.crf == PREVIEW_CRF
+    assert small.export.fit == spec.export.fit
+    assert (small.export.from_s, small.export.to_s) == (0.5, 1.5)

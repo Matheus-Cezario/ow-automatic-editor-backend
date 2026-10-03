@@ -363,12 +363,37 @@ def proxy(src: Path, dest: Path, *, width: int = 640, fps: float = 24.0) -> Path
     return dest
 
 
-def compose(comp, dest: Path) -> Path:
+def with_audio(video_src: Path, audio_src: Path, dest: Path) -> Path:
+    """`video_src`'s picture with `audio_src`'s sound, in one file.
+
+    A proxy is made without audio (`-an`): it only ever fed the monitor. The
+    exact preview reads proxies to stay fast, but the graph it runs needs the
+    sound too -- the game's and the clips' -- so the original's audio goes back
+    in. The picture is copied as is; only the sound is encoded, which costs a
+    fraction of decoding the original video. An original without audio gives
+    a file without audio, as it would in the final render.
+    """
+    s = get_settings()
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _run([
+        s.ffmpeg, "-y", "-v", "error", "-i", str(video_src), "-i", str(audio_src),
+        "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-movflags", "+faststart", str(dest),
+    ])
+    return dest
+
+
+def compose(comp, dest: Path, *, preset: str = "veryfast", audio_kbps: int = 192) -> Path:
     """Runs the graph built by `owcore.compose`.
 
     This is the layered-montage path. The cut-and-splice one still exists for
     single-layer montages, and is more resilient: there a cut that fails costs
     only itself, here an error in the graph brings the whole render down.
+
+    `preset` and `audio_kbps` trade size for speed: the exact preview asks for
+    `ultrafast` and a thin audio track -- it is watched once and thrown away.
     """
     s = get_settings()
     dest = Path(dest)
@@ -378,10 +403,11 @@ def compose(comp, dest: Path) -> Path:
     cmd += comp.input_args()
     cmd += ["-filter_complex", comp.filter_complex, "-map", comp.video_map]
     if comp.audio_map:
-        cmd += ["-map", comp.audio_map, "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+        cmd += ["-map", comp.audio_map, "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+                "-ac", "2"]
     else:
         cmd += ["-an"]
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(comp.crf),
+    cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(comp.crf),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dest)]
     _run(cmd)
     return dest

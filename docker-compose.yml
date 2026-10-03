@@ -137,6 +137,12 @@ services:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: editor } }
 
+  # the exact preview: the final video's graph on a small frame, on a queue of
+  # its own so it never waits behind a full render
+  previewer:
+    <<: *worker
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: previewer } }
+
 volumes:
   pgdata:
   redisdata:
