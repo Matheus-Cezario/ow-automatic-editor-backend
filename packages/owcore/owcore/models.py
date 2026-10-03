@@ -582,6 +582,20 @@ class ExportSpec(BaseModel):
         return (int(w) // 2 * 2, int(h) // 2 * 2)
 
 
+class TextAnim(StrEnum):
+    """How a text comes in or goes out. The same maths runs in the editor's
+    monitor (`text_anim.dart`) and in `owcore.textfx`."""
+
+    NONE = "none"
+    FADE = "fade"
+    #: grows from half size
+    POP = "pop"
+    #: comes up from below (in) / goes down (out)
+    SLIDE = "slide"
+    #: types itself out, letter by letter -- in only
+    TYPEWRITER = "typewriter"
+
+
 class TextStyle(BaseModel):
     """How the text looks.
 
@@ -597,8 +611,13 @@ class TextStyle(BaseModel):
     #: decoration: without it, white text disappears in a bright scene
     outline: float = 0.12
     outline_color: str = "black"
-    #: font path; empty uses the system's
+    #: a font id from the catalogue (`owcore.fonts`); empty is the default.
+    #: Montages saved before the catalogue stored a path, still accepted
     font: str = ""
+    #: how it comes in and goes out, and how long each takes
+    anim_in: TextAnim = TextAnim.NONE
+    anim_out: TextAnim = TextAnim.NONE
+    anim_s: float = 0.35
 
     @model_validator(mode="after")
     def _check_coherent(self) -> "TextStyle":
@@ -606,6 +625,10 @@ class TextStyle(BaseModel):
             raise ValueError("text size goes from 0.01 to 0.5 of the height")
         if not 0.0 <= self.outline <= 1.0:
             raise ValueError("outline goes from 0 to 1 of the letter size")
+        if not 0.05 <= self.anim_s <= 3.0:
+            raise ValueError("a text animation lasts from 0.05 to 3 seconds")
+        if self.anim_out is TextAnim.TYPEWRITER:
+            raise ValueError("typewriter is an entrance only")
         return self
 
 

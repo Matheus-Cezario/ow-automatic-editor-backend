@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     data_dir: Path = REPO_ROOT / "data"
     profiles_dir: Path = REPO_ROOT / "config" / "profiles"
     templates_dir: Path = REPO_ROOT / "templates"
+    #: the text fonts the editor offers, with `catalog.json`
+    fonts_dir: Path = REPO_ROOT / "fonts"
 
     #: The compiled Flutter app. The frontend is a sibling project of the
     #: backend, so the default points outside here; in the container it is

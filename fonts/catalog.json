@@ -1,0 +1,81 @@
+{
+  "fonts": [
+    {
+      "id": "anton",
+      "name": "Anton",
+      "file": "anton/Anton-Regular.ttf",
+      "category": "title",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "bebas-neue",
+      "name": "Bebas Neue",
+      "file": "bebasneue/BebasNeue-Regular.ttf",
+      "category": "title",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "oswald",
+      "name": "Oswald",
+      "file": "oswald/Oswald[wght].ttf",
+      "category": "title",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "bangers",
+      "name": "Bangers",
+      "file": "bangers/Bangers-Regular.ttf",
+      "category": "title",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "russo-one",
+      "name": "Russo One",
+      "file": "russoone/RussoOne-Regular.ttf",
+      "category": "title",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "teko",
+      "name": "Teko",
+      "file": "teko/Teko[wght].ttf",
+      "category": "title",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "inter",
+      "name": "Inter",
+      "file": "inter/Inter[opsz,wght].ttf",
+      "category": "reading",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "roboto-condensed",
+      "name": "Roboto Condensed",
+      "file": "robotocondensed/RobotoCondensed[wght].ttf",
+      "category": "reading",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "black-ops-one",
+      "name": "Black Ops One",
+      "file": "blackopsone/BlackOpsOne-Regular.ttf",
+      "category": "styled",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "press-start-2p",
+      "name": "Press Start 2P",
+      "file": "pressstart2p/PressStart2P-Regular.ttf",
+      "category": "styled",
+      "license": "OFL-1.1"
+    },
+    {
+      "id": "permanent-marker",
+      "name": "Permanent Marker",
+      "file": "permanentmarker/PermanentMarker-Regular.ttf",
+      "category": "styled",
+      "license": "Apache-2.0"
+    }
+  ]
+}

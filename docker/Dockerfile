@@ -25,6 +25,7 @@ RUN pip install /app/packages/owcore
 
 COPY config /app/config
 COPY templates /app/templates
+COPY fonts /app/fonts
 COPY services/${SERVICE} /app/service
 
 RUN useradd --create-home --uid 1000 ow && mkdir -p /app/data && chown -R ow /app/data
