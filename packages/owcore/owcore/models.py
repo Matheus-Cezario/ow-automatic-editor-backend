@@ -609,6 +609,71 @@ class TextStyle(BaseModel):
         return self
 
 
+class Ease(StrEnum):
+    """How a value travels from one keyframe to the next.
+
+    It belongs to the keyframe the segment **leaves**: an `in_out` key starts
+    slow, speeds up and arrives slow at the next one. Linear is the default
+    because it is what the zoom always did.
+    """
+
+    LINEAR = "linear"
+    #: starts slow, arrives fast -- a punch into the kill
+    IN = "in"
+    #: starts fast, arrives slow -- settling after a move
+    OUT = "out"
+    #: slow at both ends -- the smooth camera move
+    IN_OUT = "in_out"
+
+
+class KeyProp(StrEnum):
+    """What a [ClipKey] animates. Each one replaces its static value while the
+    clip has at least one keyframe for it."""
+
+    #: `transform.x` / `transform.y`: offset from the centre, in half frames
+    X = "x"
+    Y = "y"
+    #: `transform.scale`: the clip's size on the frame
+    SCALE = "scale"
+    #: `transform.opacity`
+    OPACITY = "opacity"
+    #: `audio.volume`
+    VOLUME = "volume"
+
+
+#: the range each animated property accepts -- the same one its static field
+#: accepts, give or take what makes no sense to animate to
+KEY_RANGES: dict[KeyProp, tuple[float, float]] = {
+    KeyProp.X: (-4.0, 4.0),
+    KeyProp.Y: (-4.0, 4.0),
+    KeyProp.SCALE: (0.05, 8.0),
+    KeyProp.OPACITY: (0.0, 1.0),
+    KeyProp.VOLUME: (0.0, 4.0),
+}
+
+
+class ClipKey(BaseModel):
+    """One keyframe of one property, inside the clip.
+
+    `t` is a fraction of the clip, like the zoom's: the animation survives
+    stretching or trimming the block.
+    """
+
+    prop: KeyProp
+    t: float
+    value: float
+    ease: Ease = Ease.LINEAR
+
+    @model_validator(mode="after")
+    def _check_coherent(self) -> "ClipKey":
+        if not 0.0 <= self.t <= 1.0:
+            raise ValueError("a keyframe's t goes from 0 to 1")
+        low, high = KEY_RANGES[self.prop]
+        if not low <= self.value <= high:
+            raise ValueError(f"{self.prop} goes from {low} to {high}")
+        return self
+
+
 class ZoomKey(BaseModel):
     """One point of the zoom animation, inside the clip.
 
@@ -623,6 +688,8 @@ class ZoomKey(BaseModel):
     #: where the lens points, from the centre, -1 to 1
     x: float = 0.0
     y: float = 0.0
+    #: how the zoom travels to the next point
+    ease: Ease = Ease.LINEAR
 
     @model_validator(mode="after")
     def _check_coherent(self) -> "ZoomKey":
@@ -679,6 +746,11 @@ class TimelineClip(BaseModel):
     #: frame (the PiP).
     zoom: list[ZoomKey] = Field(default_factory=list)
 
+    #: Keyframes of position, scale, opacity and volume. A property with at
+    #: least one key is animated, and its static value (`transform`, `audio`)
+    #: stops counting; one with none keeps the static value.
+    keys: list[ClipKey] = Field(default_factory=list)
+
     #: Freezes on the last frame instead of running. The duration is still the
     #: clip's; what changes is that the picture stops.
     freeze: bool = False
@@ -710,6 +782,10 @@ class TimelineClip(BaseModel):
             ts = [k.t for k in self.zoom]
             if ts != sorted(ts):
                 raise ValueError("keyframes must be in order")
+        for prop in KeyProp:
+            ts = [k.t for k in self.keys_for(prop)]
+            if len(set(ts)) != len(ts):
+                raise ValueError(f"two {prop} keyframes at the same instant")
         if self.freeze and self.reverse:
             raise ValueError("freezing and reversing at the same time makes no sense")
         if self.source is ClipSource.TEXT and not self.text.strip():
@@ -753,9 +829,15 @@ class TimelineClip(BaseModel):
             and self.transition is None
             and self.speed == 1.0
             and not self.zoom
+            and not self.keys
             and not self.freeze
             and not self.reverse
         )
+
+    def keys_for(self, prop: KeyProp | str) -> list[ClipKey]:
+        """This property's keyframes, in time order."""
+        prop = KeyProp(prop)
+        return sorted((k for k in self.keys if k.prop == prop), key=lambda k: k.t)
 
     def as_cut(self) -> TimelineCut:
         """The V1 view of this clip, for the cut-and-splice path."""
