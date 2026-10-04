@@ -3202,3 +3202,16 @@ def test_a_preset_with_an_unknown_transition_is_refused(isolated):
 
     with pytest.raises(ValueError, match="transition"):
         Recipe(transition="spin")
+
+
+def test_a_clip_name_is_kept_and_never_drawn(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    c = TimelineClip(at_s=0, duration_s=2, start_s=10, label="the flank")
+    assert TimelineClip(**c.model_dump()).label == "the flank"
+    g = compose_graph(Timeline(layers=[Layer(clips=[c])]), source=Path("x.mp4"),
+                      width=640, height=360, fps=30).filter_complex
+    assert "flank" not in g
+    with pytest.raises(ValueError, match="80"):
+        TimelineClip(at_s=0, duration_s=2, label="x" * 81)

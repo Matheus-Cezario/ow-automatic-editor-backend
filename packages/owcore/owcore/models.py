@@ -775,6 +775,9 @@ class TimelineClip(BaseModel):
     fill: str = "black"
     #: id of the library item when `source` is MEDIA
     media_id: str | None = None
+    #: the name the user gave the clip -- shown on the editor's ruler, not
+    #: drawn in the video
+    label: str = ""
     #: what is written, when `source` is TEXT
     text: str = ""
     text_style: TextStyle = Field(default_factory=TextStyle)
@@ -837,6 +840,8 @@ class TimelineClip(BaseModel):
             raise ValueError("freezing and reversing at the same time makes no sense")
         if self.is_ramped and (self.freeze or self.reverse):
             raise ValueError("a speed ramp cannot be frozen or reversed")
+        if len(self.label) > 80:
+            raise ValueError("a clip name has at most 80 characters")
         if self.source is ClipSource.TEXT and not self.text.strip():
             raise ValueError("a text clip needs text")
         if self.transition and self.transition.duration_s > self.duration_s + 1e-6:
