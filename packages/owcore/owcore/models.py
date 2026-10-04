@@ -993,6 +993,8 @@ class Layer(BaseModel):
     hidden: bool = False
     #: locked changes nothing in the render -- it is the app that refuses edits
     locked: bool = False
+    #: drawn as a thin strip in the editor; nothing to do with the render
+    collapsed: bool = False
     clips: list[TimelineClip] = Field(default_factory=list)
 
     @model_validator(mode="after")

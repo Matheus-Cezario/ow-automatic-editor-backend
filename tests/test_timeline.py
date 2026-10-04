@@ -511,6 +511,16 @@ def test_the_draft_remembers_the_markers(isolated, short_sample):
     assert r.status_code == 422
 
 
+def test_the_draft_remembers_a_collapsed_layer(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    api().put(
+        f"/api/jobs/{job_id}/draft",
+        json={"layers": [{"collapsed": True, "clips": []}, {"clips": []}]},
+    )
+    layers = api().get(f"/api/jobs/{job_id}").json()["draft"]["layers"]
+    assert [l["collapsed"] for l in layers] == [True, False]
+
+
 def test_the_draft_remembers_the_mix_and_the_output_format(
     isolated, short_sample
 ):
