@@ -3244,3 +3244,85 @@ def test_a_clip_name_is_kept_and_never_drawn(isolated):
     assert "flank" not in g
     with pytest.raises(ValueError, match="80"):
         TimelineClip(at_s=0, duration_s=2, label="x" * 81)
+
+
+def test_crop_and_rotation_go_into_the_graph_in_order(isolated):
+    """Crop, then mirror, then rotate -- and a neutral transform adds none."""
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, transform={
+            "crop_left": 0.25, "crop_bottom": 0.5, "flip_h": True,
+            "rotation": 90,
+        }),
+    ])])
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    assert "crop=480:180:160:0" in g
+    assert "pad=640:360:160:0:color=black@0.0" in g
+    assert g.index("crop=480") < g.index("hflip") < g.index("rotate=")
+    assert "rotw(1.570796)" in g
+
+    plain = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, transform={"scale": 0.5}),
+    ])])
+    g = compose_graph(plain, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    assert "rotate=" not in g and "hflip" not in g and "pad=640" not in g
+
+
+def test_a_crop_that_leaves_nothing_is_refused():
+    from owcore.models import Transform
+
+    with pytest.raises(ValueError):
+        Transform(crop_left=0.5, crop_right=0.5)
+    with pytest.raises(ValueError):
+        Transform(rotation=400)
+    assert not Transform(rotation=360).has_turn
+    assert not Transform(rotation=0, crop_top=0.1).is_neutral
+
+
+def test_a_cropped_upper_clip_shows_the_lower_one_where_it_was_cut(
+    isolated, short_sample, tmp_path
+):
+    """The cut edges are transparent: the layer below shows through there,
+    and the uncut part is the upper clip's picture."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    lower = TimelineClip(at_s=0, duration_s=1, start_s=1)
+    upper = TimelineClip(at_s=0, duration_s=1, start_s=6,
+                         transform={"crop_left": 0.5})
+    together = compose_and_render(
+        Timeline(layers=[Layer(clips=[lower]), Layer(clips=[upper])]),
+        short_sample, tmp_path / "together.mp4",
+    )
+    lower_only = compose_and_render(
+        Timeline(layers=[Layer(clips=[lower])]),
+        short_sample, tmp_path / "lower.mp4",
+    )
+    upper_only = compose_and_render(
+        Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=1, start_s=6)])]),
+        short_sample, tmp_path / "upper.mp4",
+    )
+    a, lo, up = (raw_frame(v, 0.5).reshape(45, 80, 3)
+                 for v in (together, lower_only, upper_only))
+    # left half: the lower layer; right half: the upper clip
+    assert abs(a[:, :36] - lo[:, :36]).mean() < 12
+    assert abs(a[:, 44:] - up[:, 44:]).mean() < 12
+
+
+def test_a_rotated_clip_renders(isolated, short_sample, tmp_path):
+    """`rotate` with a grown frame must get through ffmpeg and come out the
+    canvas size."""
+    from owcore import ffmpeg
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    out = compose_and_render(
+        Timeline(layers=[Layer(clips=[TimelineClip(
+            at_s=0, duration_s=1, start_s=1,
+            transform={"rotation": 30, "flip_v": True, "scale": 0.8})])]),
+        short_sample, tmp_path / "turned.mp4",
+    )
+    info = ffmpeg.probe(out)
+    src = ffmpeg.probe(short_sample)
+    assert (info.width, info.height) == (src.width, src.height)

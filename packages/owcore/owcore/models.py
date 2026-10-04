@@ -349,13 +349,47 @@ class Transform(BaseModel):
     y: float = 0.0
     opacity: float = 1.0
 
+    #: What is cut off each edge, as a fraction of the frame. The picture
+    #: keeps its size and place: the cut edges become transparent, so a
+    #: cropped killfeed can sit over another clip.
+    crop_left: float = 0.0
+    crop_top: float = 0.0
+    crop_right: float = 0.0
+    crop_bottom: float = 0.0
+    #: degrees, clockwise, around the frame's centre; the corners that turn
+    #: out of the frame are kept whole, the frame edge cuts them
+    rotation: float = 0.0
+    flip_h: bool = False
+    flip_v: bool = False
+
     @model_validator(mode="after")
     def _check_coherent(self) -> "Transform":
         if self.scale <= 0:
             raise ValueError("scale must be greater than zero")
         if not 0.0 <= self.opacity <= 1.0:
             raise ValueError("opacity must be between 0 and 1")
+        crops = (self.crop_left, self.crop_top, self.crop_right, self.crop_bottom)
+        if any(not 0.0 <= c <= 0.9 for c in crops):
+            raise ValueError("a crop is between 0 and 0.9 of the frame")
+        if (
+            self.crop_left + self.crop_right > 0.95
+            or self.crop_top + self.crop_bottom > 0.95
+        ):
+            raise ValueError("the crop leaves nothing of the picture")
+        if not -360.0 <= self.rotation <= 360.0:
+            raise ValueError("rotation is between -360 and 360 degrees")
         return self
+
+    @property
+    def has_crop(self) -> bool:
+        return any(
+            (self.crop_left, self.crop_top, self.crop_right, self.crop_bottom)
+        )
+
+    @property
+    def has_turn(self) -> bool:
+        """Rotated or mirrored."""
+        return self.rotation % 360 != 0 or self.flip_h or self.flip_v
 
     @property
     def is_neutral(self) -> bool:
@@ -365,6 +399,8 @@ class Transform(BaseModel):
             and self.x == 0.0
             and self.y == 0.0
             and self.opacity == 1.0
+            and not self.has_crop
+            and not self.has_turn
         )
 
 

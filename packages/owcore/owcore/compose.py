@@ -31,6 +31,8 @@ canvas itself.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +46,7 @@ from .models import (
     MediaKind,
     Timeline,
     TimelineClip,
+    Transform,
     TransitionKind,
 )
 
@@ -310,6 +313,40 @@ def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
     ]
 
 
+def _crop_turn_chain(t: Transform, width: int, height: int) -> list[str]:
+    """Crop, mirror and rotate the canvas-sized clip, in that order.
+
+    The crop cuts the edges **away** -- the picture keeps its size and place
+    and what was cut becomes transparent (`crop` then `pad` back), which is
+    what lets a cropped killfeed sit over another clip. It works on the
+    canvas-sized frame, so the fractions are the ones the editor drew.
+
+    The rotation grows the frame to hold the turned picture whole
+    (`rotw`/`roth`); the overlay centres it and the canvas cuts what sticks
+    out, as the editor's monitor does.
+    """
+    if not (t.has_crop or t.has_turn):
+        return []
+    steps = ["format=rgba"]
+    if t.has_crop:
+        left = round(width * t.crop_left)
+        top = round(height * t.crop_top)
+        w = max(2, width - left - round(width * t.crop_right))
+        h = max(2, height - top - round(height * t.crop_bottom))
+        steps.append(f"crop={w}:{h}:{left}:{top}")
+        steps.append(f"pad={width}:{height}:{left}:{top}:color=black@0.0")
+    if t.flip_h:
+        steps.append("hflip")
+    if t.flip_v:
+        steps.append("vflip")
+    if t.rotation % 360:
+        a = f"{math.radians(t.rotation):.6f}"
+        steps.append(
+            f"rotate=a={a}:ow='rotw({a})':oh='roth({a})':c=none"
+        )
+    return steps
+
+
 def _zoom_chain(
     clip: TimelineClip, width: int, height: int, fps: float, clock: KeyClock
 ) -> list[str]:
@@ -409,6 +446,9 @@ def _video_chain(
             f":contrast={clip.color.contrast:.4f}"
             f":saturation={clip.color.saturation:.4f}"
         )
+
+    if clip.source is not ClipSource.TEXT:
+        steps += _crop_turn_chain(clip.transform, width, height)
 
     # Keyframes run on the clip's own clock: `T` below is the frame's time
     # with the speed applied, starting at the clip's first frame
