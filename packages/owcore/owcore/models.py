@@ -1127,6 +1127,17 @@ def _track_as_block(
     )
 
 
+class Marker(BaseModel):
+    """A note pinned to an instant of the montage -- "the drop starts here".
+
+    It lives only in the editor: the ruler shows it and the magnet snaps to it.
+    The video never sees it.
+    """
+
+    t_s: float = Field(ge=0)
+    label: str = Field(default="", max_length=40)
+
+
 class MontageDraft(BaseModel):
     """The montage **in progress**, exactly as it was left on screen.
 
@@ -1161,6 +1172,10 @@ class MontageDraft(BaseModel):
     duck_plays: bool = False
     duck_level: float = 0.3
     export: ExportSpec = Field(default_factory=ExportSpec)
+
+    #: the editor's notes on the ruler; work like the rest, so they survive
+    #: an F5
+    markers: list[Marker] = Field(default_factory=list, max_length=200)
 
     @model_validator(mode="after")
     def _track_becomes_block(self) -> "MontageDraft":

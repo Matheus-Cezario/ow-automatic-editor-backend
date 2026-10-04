@@ -492,6 +492,25 @@ def test_the_draft_remembers_the_beat_grid_corrections(
     assert draft["beat_bar"] == 4
 
 
+def test_the_draft_remembers_the_markers(isolated, short_sample):
+    """Notes on the ruler are work too; a bad one is refused, not stored."""
+    job_id = run_analysis(short_sample)
+    api().put(
+        f"/api/jobs/{job_id}/draft",
+        json={"cuts": [], "markers": [{"t_s": 4.5, "label": "drop"},
+                                      {"t_s": 9.0}]},
+    )
+    draft = api().get(f"/api/jobs/{job_id}").json()["draft"]
+    assert draft["markers"] == [{"t_s": 4.5, "label": "drop"},
+                                {"t_s": 9.0, "label": ""}]
+
+    r = api().put(
+        f"/api/jobs/{job_id}/draft",
+        json={"cuts": [], "markers": [{"t_s": -1}]},
+    )
+    assert r.status_code == 422
+
+
 def test_the_draft_remembers_the_mix_and_the_output_format(
     isolated, short_sample
 ):
