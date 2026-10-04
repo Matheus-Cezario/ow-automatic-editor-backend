@@ -3161,3 +3161,44 @@ def test_ducking_dips_the_music_at_the_play(isolated, tmp_path):
     away, at_play = rms(0.1, 0.8), rms(1.45, 1.9)
     assert at_play == pytest.approx(0.25 * away, rel=0.2), (away, at_play)
     assert rms(2.6, 2.9) == pytest.approx(away, rel=0.1), "and back up after"
+
+
+# ── templates: the style a preset carries ──────────────────────────────────
+
+
+def test_a_preset_keeps_the_montage_style(isolated):
+    from test_pipeline import api
+
+    style = {
+        "kinds": ["kill"], "zoom": True, "zoom_smooth": True,
+        "transition": "dissolve", "transition_s": 0.4,
+        "ramp": True, "ramp_slow": 0.3,
+        "duck_plays": True, "duck_level": 0.2,
+        "counter": True,
+        "label_style": {"font": "anton", "color": "yellow", "size": 0.12,
+                        "anim_in": "pop", "anim_out": "fade"},
+    }
+    created = api().post("/api/presets", json={"name": "punchy", "data": style})
+    assert created.status_code in (200, 201), created.text
+    item = next(p for p in api().get("/api/presets").json()["items"]
+                if p["name"] == "punchy")
+    data = item["data"]
+    assert (data["transition"], data["ramp"], data["duck_plays"]) == ("dissolve", True, True)
+    assert data["label_style"]["anim_in"] == "pop"
+    assert data["label_style"]["font"] == "anton"
+
+
+def test_an_old_preset_still_reads(isolated):
+    from owcore.models import Recipe
+
+    old = Recipe(**{"kinds": ["kill"], "zoom": True, "fade_s": 0.2})
+    assert (old.transition, old.ramp, old.duck_plays, old.label_style) == (
+        "", False, False, None,
+    )
+
+
+def test_a_preset_with_an_unknown_transition_is_refused(isolated):
+    from owcore.models import Recipe
+
+    with pytest.raises(ValueError, match="transition"):
+        Recipe(transition="spin")

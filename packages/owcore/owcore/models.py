@@ -1037,8 +1037,24 @@ class Recipe(BaseModel):
 
     #: effects applied to each cut
     zoom: bool = False
+    #: the zoom eases in and out instead of punching
+    zoom_smooth: bool = False
     fade_s: float = 0.0
     speed: float = 1.0
+
+    #: how each cut enters over the one before -- empty is a plain cut
+    transition: str = ""
+    transition_s: float = 0.5
+    #: slow motion through each play, full speed around it
+    ramp: bool = False
+    ramp_slow: float = 0.35
+
+    #: ducking at the plays (see `Timeline.duck_plays`)
+    duck_plays: bool = False
+    duck_level: float = 0.3
+
+    #: how the labels the system writes look -- `None` keeps the default
+    label_style: TextStyle | None = None
 
     #: text the system writes by itself
     counter: bool = False
@@ -1060,6 +1076,14 @@ class Recipe(BaseModel):
             raise ValueError("gap_s cannot be negative")
         if self.max_cuts < 0:
             raise ValueError("max_cuts cannot be negative")
+        if self.transition and self.transition not in {k.value for k in TransitionKind}:
+            raise ValueError(f"unknown transition {self.transition!r}")
+        if not 0.05 <= self.transition_s <= 3.0:
+            raise ValueError("transition_s goes from 0.05 to 3")
+        if not 0.1 <= self.ramp_slow <= 1.0:
+            raise ValueError("ramp_slow goes from 0.1 to 1")
+        if not 0.0 <= self.duck_level <= 1.0:
+            raise ValueError("duck_level goes from 0 to 1")
         if not 0.1 <= self.speed <= 8.0:
             raise ValueError("speed vai de 0.1 a 8")
         if self.fade_s < 0:
