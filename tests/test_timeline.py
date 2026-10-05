@@ -3230,7 +3230,7 @@ def test_a_preset_with_an_unknown_transition_is_refused(isolated):
     from owcore.models import Recipe
 
     with pytest.raises(ValueError, match="transition"):
-        Recipe(transition="spin")
+        Recipe(transition="teleport")
 
 
 def test_a_clip_name_is_kept_and_never_drawn(isolated):
@@ -3487,3 +3487,58 @@ def test_blend_modes_and_the_key_render_as_they_should(isolated, tmp_path):
 
     plain = render_from(green_src, "plain")
     assert plain[centre][..., 1].mean() > 200
+
+
+def test_new_transitions_are_one_geq_switched_on_for_their_length(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    for kind in ("wipe_left", "wipe_up", "zoom", "spin", "glitch"):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=1),
+            TimelineClip(at_s=2, duration_s=2, start_s=6,
+                         transition={"kind": kind, "duration_s": 0.5}),
+        ])])
+        g = compose_graph(t, source=Path("x.mp4"), width=640, height=360,
+                          fps=30).filter_complex
+        assert "enable='lt(t,0.500)'" in g, kind
+        # the glitch is a hard cut: the clip before does not run on underneath
+        first_trim = g.split("[1:v]trim=duration=")[1].split(",")[0]
+        assert first_trim == ("2.000" if kind == "glitch" else "2.500"), kind
+
+
+def test_new_transitions_render(isolated, tmp_path):
+    """A wipe half-way has uncovered half the frame; zoom, spin and glitch
+    get through ffmpeg."""
+    from owcore import ffmpeg as ff
+    from owcore.compose import LibraryFile, compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    grey = _solid(tmp_path / "grey.mp4", "0x808080", seconds=3)
+    white = _solid(tmp_path / "white.mp4", "white", seconds=3)
+
+    def render(kind):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=1, start_s=0),
+            TimelineClip(at_s=1, duration_s=1.5, start_s=0, source="media",
+                         media_id="m",
+                         transition={"kind": kind, "duration_s": 1.0}),
+        ])])
+        info = ff.probe(grey)
+        c = compose_graph(t, source=grey, width=info.width, height=info.height,
+                          fps=info.fps, source_duration_s=info.duration_s,
+                          library={"m": LibraryFile(path=white)})
+        dest = tmp_path / f"{kind}.mp4"
+        ff.compose(c, dest)
+        return dest
+
+    half = raw_frame(render("wipe_left"), 1.5).reshape(45, 80, 3)
+    assert half[:, :30].mean() < 150, "the left is still the clip before"
+    assert half[:, 50:].mean() > 230, "the right is already the new clip"
+
+    for kind in ("zoom", "spin", "glitch"):
+        out = render(kind)
+        assert raw_frame(out, 2.3).mean() > 230, kind  # settled on the new clip
+        if kind != "glitch":
+            # a fifth of the way in, the new clip is still mostly see-through
+            assert raw_frame(out, 1.2).mean() < 200, kind

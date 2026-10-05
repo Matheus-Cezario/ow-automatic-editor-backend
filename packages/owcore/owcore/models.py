@@ -580,6 +580,17 @@ class TransitionKind(StrEnum):
     SLIDE_RIGHT = "slide_right"
     SLIDE_UP = "slide_up"
     SLIDE_DOWN = "slide_down"
+    #: a moving edge uncovers the new clip; named after the edge's movement
+    WIPE_LEFT = "wipe_left"
+    WIPE_RIGHT = "wipe_right"
+    WIPE_UP = "wipe_up"
+    WIPE_DOWN = "wipe_down"
+    #: the new clip arrives enlarged and settles while it appears
+    ZOOM = "zoom"
+    #: the new clip turns and grows into place while it appears
+    SPIN = "spin"
+    #: a hard cut, torn: colour channels split and bands of the picture jump
+    GLITCH = "glitch"
 
     @property
     def overlaps(self) -> bool:
@@ -590,7 +601,11 @@ class TransitionKind(StrEnum):
         cut. A dip to black or white does not mix anything: one goes out, the
         other comes in.
         """
-        return self not in (TransitionKind.FADE_BLACK, TransitionKind.FADE_WHITE)
+        return self not in (
+            TransitionKind.FADE_BLACK,
+            TransitionKind.FADE_WHITE,
+            TransitionKind.GLITCH,
+        )
 
 
 class ClipTransition(BaseModel):

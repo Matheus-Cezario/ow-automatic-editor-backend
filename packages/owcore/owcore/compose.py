@@ -41,6 +41,7 @@ from .models import (
     MIN_CUT_S,
     BlendMode,
     ClipSource,
+    ClipTransition,
     Ease,
     Fit,
     KeyProp,
@@ -438,6 +439,60 @@ def _blend_chain(
     ]
 
 
+def _entrance_chain(tr: "ClipTransition") -> list[str]:
+    """Wipes, zoom, spin and glitch: the entering clip's own pixels, remapped
+    for the transition's length.
+
+    One `geq` per kind, switched on only while the transition lasts
+    (`enable`), so the rest of the clip pays nothing. `T` is the clip's own
+    clock here and `p` the progress, 0 to 1. Zoom and spin sample the picture
+    through an inverse scale and rotation around its centre, the way the
+    keyframed scale does.
+    """
+    k = tr.kind
+    d = f"{tr.duration_s:.3f}"
+    p = f"min(1,T/{d})"
+    q = f"(1-{p})"  # what is left
+    rgb = "r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
+    on = f"enable='lt(t,{d})'"
+    if k in _WIPE_EDGE:
+        visible = _WIPE_EDGE[k].format(p=p)
+        return ["format=rgba", f"geq={rgb}:a='alpha(X,Y)*{visible}':{on}"]
+    if k in (TransitionKind.ZOOM, TransitionKind.SPIN):
+        if k is TransitionKind.ZOOM:
+            z, th = f"(1+0.5*{q}*{q})", "0"
+        else:
+            z, th = f"(1-0.7*{q}*{q})", f"(-PI*{q}*{q})"
+        dx, dy = "(X-W/2)", "(Y-H/2)"
+        sx = f"(({dx}*cos({th})+{dy}*sin({th}))/{z}+W/2)"
+        sy = f"((-{dx}*sin({th})+{dy}*cos({th}))/{z}+H/2)"
+        inside = f"between({sx},0,W-1)*between({sy},0,H-1)"
+        return [
+            "format=rgba",
+            f"geq=r='r({sx},{sy})':g='g({sx},{sy})':b='b({sx},{sy})'"
+            f":a='if({inside},alpha({sx},{sy})*{p},0)':{on}",
+        ]
+    if k is TransitionKind.GLITCH:
+        # bands a twelfth of the frame tall, each jumping its own way, the
+        # red and blue channels pulled apart; it all calms down by the end
+        o = f"(W*0.04*{q}*sin(T*91+floor(Y*12/H)*7.3))"
+        return [
+            "format=rgba",
+            f"geq=r='r(X+{o},Y)':g='g(X+{o}/3,Y)':b='b(X-{o},Y)'"
+            f":a='alpha(X,Y)':{on}",
+        ]
+    return []
+
+
+#: The part of the frame a wipe has uncovered at progress `p`
+_WIPE_EDGE = {
+    TransitionKind.WIPE_LEFT: "gte(X,W*(1-{p}))",
+    TransitionKind.WIPE_RIGHT: "lte(X,W*{p})",
+    TransitionKind.WIPE_UP: "gte(Y,H*(1-{p}))",
+    TransitionKind.WIPE_DOWN: "lte(Y,H*{p})",
+}
+
+
 def _crop_turn_chain(t: Transform, width: int, height: int) -> list[str]:
     """Crop, mirror and rotate the canvas-sized clip, in that order.
 
@@ -616,6 +671,8 @@ def _video_chain(
 
     tr = clip.transition
     dissolve = tr is not None and tr.kind is TransitionKind.DISSOLVE
+    if tr is not None:
+        steps += _entrance_chain(tr)
 
     # alpha only exists in rgba, and from here down everything touches it
     if (
@@ -1012,7 +1069,7 @@ def compose_graph(
                 tr = nxt.transition
                 if tr.kind.overlaps:
                     tail = tr.duration_s
-                else:
+                elif tr.kind in _DIP_COLOR:
                     dip_out = (_DIP_COLOR[tr.kind], tr.duration_s / 2)
             drawn = (
                 original.model_copy(
