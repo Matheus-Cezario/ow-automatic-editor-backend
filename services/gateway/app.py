@@ -222,8 +222,15 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         "clips_only_cuts": without_video,
     }
     if full:
+        from sqlalchemy.orm import object_session
+
+        db = object_session(job)
         data["renders"] = [
-            _render_dict(r, job.clips)
+            _render_dict(
+                r,
+                job.clips,
+                queue_position=_queue_position(db, r) if db is not None else None,
+            )
             for r in sorted(job.renders, key=lambda r: r.created_at, reverse=True)
         ]
         data["events"] = [
@@ -261,7 +268,46 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
     return data
 
 
-def _render_dict(r: Render, all_clips: list[Clip]) -> dict[str, Any]:
+def _render_eta_s(r: Render) -> float | None:
+    """How long the render still needs, or None when it cannot be said yet.
+
+    The rendering part of the bar runs from 0.1 to 0.95, and it advances with
+    ffmpeg's position in each video -- in proportion to time, so the simplest
+    maths holds: what is left, at the speed so far. It is measured from when
+    the editor picked the request up, not from the request: the wait in the
+    queue is not work. Below 5% of the work the error is bigger than the
+    estimate.
+    """
+    if r.status != RenderStatus.RENDERING or r.started_at is None:
+        return None
+    done = (r.progress - 0.1) / 0.85
+    if done < 0.05:
+        return None
+    elapsed = (utcnow() - _as_aware(r.started_at)).total_seconds()
+    if elapsed <= 0:
+        return None
+    left = elapsed * (1 - min(done, 1.0)) / done
+    return round(max(0.0, left), 1)
+
+
+def _queue_position(s, r: Render) -> int | None:
+    """How many requests are still ahead of this one, waiting or rendering
+    -- None once it is being rendered itself."""
+    if r.status != RenderStatus.PENDING:
+        return None
+    return (
+        s.query(Render)
+        .filter(
+            Render.status.in_([RenderStatus.PENDING, RenderStatus.RENDERING]),
+            Render.created_at < r.created_at,
+        )
+        .count()
+    )
+
+
+def _render_dict(
+    r: Render, all_clips: list[Clip], *, queue_position: int | None = None
+) -> dict[str, Any]:
     clips_of_render = [c for c in all_clips if c.render_id == r.id]
     return {
         "id": r.id,
@@ -271,6 +317,9 @@ def _render_dict(r: Render, all_clips: list[Clip]) -> dict[str, Any]:
         "progress": round(r.progress, 3),
         "error": r.error,
         "created_at": _iso(r.created_at),
+        "started_at": _iso(r.started_at) if r.started_at else None,
+        "eta_s": _render_eta_s(r),
+        "queue_position": queue_position,
         "updated_at": _iso(r.updated_at),
         "timelines": [
             {
@@ -638,7 +687,54 @@ def get_render(render_id: str) -> dict[str, Any]:
         request_ = s.get(Render, render_id)
         if request_ is None:
             raise HTTPException(404, "request not found")
-        return _render_dict(request_, list(request_.clips))
+        return _render_dict(
+            request_,
+            list(request_.clips),
+            queue_position=_queue_position(s, request_),
+        )
+
+
+@app.get("/api/renders")
+def list_renders(recent_s: float = 600) -> dict[str, Any]:
+    """The render queue, across every match: what is waiting or rendering,
+    and what finished in the last `recent_s` seconds -- oldest first, the
+    order the editor takes them in."""
+    from datetime import timedelta
+
+    cutoff = (utcnow() - timedelta(seconds=recent_s)).replace(tzinfo=None)
+    with session() as s:
+        rows = (
+            s.query(Render)
+            .filter(
+                (Render.status.in_([RenderStatus.PENDING, RenderStatus.RENDERING]))
+                | (Render.updated_at >= cutoff)
+            )
+            .order_by(Render.created_at)
+            .all()
+        )
+        out = []
+        for r in rows:
+            d = _render_dict(r, list(r.clips), queue_position=_queue_position(s, r))
+            d["job_name"] = r.job.video_name if r.job else ""
+            out.append(d)
+        return {"renders": out}
+
+
+@app.post("/api/renders/{render_id}/cancel")
+def cancel_render(render_id: str) -> dict[str, Any]:
+    """Stops a request that is waiting or rendering. The editor notices
+    within a second, stops ffmpeg and keeps nothing; a request still in the
+    queue is skipped when its turn comes. A finished one cannot be cancelled
+    -- delete it instead."""
+    with session() as s:
+        r = s.get(Render, render_id)
+        if r is None:
+            raise HTTPException(404, "request not found")
+        if not r.is_active:
+            raise HTTPException(409, f"this request is already {r.status}")
+        r.status = RenderStatus.CANCELLED
+        r.stage = RenderStage.CANCELLED
+        return _render_dict(r, list(r.clips))
 
 
 @app.delete("/api/renders/{render_id}", status_code=204)

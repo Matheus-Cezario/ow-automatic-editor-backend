@@ -15,12 +15,13 @@ With no music the video comes out with the match's original audio.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from owcore.config import get_settings
 from owcore.db import session
-from owcore.jobs import fail_render, set_render_status
+from owcore.jobs import fail_render, render_cancelled, set_render_status
 from owcore.models import (
     CLIP_KIND_CUSTOM,
     STREAM_RENDER_READY,
@@ -37,6 +38,10 @@ from owcore.storage import get_storage, local_copy
 from owcore.worker import Worker, run_worker
 
 import render
+
+
+class RenderCancelled(Exception):
+    """The user stopped the request: the work in hand is dropped."""
 
 
 class Editor(Worker):
@@ -56,6 +61,9 @@ class Editor(Worker):
                 return
             if request.clips:
                 self.log.info("request %s was already rendered; skipping", render_id)
+                return
+            if request.status == RenderStatus.CANCELLED:
+                self.log.info("request %s was cancelled while queued", render_id)
                 return
             job = s.get(Job, request.job_id)
             if job is None:
@@ -89,15 +97,32 @@ class Editor(Worker):
             )
             return
 
+        last = [0.0]
+
         def progress(done: float) -> None:
+            # ffmpeg reports twice a second: the database hears at most once
+            # a second, and that is also when a cancel is noticed
+            now = time.monotonic()
+            if now - last[0] < 1.0 and done < 1.0:
+                return
+            last[0] = now
+            if render_cancelled(render_id):
+                raise RenderCancelled(render_id)
             set_render_status(
                 render_id, progress=0.1 + 0.85 * done,
                 stage=RenderStage.RENDERING,
             )
 
-        clips = render.render_all(
-            source, items, work / "clips", on_progress=progress,
-        )
+        try:
+            clips = render.render_all(
+                source, items, work / "clips", on_progress=progress,
+            )
+        except RenderCancelled:
+            self.log.info("request %s cancelled: stopped, nothing kept", render_id)
+            return
+        if render_cancelled(render_id):
+            # stopped between the last report and the end: still nothing kept
+            return
 
         with session() as s:
             for c in clips:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,9 +81,17 @@ def render_all(
     out_dir.mkdir(parents=True, exist_ok=True)
     rendered: list[RenderedClip] = []
 
+    def report(i: int):
+        # each video gets its slice of the bar
+        if on_progress is None:
+            return None
+        return lambda done: on_progress((i + done) / max(1, len(items)))
+
     for i, item in enumerate(items):
         try:
-            clip = _render_timeline(source, item, out_dir, i)
+            clip = _render_timeline(
+                source, item, out_dir, i, on_progress=report(i)
+            )
         except ffmpeg.FFmpegError:
             # a problematic clip must not cost the rest of the delivery
             log.exception(
@@ -97,7 +106,12 @@ def render_all(
 
 
 def _render_timeline(
-    source: Path, item: TimelineItem, out_dir: Path, index: int
+    source: Path,
+    item: TimelineItem,
+    out_dir: Path,
+    index: int,
+    *,
+    on_progress: Callable[[float], None] | None = None,
 ) -> RenderedClip:
     """Assembles exactly what the user drew on the timeline.
 
@@ -116,7 +130,9 @@ def _render_timeline(
     # because one error in it brings down the whole render instead of costing
     # one cut.
     if not spec.single_layer:
-        return _render_composition(source, item, media, out_dir, index)
+        return _render_composition(
+            source, item, media, out_dir, index, on_progress=on_progress
+        )
 
     pieces = tl.plan(spec.cuts, source_duration_s=media.duration_s)
     if not any(p.is_cut for p in pieces):
@@ -138,6 +154,9 @@ def _render_timeline(
     cut_files: list[tuple[Path, tuple[float, float]]] = []
 
     for j, piece in enumerate(pieces):
+        if on_progress is not None:
+            # the cuts are most of the work; the join and the sound the rest
+            on_progress(0.9 * j / max(1, len(pieces)))
         part = parts_dir / f"{j:03d}.mp4"
         if piece.is_cut:
             try:
@@ -228,6 +247,8 @@ def _render_composition(
     media: ffmpeg.MediaInfo,
     out_dir: Path,
     index: int,
+    *,
+    on_progress: Callable[[float], None] | None = None,
 ) -> RenderedClip:
     """Assembles in layers, through a filter graph.
 
@@ -254,7 +275,7 @@ def _render_composition(
     dest: Path | None = out_dir / f"{index:02d}_custom.mp4"
     error_text: str | None = None
     try:
-        ffmpeg.compose(comp, dest)
+        ffmpeg.compose(comp, dest, on_progress=on_progress)
     except ffmpeg.FFmpegError as exc:
         log.exception("composition of '%s' failed", item.title)
         error_text = str(exc)[:500]

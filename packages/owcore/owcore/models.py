@@ -41,6 +41,8 @@ class RenderStatus(StrEnum):
     RENDERING = "rendering"
     DONE = "done"
     FAILED = "failed"
+    #: the user stopped it; nothing it made is kept
+    CANCELLED = "cancelled"
 
 
 class JobStage(StrEnum):
@@ -75,6 +77,7 @@ class RenderStage(StrEnum):
     #: none of the timelines has anything that can be cut
     NOTHING_TO_CUT = "nothing_to_cut"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 class TrackStatus(StrEnum):
@@ -1684,9 +1687,16 @@ class Render(Base):
     #: serialised list of `Timeline` -- the videos the user built
     timelines: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    #: when the editor picked it up: the time left is measured from here,
+    #: not from the request, so the wait in the queue does not count as work
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in (RenderStatus.PENDING, RenderStatus.RENDERING)
 
     job: Mapped[Job] = relationship(back_populates="renders")
     clips: Mapped[list["Clip"]] = relationship(

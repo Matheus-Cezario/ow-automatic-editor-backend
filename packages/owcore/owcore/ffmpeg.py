@@ -58,15 +58,24 @@ def _run_with_progress(
     # video duration only to hand over 25 lines in the end
     rest: deque[str] = deque(maxlen=25)
     assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.strip()
-        key, _, value = line.partition("=")
-        if key == "out_time_us" and value.lstrip("-").isdigit():
-            if duration_s > 0:
-                on_progress(max(0.0, min(1.0, int(value) / 1e6 / duration_s)))
-        elif "=" not in line and line:
-            # not a progress line: this is ffmpeg complaining
-            rest.append(line)
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            key, _, value = line.partition("=")
+            if key == "out_time_us" and value.lstrip("-").isdigit():
+                if duration_s > 0:
+                    on_progress(
+                        max(0.0, min(1.0, int(value) / 1e6 / duration_s))
+                    )
+            elif "=" not in line and line:
+                # not a progress line: this is ffmpeg complaining
+                rest.append(line)
+    except BaseException:
+        # the callback may stop the work (a cancelled render): ffmpeg must
+        # not run on, orphaned, writing a file nobody wants
+        proc.kill()
+        proc.wait()
+        raise
     if proc.wait() != 0:
         raise FFmpegError(
             f"{cmd[0]} exited with {proc.returncode}:\n" + "\n".join(rest)
@@ -385,7 +394,14 @@ def with_audio(video_src: Path, audio_src: Path, dest: Path) -> Path:
     return dest
 
 
-def compose(comp, dest: Path, *, preset: str = "veryfast", audio_kbps: int = 192) -> Path:
+def compose(
+    comp,
+    dest: Path,
+    *,
+    preset: str = "veryfast",
+    audio_kbps: int = 192,
+    on_progress: Callable[[float], None] | None = None,
+) -> Path:
     """Runs the graph built by `owcore.compose`.
 
     This is the layered-montage path. The cut-and-splice one still exists for
@@ -409,7 +425,12 @@ def compose(comp, dest: Path, *, preset: str = "veryfast", audio_kbps: int = 192
         cmd += ["-an"]
     cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(comp.crf),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dest)]
-    _run(cmd)
+    if on_progress is None:
+        _run(cmd)
+    else:
+        # the graph's output lasts `duration_s`: how far ffmpeg has written
+        # into it is how far along it is
+        _run_with_progress(cmd, comp.duration_s, on_progress)
     return dest
 
 

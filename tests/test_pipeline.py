@@ -851,3 +851,122 @@ def test_a_preview_with_another_jobs_media_is_refused(isolated, short_sample):
         }]}]}},
     )
     assert resp.status_code == 422
+
+
+# ── the render queue ─────────────────────────────────────────────────────────
+
+
+def test_the_queue_lists_waiting_requests_in_order(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    first = request_render(job_id)
+    second = request_render(job_id)
+
+    queue = api().get("/api/renders").json()["renders"]
+    ids = [r["id"] for r in queue]
+    assert ids.index(first) < ids.index(second)
+    by_id = {r["id"]: r for r in queue}
+    assert by_id[first]["queue_position"] == 0
+    assert by_id[second]["queue_position"] == 1
+    assert by_id[first]["job_name"]
+    assert by_id[first]["eta_s"] is None, "nothing to estimate while waiting"
+    drain(STREAM_RENDER_READY, "editor")
+
+
+def test_a_cancelled_request_is_skipped_and_keeps_nothing(isolated, short_sample):
+    job_id = run_analysis(short_sample)
+    render_id = request_render(job_id)
+    r = api().post(f"/api/renders/{render_id}/cancel")
+    assert r.status_code == 200 and r.json()["status"] == "cancelled"
+    run_render()
+
+    got = api().get(f"/api/renders/{render_id}").json()
+    assert got["status"] == "cancelled"
+    assert got["clips"] == []
+    # a finished one cannot be cancelled
+    assert api().post(f"/api/renders/{render_id}/cancel").status_code == 409
+
+
+def test_cancelling_mid_render_stops_ffmpeg_and_keeps_nothing(
+    isolated, short_sample, monkeypatch
+):
+    job_id = run_analysis(short_sample)
+    render_id = request_render(job_id)
+    editor = service_module("editor", "main")
+    # the user presses cancel as soon as the work has started
+    monkeypatch.setattr(editor, "render_cancelled", lambda _id: True)
+    run_render()
+
+    got = api().get(f"/api/renders/{render_id}").json()
+    assert got["clips"] == []
+
+
+def test_a_composition_reports_progress_as_it_goes(
+    isolated, short_sample, monkeypatch
+):
+    """A layered render used to sit at 10% until a whole video was done."""
+    job_id = run_analysis(short_sample)
+    tl = montage(job_id, count=3, duration=2.0)
+    # a transform sends it through the filter graph
+    tl["layers"] = [{"clips": [
+        {**c, "transform": {"scale": 0.9}} for c in tl.pop("cuts")
+    ]}]
+    render_id = request_render(job_id, [tl])
+
+    editor = service_module("editor", "main")
+    seen: list[float] = []
+    real = editor.set_render_status
+
+    def spy(rid, status=None, **kw):
+        if kw.get("progress") is not None:
+            seen.append(kw["progress"])
+        return real(rid, status, **kw)
+
+    monkeypatch.setattr(editor, "set_render_status", spy)
+    # report on every ffmpeg line, not once a second
+    monkeypatch.setattr(editor.time, "monotonic", iter(range(0, 10**6, 5)).__next__)
+    run_render()
+
+    assert api().get(f"/api/renders/{render_id}").json()["status"] == "done"
+    middle = [p for p in seen if 0.1 < p < 0.95]
+    assert len(middle) >= 2, seen
+
+
+def test_the_time_left_comes_from_the_work_since_it_started(isolated):
+    from datetime import timedelta
+
+    import pytest
+
+    from owcore.models import Render, utcnow
+
+    gateway = service_module("gateway", "app")
+    r = Render(job_id="x", status="rendering", progress=0.1 + 0.85 * 0.5,
+               started_at=utcnow() - timedelta(seconds=60))
+    assert gateway._render_eta_s(r) == pytest.approx(60, abs=2)
+    r.progress = 0.11
+    assert gateway._render_eta_s(r) is None, "too early to say"
+    r.status = "pending"
+    assert gateway._render_eta_s(r) is None
+
+
+def test_stopping_from_the_progress_callback_kills_ffmpeg(isolated):
+    """A cancel raises inside the callback: ffmpeg must die with it, not run
+    on for the minutes the video would take."""
+    import time as _time
+
+    import pytest
+    from owcore import ffmpeg
+    from owcore.config import get_settings
+
+    class Stop(Exception):
+        pass
+
+    def stop(_):
+        raise Stop
+
+    cmd = [get_settings().ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i",
+           "testsrc2=s=1280x720:r=30:d=600", "-c:v", "libx264", "-preset",
+           "veryslow", "-f", "null", "-"]
+    started = _time.monotonic()
+    with pytest.raises(Stop):
+        ffmpeg._run_with_progress(cmd, 600, stop)
+    assert _time.monotonic() - started < 10
