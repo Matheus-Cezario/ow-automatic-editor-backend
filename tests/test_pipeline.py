@@ -970,3 +970,10 @@ def test_stopping_from_the_progress_callback_kills_ffmpeg(isolated):
     with pytest.raises(Stop):
         ffmpeg._run_with_progress(cmd, 600, stop)
     assert _time.monotonic() - started < 10
+
+
+def test_a_rendered_video_says_how_loud_it_came_out(isolated, short_sample):
+    _, render_id = run_pipeline(short_sample)
+    clip = api().get(f"/api/renders/{render_id}").json()["clips"][0]
+    assert isinstance(clip["meta"]["loudness"], float)
+    assert clip["meta"]["true_peak"] < 1.0

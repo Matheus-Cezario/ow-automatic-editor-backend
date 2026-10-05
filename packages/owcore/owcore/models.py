@@ -687,6 +687,10 @@ class ExportSpec(BaseModel):
     watermark_y: float = -0.82
     watermark_opacity: float = 0.65
 
+    #: Integrated loudness to bring the sound to, in LUFS (-14 is YouTube's
+    #: and Spotify's); None leaves the mix as it is.
+    loudness: float | None = None
+
     #: In a portrait output, the recording's killfeed (top right of the
     #: frame, which a centre crop cuts away) brought back at the top.
     killfeed_inset: bool = False
@@ -700,6 +704,8 @@ class ExportSpec(BaseModel):
 
     @model_validator(mode="after")
     def _check_coherent(self) -> "ExportSpec":
+        if self.loudness is not None and not -30.0 <= self.loudness <= -5.0:
+            raise ValueError("loudness is between -30 and -5 LUFS")
         unknown = set(self.extra_formats) - set(EXTRA_FORMATS)
         if unknown:
             raise ValueError(f"unknown formats: {sorted(unknown)}")
@@ -731,6 +737,7 @@ class ExportSpec(BaseModel):
             and self.to_s is None
             and self.watermark_id is None
             and not self.killfeed_inset
+            and self.loudness is None
         )
 
     def dimensions(self, source_width: int, source_height: int) -> tuple[int, int]:

@@ -434,6 +434,40 @@ def compose(
     return dest
 
 
+def measure_loudness(src: Path) -> tuple[float, float] | None:
+    """(integrated loudness in LUFS, true peak in dBTP) of a file's sound,
+    by EBU R128 -- or None when it has no sound to measure.
+
+    `ebur128` prints its summary to stderr at the end; the two lines read
+    are `I: -14.2 LUFS` and, under True peak, `Peak: -1.3 dBFS`.
+    """
+    s = get_settings()
+    proc = subprocess.run(
+        [s.ffmpeg, "-nostats", "-hide_banner", "-i", str(src), "-vn",
+         "-af", "ebur128=peak=true", "-f", "null", "-"],
+        capture_output=True, text=True, errors="replace",
+    )
+    if proc.returncode != 0:
+        return None
+    summary = proc.stderr.rsplit("Summary:", 1)
+    if len(summary) != 2:
+        return None
+    integrated = peak = None
+    for line in summary[1].splitlines():
+        key, _, value = line.strip().partition(":")
+        number = value.split()[0] if value.split() else ""
+        try:
+            if key == "I":
+                integrated = float(number)
+            elif key == "Peak":
+                peak = float(number)
+        except ValueError:
+            continue
+    if integrated is None or peak is None or integrated < -70:
+        return None  # silence measures -70 LUFS: nothing to report
+    return integrated, peak
+
+
 def thumbnail(src: Path, dest: Path, at: float = 0.0, width: int = 480) -> Path:
     s = get_settings()
     dest = Path(dest)

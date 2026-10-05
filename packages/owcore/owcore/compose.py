@@ -1294,17 +1294,27 @@ def compose_graph(
             # with no music at all, the cuts' original audio stands on its own
             parts += cut_audio
 
+    # with a loudness target the mix goes through one more step
+    mixed = "amixed" if exp.loudness is not None else "aout"
     if len(parts) == 1:
         # mixing a single track is wasted work, and `amix` would also mess with
         # its volume for no reason
-        c.filters.append(f"[{parts[0]}]anull[aout]")
+        c.filters.append(f"[{parts[0]}]anull[{mixed}]")
         c.audio_map = "[aout]"
     elif parts:
         entry = "".join(f"[{p}]" for p in parts)
         c.filters.append(
             f"{entry}amix=inputs={len(parts)}:dropout_transition=0:"
-            f"normalize=0[aout]"
+            f"normalize=0[{mixed}]"
         )
         c.audio_map = "[aout]"
+    if c.audio_map and exp.loudness is not None:
+        # EBU R128 in one pass: brought to the target and kept under -1.5 dBTP
+        # so the platforms' own encoders do not clip it. loudnorm works at
+        # 192 kHz inside; the output goes back to 48 kHz
+        c.filters.append(
+            f"[{mixed}]loudnorm=I={exp.loudness:.1f}:TP=-1.5:LRA=11,"
+            f"aresample=48000[aout]"
+        )
 
     return c

@@ -92,6 +92,12 @@ def render_all(
             clip = _render_timeline(
                 source, item, out_dir, i, on_progress=report(i)
             )
+            if clip.video is not None:
+                # how loud it came out: the app shows it next to the video
+                measured = ffmpeg.measure_loudness(clip.video)
+                if measured is not None:
+                    clip.meta["loudness"] = round(measured[0], 1)
+                    clip.meta["true_peak"] = round(measured[1], 1)
         except ffmpeg.FFmpegError:
             # a problematic clip must not cost the rest of the delivery
             log.exception(

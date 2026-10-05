@@ -3607,3 +3607,29 @@ def test_vertical_framings_render(isolated, short_sample, tmp_path):
     top = lambda v: raw_frame(v, 0.5).reshape(45, 80, 3)[:4].mean()
     assert top(contained) < 8
     assert top(blurred) > top(contained) + 10
+
+
+def test_a_loudness_target_normalises_the_mix(isolated, short_sample, tmp_path):
+    """-14 LUFS asked, about -14 LUFS out, and the peak kept under -1 dBTP."""
+    from owcore import ffmpeg
+    from owcore.compose import compose_graph
+    from owcore.models import ExportSpec, Layer, Timeline, TimelineClip
+
+    clips = [TimelineClip(at_s=0, duration_s=6, start_s=2)]
+    t = Timeline(layers=[Layer(clips=clips)], export={"loudness": -14})
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    assert "loudnorm=I=-14.0:TP=-1.5:LRA=11,aresample=48000[aout]" in g
+    plain = Timeline(layers=[Layer(clips=clips)])
+    assert "loudnorm" not in compose_graph(
+        plain, source=Path("x.mp4"), width=640, height=360, fps=30
+    ).filter_complex
+    assert not ExportSpec(loudness=-14).is_default
+    with pytest.raises(ValueError):
+        ExportSpec(loudness=-40)
+
+    out = compose_and_render(t, short_sample, tmp_path / "loud.mp4")
+    measured = ffmpeg.measure_loudness(out)
+    assert measured is not None
+    lufs, peak = measured
+    assert lufs == pytest.approx(-14, abs=1.5)
+    assert peak <= -1.0
