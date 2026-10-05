@@ -3542,3 +3542,68 @@ def test_new_transitions_render(isolated, tmp_path):
         if kind != "glitch":
             # a fifth of the way in, the new clip is still mostly see-through
             assert raw_frame(out, 1.2).mean() < 200, kind
+
+
+def test_vertical_framings_go_into_the_graph(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def graph(**export):
+        t = Timeline(
+            layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=2, start_s=1)])],
+            export={"width": 1080, "height": 1920, **export},
+        )
+        return compose_graph(t, source=Path("x.mp4"), width=1920, height=1080,
+                             fps=30).filter_complex
+
+    blur = graph(fit="blur")
+    assert "gblur=sigma=48" in blur and "force_original_aspect_ratio=decrease" in blur
+    kf = graph(killfeed_inset=True)
+    assert "crop=iw*0.32:ih*0.17:iw*0.68:ih*0.02,scale=992:-2" in kf
+    assert "overlay=x=(W-w)/2:y=H*0.06" in kf
+    # landscape output: the killfeed is already on screen, nothing to add
+    t = Timeline(
+        layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=2, start_s=1)])],
+        export={"killfeed_inset": True},
+    )
+    g = compose_graph(t, source=Path("x.mp4"), width=1920, height=1080, fps=30).filter_complex
+    assert "ih*0.17" not in g
+
+
+def test_extra_formats_are_checked_and_saved():
+    from owcore.models import ExportSpec
+
+    e = ExportSpec(extra_formats=["9:16", "1:1"], extra_fit="blur",
+                   extra_killfeed=True)
+    assert ExportSpec(**e.model_dump()).extra_formats == ["9:16", "1:1"]
+    assert e.is_default, "the extras alone change nothing in this output"
+    with pytest.raises(ValueError):
+        ExportSpec(extra_formats=["21:9"])
+    assert not ExportSpec(killfeed_inset=True).is_default
+
+
+def test_vertical_framings_render(isolated, short_sample, tmp_path):
+    """9:16 with a blurred fill and with the killfeed inset both render at
+    the asked size; the blurred fill leaves no black bars."""
+    from owcore import ffmpeg
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def render(name, **export):
+        return compose_and_render(
+            Timeline(
+                layers=[Layer(clips=[TimelineClip(at_s=0, duration_s=1, start_s=1)])],
+                export={"width": 360, "height": 640, **export},
+            ),
+            short_sample, tmp_path / f"{name}.mp4",
+        )
+
+    blurred = render("blur", fit="blur")
+    contained = render("contain", fit="contain")
+    killfeed = render("killfeed", killfeed_inset=True)
+    for v in (blurred, contained, killfeed):
+        info = ffmpeg.probe(v)
+        assert (info.width, info.height) == (360, 640)
+    # the top tenth: bars when contained, picture when blurred behind
+    top = lambda v: raw_frame(v, 0.5).reshape(45, 80, 3)[:4].mean()
+    assert top(contained) < 8
+    assert top(blurred) > top(contained) + 10

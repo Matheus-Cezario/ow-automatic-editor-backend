@@ -640,6 +640,18 @@ class Fit(StrEnum):
     #: shows the whole frame and accepts bars. For whoever needs what is in
     #: the corners -- the HUD, the scoreboard
     CONTAIN = "contain"
+    #: the whole frame, over a blurred, darkened copy of itself filling the
+    #: rest -- the usual way to put a landscape clip in a vertical video
+    BLUR = "blur"
+
+
+#: The formats a montage can also be rendered in, by aspect.
+EXTRA_FORMATS = {
+    "16:9": (1920, 1080),
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+    "4:5": (1080, 1350),
+}
 
 
 class ExportSpec(BaseModel):
@@ -672,8 +684,22 @@ class ExportSpec(BaseModel):
     watermark_y: float = -0.82
     watermark_opacity: float = 0.65
 
+    #: In a portrait output, the recording's killfeed (top right of the
+    #: frame, which a centre crop cuts away) brought back at the top.
+    killfeed_inset: bool = False
+
+    #: Other aspects rendered together with this one (see `EXTRA_FORMATS`),
+    #: and how they are framed. The app turns them into separate outputs;
+    #: they live here so the choice is saved with the montage.
+    extra_formats: list[str] = Field(default_factory=list)
+    extra_fit: Fit = Fit.COVER
+    extra_killfeed: bool = False
+
     @model_validator(mode="after")
     def _check_coherent(self) -> "ExportSpec":
+        unknown = set(self.extra_formats) - set(EXTRA_FORMATS)
+        if unknown:
+            raise ValueError(f"unknown formats: {sorted(unknown)}")
         if self.width < 0 or self.height < 0:
             raise ValueError("dimensions cannot be negative")
         if (self.width > 0) != (self.height > 0):
@@ -701,6 +727,7 @@ class ExportSpec(BaseModel):
             and self.from_s == 0
             and self.to_s is None
             and self.watermark_id is None
+            and not self.killfeed_inset
         )
 
     def dimensions(self, source_width: int, source_height: int) -> tuple[int, int]:

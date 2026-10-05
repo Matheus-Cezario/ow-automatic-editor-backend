@@ -293,7 +293,7 @@ def _animated(
     return _curve([(clock.at(k.t), k.value, k.ease) for k in keys], var)
 
 
-def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
+def _fit_chain(fit: Fit, width: int, height: int, tag: str = "") -> list[str]:
     """Places the clip on the output canvas, which may have another aspect.
 
     This shows up for real when exporting 9:16 from a 16:9 recording, and both
@@ -305,6 +305,17 @@ def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
     `force_original_aspect_ratio`'s `increase`/`decrease` does the maths on the
     longer side; the `crop` or the `pad` settles what is left over.
     """
+    if fit is Fit.BLUR:
+        # the same picture twice: filled and blurred behind, whole in front
+        return [
+            f"split[fb{tag}][ff{tag}];"
+            f"[fb{tag}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},gblur=sigma={max(8, height // 40)},"
+            f"eq=brightness=-0.12:saturation=0.8[fbg{tag}];"
+            f"[ff{tag}]scale={width}:{height}:force_original_aspect_ratio=decrease"
+            f"[ffg{tag}];"
+            f"[fbg{tag}][ffg{tag}]overlay=x=(W-w)/2:y=(H-h)/2"
+        ]
     if fit is Fit.CONTAIN:
         return [
             f"scale={width}:{height}:force_original_aspect_ratio=decrease",
@@ -439,6 +450,30 @@ def _blend_chain(
     ]
 
 
+#: Where the killfeed is in the recording, as fractions of the frame -- the
+#: band of its first lines (the profile's detector looks at the same corner).
+_KILLFEED = (0.68, 0.02, 0.32, 0.17)
+
+
+def _with_killfeed(framing: list[str], n: int, width: int, height: int) -> str:
+    """The framing, with the recording's killfeed laid at the top.
+
+    A centre crop for a vertical video cuts the top-right corner away, and
+    with it who killed whom. The source is split before the framing: one copy
+    is framed as usual (and zoomed and shaken, which the killfeed is not),
+    the other gives up its killfeed band, enlarged to most of the width and
+    laid over the top.
+    """
+    x, y, w, h = _KILLFEED
+    kw = int(width * 0.92) // 2 * 2
+    return (
+        f"split[km{n}][ks{n}];"
+        f"[ks{n}]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={kw}:-2[kf{n}];"
+        f"[km{n}]" + ",".join(framing) + f"[kb{n}];"
+        f"[kb{n}][kf{n}]overlay=x=(W-w)/2:y=H*0.06"
+    )
+
+
 def _entrance_chain(tr: "ClipTransition") -> list[str]:
     """Wipes, zoom, spin and glitch: the entering clip's own pixels, remapped
     for the transition's length.
@@ -567,6 +602,7 @@ def _video_chain(
     fps: float = 30.0,
     clock: KeyClock | None = None,
     ramp: Ramp | None = None,
+    killfeed: bool = False,
 ) -> str:
     """What happens to a clip before it touches the canvas.
 
@@ -611,17 +647,23 @@ def _video_chain(
 
     # before anything that depends on size, the clip takes on the size of the
     # output canvas
+    framing: list[str] = []
     if clip.source is not ClipSource.TEXT:
-        steps += _fit_chain(fit, width, height)
+        framing += _fit_chain(fit, width, height, tag=str(input_index))
 
     # The lens comes after the framing: it zooms into what is on screen. Before
     # it, a 16:9 recording exported as 9:16 was zoomed in its own aspect and
     # then stretched into the other.
     if clip.zoom:
-        steps += _zoom_chain(clip, width, height, fps, clock)
+        framing += _zoom_chain(clip, width, height, fps, clock)
 
     if clip.source is not ClipSource.TEXT:
-        steps += _shake_chain(clip, width, height)
+        framing += _shake_chain(clip, width, height)
+
+    if killfeed and clip.source is ClipSource.RECORDING and framing:
+        steps.append(_with_killfeed(framing, input_index, width, height))
+    else:
+        steps += framing
 
     if not clip.color.is_neutral:
         steps.append(
@@ -1127,6 +1169,7 @@ def compose_graph(
                         fps=fps,
                         clock=clock,
                         ramp=ramp,
+                        killfeed=exp.killfeed_inset and height > width,
                     )
                 )
                 x, y = _position(trimmed, clock)
