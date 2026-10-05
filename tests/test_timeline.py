@@ -3326,3 +3326,77 @@ def test_a_rotated_clip_renders(isolated, short_sample, tmp_path):
     info = ffmpeg.probe(out)
     src = ffmpeg.probe(short_sample)
     assert (info.width, info.height) == (src.width, src.height)
+
+
+def test_visual_effects_go_into_the_graph_in_order(isolated):
+    """Shake right after the framing; look, blur, sharpen, vignette and the
+    flash after the colour -- and a neutral clip gets none of it."""
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, source_t=2.0, fx={
+            "look": "noir", "blur": 0.5, "sharpen": 0.5, "vignette": 1.0,
+            "shake": 0.4, "impact": 1.0,
+        }, color={"brightness": 0.1}),
+    ])])
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    assert "scale=676:380" in g and "crop=640:360:x=" in g
+    assert g.index("crop=640:360:x=") < g.index("eq=brightness=0.1000")
+    assert g.index("eq=brightness=0.1000") < g.index("hue=s=0")
+    assert g.index("hue=s=0") < g.index("gblur=sigma=2.00") < g.index("unsharp=")
+    assert g.index("unsharp=") < g.index("vignette=angle=1.150")
+    # the play is 1 s into the clip: the flash and the burst happen there
+    assert "abs(t-1.000)" in g and "gte(t,1.000)" in g
+
+    plain = Timeline(layers=[Layer(clips=[
+        TimelineClip(at_s=0, duration_s=2, start_s=1, transform={"scale": 0.5}),
+    ])])
+    g = compose_graph(plain, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    for f in ("gblur", "unsharp", "vignette", "hue=s=0", "eval=frame"):
+        assert f not in g
+
+
+def test_fx_out_of_range_are_refused():
+    from owcore.models import ClipFx
+
+    with pytest.raises(ValueError):
+        ClipFx(blur=1.5)
+    with pytest.raises(ValueError):
+        ClipFx(look="sepia")
+    assert ClipFx().is_neutral and not ClipFx(look="vivid").is_neutral
+
+
+def test_visual_effects_render_and_do_what_they_say(
+    isolated, short_sample, tmp_path
+):
+    """All of them at once get through ffmpeg; the flash brightens the frame
+    at the impact, and the blur softens the picture."""
+    from owcore import ffmpeg
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def render(name, **fx):
+        return compose_and_render(
+            Timeline(layers=[Layer(clips=[
+                TimelineClip(at_s=0, duration_s=1, start_s=1, fx=fx),
+            ])]),
+            short_sample, tmp_path / f"{name}.mp4",
+        )
+
+    everything = render("all", look="teal_orange", blur=0.3, sharpen=0.5,
+                        vignette=0.6, shake=0.5, impact=1.0)
+    src = ffmpeg.probe(short_sample)
+    info = ffmpeg.probe(everything)
+    assert (info.width, info.height) == (src.width, src.height)
+
+    plain = raw_frame(render("plain"), 0.02)
+    flashed = raw_frame(render("flash", impact=1.0), 0.02)
+    assert flashed.mean() > plain.mean() + 20, "no flash at the impact"
+
+    def roughness(img):
+        img = img.reshape(45, 80, 3)
+        return abs(img[:, 1:] - img[:, :-1]).mean()
+
+    blurred = raw_frame(render("blur", blur=1.0), 0.5)
+    # the frames are compared at 80x45, which already softens both
+    assert roughness(blurred) < roughness(raw_frame(render("plain2"), 0.5)) * 0.9

@@ -43,6 +43,7 @@ from .models import (
     Ease,
     Fit,
     KeyProp,
+    Look,
     MediaKind,
     Timeline,
     TimelineClip,
@@ -313,6 +314,80 @@ def _fit_chain(fit: Fit, width: int, height: int) -> list[str]:
     ]
 
 
+#: The looks, as ffmpeg filters -- a LUT's job without a LUT file.
+_LOOKS = {
+    Look.NOIR: ["hue=s=0", "eq=contrast=1.25:brightness=-0.02"],
+    Look.TEAL_ORANGE: [
+        "colorbalance=rs=-0.12:bs=0.14:rh=0.14:gh=0.03:bh=-0.12",
+        "eq=saturation=1.15:contrast=1.05",
+    ],
+    Look.WARM: ["colorbalance=rm=0.10:bm=-0.10:rh=0.05", "eq=saturation=1.05"],
+    Look.COLD: ["colorbalance=rm=-0.08:bm=0.12:bh=0.05", "eq=saturation=0.95"],
+    Look.VIVID: ["eq=saturation=1.45:contrast=1.12"],
+    Look.FADED: ["eq=contrast=0.82:brightness=0.06:saturation=0.75"],
+}
+
+#: How long an impact's flash lasts each side of the play, and how fast its
+#: shake dies away (per second).
+_FLASH_S = 0.18
+_IMPACT_DECAY = 7.0
+
+
+def _impact_at(clip: TimelineClip) -> float:
+    """Where the impact hits, on the clip's clock: its play, or its start."""
+    p = clip.play_local_s
+    return 0.0 if p is None else p
+
+
+def _shake_chain(clip: TimelineClip, width: int, height: int) -> list[str]:
+    """Camera shake: the canvas-sized clip is enlarged by a margin and a
+    canvas-sized window wanders inside it.
+
+    `crop` evaluates `x`/`y` on every frame (only its size is fixed), and `t`
+    is the clip's own clock here. The handheld part is constant; the impact's
+    part starts at the play and dies away.
+    """
+    fx = clip.fx
+    if not (fx.shake or fx.impact):
+        return []
+    mx = max(2, round(width * 0.03)) // 2 * 2
+    my = max(2, round(height * 0.03)) // 2 * 2
+    p = _impact_at(clip)
+    amount = (
+        f"min(1,{fx.shake * 0.5:.4f}"
+        f"+{fx.impact:.4f}*gte(t,{p:.3f})*exp(-{_IMPACT_DECAY}*(t-{p:.3f})))"
+    )
+    wobble_x = "(0.6*sin(t*41.3)+0.4*sin(t*23.1+1.7))"
+    wobble_y = "(0.6*sin(t*37.9+0.6)+0.4*sin(t*19.7+2.3))"
+    return [
+        f"scale={width + 2 * mx}:{height + 2 * my}",
+        f"crop={width}:{height}"
+        f":x='{mx}+{mx}*{amount}*{wobble_x}'"
+        f":y='{my}+{my}*{amount}*{wobble_y}'",
+    ]
+
+
+def _fx_chain(clip: TimelineClip, height: int) -> list[str]:
+    """Look, blur, sharpen, vignette and the impact's flash, in that order:
+    the grade first, so the blur and the vignette work on the final colour."""
+    fx = clip.fx
+    steps: list[str] = list(_LOOKS.get(fx.look, []))
+    if fx.blur:
+        # up to a 12 px sigma on a 1080p frame, in proportion elsewhere
+        steps.append(f"gblur=sigma={fx.blur * 12 * height / 1080:.2f}")
+    if fx.sharpen:
+        steps.append(f"unsharp=5:5:{0.3 + fx.sharpen * 1.7:.3f}:5:5:0")
+    if fx.vignette:
+        steps.append(f"vignette=angle={0.25 + fx.vignette * 0.9:.3f}")
+    if fx.impact:
+        p = _impact_at(clip)
+        steps.append(
+            f"eq=brightness='{fx.impact * 0.6:.3f}"
+            f"*max(0,1-abs(t-{p:.3f})/{_FLASH_S})':eval=frame"
+        )
+    return steps
+
+
 def _crop_turn_chain(t: Transform, width: int, height: int) -> list[str]:
     """Crop, mirror and rotate the canvas-sized clip, in that order.
 
@@ -440,12 +515,18 @@ def _video_chain(
     if clip.zoom:
         steps += _zoom_chain(clip, width, height, fps, clock)
 
+    if clip.source is not ClipSource.TEXT:
+        steps += _shake_chain(clip, width, height)
+
     if not clip.color.is_neutral:
         steps.append(
             f"eq=brightness={clip.color.brightness:.4f}"
             f":contrast={clip.color.contrast:.4f}"
             f":saturation={clip.color.saturation:.4f}"
         )
+
+    if clip.source is not ClipSource.TEXT:
+        steps += _fx_chain(clip, height)
 
     if clip.source is not ClipSource.TEXT:
         steps += _crop_turn_chain(clip.transform, width, height)

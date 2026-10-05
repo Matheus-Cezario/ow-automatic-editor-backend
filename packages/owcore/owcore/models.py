@@ -461,6 +461,47 @@ class ClipColor(BaseModel):
         )
 
 
+class Look(StrEnum):
+    """A colour grade in one click -- what a LUT does, built from ffmpeg's own
+    filters so no file has to travel with the montage."""
+
+    NONE = "none"
+    NOIR = "noir"
+    TEAL_ORANGE = "teal_orange"
+    WARM = "warm"
+    COLD = "cold"
+    VIVID = "vivid"
+    FADED = "faded"
+
+
+class ClipFx(BaseModel):
+    """The clip's visual effects; each is 0 (off) to 1 (full).
+
+    `impact` is the punch of a play: a white flash and a burst of shake at
+    the clip's play -- or at its first frame, when it has none.
+    """
+
+    look: Look = Look.NONE
+    blur: float = 0.0
+    sharpen: float = 0.0
+    vignette: float = 0.0
+    shake: float = 0.0
+    impact: float = 0.0
+
+    @model_validator(mode="after")
+    def _check_coherent(self) -> "ClipFx":
+        for name in ("blur", "sharpen", "vignette", "shake", "impact"):
+            if not 0.0 <= getattr(self, name) <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
+        return self
+
+    @property
+    def is_neutral(self) -> bool:
+        return self.look is Look.NONE and not any(
+            (self.blur, self.sharpen, self.vignette, self.shake, self.impact)
+        )
+
+
 class ClipFade(BaseModel):
     """The clip's fade in and out, in seconds.
 
@@ -820,6 +861,7 @@ class TimelineClip(BaseModel):
     transform: Transform = Field(default_factory=Transform)
     audio: ClipAudio = Field(default_factory=ClipAudio)
     color: ClipColor = Field(default_factory=ClipColor)
+    fx: ClipFx = Field(default_factory=ClipFx)
     fade: ClipFade = Field(default_factory=ClipFade)
     #: How the clip enters over the previous one on its layer. None = a cut.
     transition: ClipTransition | None = None
@@ -966,6 +1008,7 @@ class TimelineClip(BaseModel):
             and self.transform.is_neutral
             and self.audio.is_neutral
             and self.color.is_neutral
+            and self.fx.is_neutral
             and self.fade.is_neutral
             and self.transition is None
             and self.speed == 1.0
@@ -974,6 +1017,18 @@ class TimelineClip(BaseModel):
             and not self.freeze
             and not self.reverse
         )
+
+    @property
+    def play_local_s(self) -> float | None:
+        """Where in the clip its play happens, in seconds of the video from
+        the clip's first frame -- None for a clip with no play in it."""
+        if self.source is not ClipSource.RECORDING or self.source_t <= 0:
+            return None
+        into = self.source_t - self.start_s
+        if into < 0 or self.freeze or self.reverse:
+            return None
+        local = self.local_for_source(into)
+        return local if local <= self.duration_s else None
 
     def keys_for(self, prop: KeyProp | str) -> list[ClipKey]:
         """This property's keyframes, in time order."""
@@ -1375,13 +1430,8 @@ class Timeline(BaseModel):
             if layer.hidden or layer.is_audio:
                 continue
             for c in layer.clips:
-                if c.source is not ClipSource.RECORDING or c.source_t <= 0:
-                    continue
-                into = c.source_t - c.start_s
-                if into < 0 or c.freeze or c.reverse:
-                    continue
-                local = c.local_for_source(into)
-                if local <= c.duration_s:
+                local = c.play_local_s
+                if local is not None:
                     out.append(c.at_s + local)
         return sorted(out)
 
