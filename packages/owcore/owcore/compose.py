@@ -39,6 +39,7 @@ from pathlib import Path
 from . import textfx
 from .models import (
     MIN_CUT_S,
+    BlendMode,
     ClipSource,
     Ease,
     Fit,
@@ -388,6 +389,55 @@ def _fx_chain(clip: TimelineClip, height: int) -> list[str]:
     return steps
 
 
+#: ffmpeg's names for the blend modes
+_BLEND = {
+    BlendMode.SCREEN: "screen",
+    BlendMode.MULTIPLY: "multiply",
+    BlendMode.OVERLAY: "overlay",
+    BlendMode.ADD: "addition",
+    BlendMode.LIGHTEN: "lighten",
+    BlendMode.DARKEN: "darken",
+    BlendMode.DIFFERENCE: "difference",
+}
+
+
+def _blend_chain(
+    previous: str,
+    n: int,
+    output: str,
+    mode: BlendMode,
+    x: str,
+    y: str,
+    enable: str,
+    *,
+    width: int,
+    height: int,
+    fps: float,
+    duration: float,
+) -> list[str]:
+    """A clip mixed with what is under it, instead of laid over it.
+
+    `overlay` only covers; `blend` mixes two same-sized pictures. So the clip
+    is first placed on a transparent canvas the size of the video, lasting
+    all of it (so `blend` always has both pictures), and blended with
+    everything below -- which is the *base*, the top input, as an image
+    editor does for overlay. The result only counts where the clip is: its
+    own alpha (crop, chroma key, fades, opacity) is the mask the blended
+    picture is laid on with.
+    """
+    return [
+        f"color=c=black@0.0:s={int(width)}x{int(height)}:r={fps:.3f}"
+        f":d={duration:.3f},format=rgba[cv{n}]",
+        f"[cv{n}][v{n}]overlay=x={x}:y={y}:{enable}:eof_action=pass"
+        f":format=auto,format=gbrap,split[ca{n}][cb{n}]",
+        f"[{previous}]format=gbrap,split[pa{n}][pb{n}]",
+        f"[pa{n}][ca{n}]blend=all_mode={_BLEND[mode]}[bl{n}]",
+        f"[cb{n}]alphaextract[m{n}]",
+        f"[bl{n}][m{n}]alphamerge[bm{n}]",
+        f"[pb{n}][bm{n}]overlay=format=auto[{output}]",
+    ]
+
+
 def _crop_turn_chain(t: Transform, width: int, height: int) -> list[str]:
     """Crop, mirror and rotate the canvas-sized clip, in that order.
 
@@ -527,6 +577,13 @@ def _video_chain(
 
     if clip.source is not ClipSource.TEXT:
         steps += _fx_chain(clip, height)
+
+    if clip.chroma is not None and clip.source is not ClipSource.TEXT:
+        # keyed on the graded picture, before the crop and the turn: the
+        # transparent edges those make are not the screen's colour
+        k = clip.chroma
+        steps.append("format=rgba")
+        steps.append(f"colorkey=0x{k.hex}:{k.similarity:.3f}:{k.softness:.3f}")
 
     if clip.source is not ClipSource.TEXT:
         steps += _crop_turn_chain(clip.transform, width, height)
@@ -1017,12 +1074,20 @@ def compose_graph(
                 )
                 x, y = _position(trimmed, clock)
                 output = f"t{n}"
-                c.filters.append(
-                    f"[{previous}][v{n}]overlay=x={x}:y={y}:"
+                enable = (
                     f"enable='between(t,{trimmed.at_s:.3f},"
-                    f"{trimmed.until_s:.3f})':"
-                    f"eof_action=pass[{output}]"
+                    f"{trimmed.until_s:.3f})'"
                 )
+                if trimmed.blend is BlendMode.NORMAL:
+                    c.filters.append(
+                        f"[{previous}][v{n}]overlay=x={x}:y={y}:{enable}:"
+                        f"eof_action=pass[{output}]"
+                    )
+                else:
+                    c.filters += _blend_chain(
+                        previous, n, output, trimmed.blend, x, y, enable,
+                        width=width, height=height, fps=fps, duration=duration,
+                    )
                 previous = output
 
             # with `video_only` the clips' sound is not built either: an audio

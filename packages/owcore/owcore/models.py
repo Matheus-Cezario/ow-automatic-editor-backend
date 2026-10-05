@@ -502,6 +502,46 @@ class ClipFx(BaseModel):
         )
 
 
+class BlendMode(StrEnum):
+    """How a clip mixes with the layers under it. NORMAL covers them."""
+
+    NORMAL = "normal"
+    SCREEN = "screen"
+    MULTIPLY = "multiply"
+    OVERLAY = "overlay"
+    ADD = "add"
+    LIGHTEN = "lighten"
+    DARKEN = "darken"
+    DIFFERENCE = "difference"
+
+
+class ChromaKey(BaseModel):
+    """A colour made transparent -- a green screen.
+
+    `similarity` is how far from the colour still counts as it; `softness`
+    how gradually the edge goes from transparent to solid.
+    """
+
+    color: str = "#00ff00"
+    similarity: float = 0.3
+    softness: float = 0.1
+
+    @model_validator(mode="after")
+    def _check_coherent(self) -> "ChromaKey":
+        c = self.color.lstrip("#")
+        if len(c) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in c):
+            raise ValueError("the key colour is #rrggbb")
+        if not 0.01 <= self.similarity <= 1.0:
+            raise ValueError("similarity must be between 0.01 and 1")
+        if not 0.0 <= self.softness <= 1.0:
+            raise ValueError("softness must be between 0 and 1")
+        return self
+
+    @property
+    def hex(self) -> str:
+        return self.color.lstrip("#").lower()
+
+
 class ClipFade(BaseModel):
     """The clip's fade in and out, in seconds.
 
@@ -862,6 +902,10 @@ class TimelineClip(BaseModel):
     audio: ClipAudio = Field(default_factory=ClipAudio)
     color: ClipColor = Field(default_factory=ClipColor)
     fx: ClipFx = Field(default_factory=ClipFx)
+    #: how the clip mixes with the layers below; NORMAL covers them
+    blend: BlendMode = BlendMode.NORMAL
+    #: a colour made transparent (a green screen); None keys nothing
+    chroma: ChromaKey | None = None
     fade: ClipFade = Field(default_factory=ClipFade)
     #: How the clip enters over the previous one on its layer. None = a cut.
     transition: ClipTransition | None = None
@@ -1009,6 +1053,8 @@ class TimelineClip(BaseModel):
             and self.audio.is_neutral
             and self.color.is_neutral
             and self.fx.is_neutral
+            and self.blend is BlendMode.NORMAL
+            and self.chroma is None
             and self.fade.is_neutral
             and self.transition is None
             and self.speed == 1.0

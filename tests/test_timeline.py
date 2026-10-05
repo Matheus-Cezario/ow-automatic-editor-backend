@@ -3400,3 +3400,90 @@ def test_visual_effects_render_and_do_what_they_say(
     blurred = raw_frame(render("blur", blur=1.0), 0.5)
     # the frames are compared at 80x45, which already softens both
     assert roughness(blurred) < roughness(raw_frame(render("plain2"), 0.5)) * 0.9
+
+
+def test_a_blended_clip_goes_through_blend_masked_by_its_alpha(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    t = Timeline(layers=[
+        Layer(clips=[TimelineClip(at_s=0, duration_s=2, start_s=1)]),
+        Layer(clips=[TimelineClip(at_s=0.5, duration_s=1, start_s=6,
+                                  blend="screen",
+                                  chroma={"color": "#00FF00"})]),
+    ])
+    g = compose_graph(t, source=Path("x.mp4"), width=640, height=360, fps=30).filter_complex
+    assert "colorkey=0x00ff00:0.300:0.100" in g
+    assert "color=c=black@0.0:s=640x360" in g
+    assert "blend=all_mode=screen" in g
+    assert "alphaextract" in g and "alphamerge" in g
+    # a normal clip still just overlays
+    assert g.count("blend=all_mode") == 1
+
+
+def test_a_bad_key_colour_is_refused():
+    from owcore.models import ChromaKey, TimelineClip
+
+    with pytest.raises(ValueError):
+        ChromaKey(color="green")
+    with pytest.raises(ValueError):
+        TimelineClip(at_s=0, duration_s=1, blend="burn")
+
+
+def _solid(path: Path, colour: str, seconds: float = 2) -> Path:
+    from owcore.config import get_settings
+
+    subprocess.run(
+        [get_settings().ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+         f"color=c={colour}:s=320x180:r=30:d={seconds}",
+         "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={seconds}",
+         "-pix_fmt", "yuv420p", "-shortest", str(path)],
+        check=True,
+    )
+    return path
+
+
+def test_blend_modes_and_the_key_render_as_they_should(isolated, tmp_path):
+    """Grey under white: screen gives white, multiply gives grey; a green
+    upper clip keyed out shows the grey below; only the clip's area mixes."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    grey = _solid(tmp_path / "grey.mp4", "0x808080")
+
+    white_src = _solid(tmp_path / "white.mp4", "white")
+    green_src = _solid(tmp_path / "green.mp4", "0x00ff00")
+
+    def render_from(src_upper, name, **kw):
+        # the upper clip is a library file of another colour
+        from owcore.compose import LibraryFile, compose_graph
+        from owcore import ffmpeg as ff
+
+        t = Timeline(layers=[
+            Layer(clips=[TimelineClip(at_s=0, duration_s=1, start_s=0)]),
+            Layer(clips=[TimelineClip(at_s=0, duration_s=1, start_s=0,
+                                      source="media", media_id="m",
+                                      transform={"scale": 0.5}, **kw)]),
+        ])
+        info = ff.probe(grey)
+        c = compose_graph(t, source=grey, width=info.width, height=info.height,
+                          fps=info.fps, source_duration_s=info.duration_s,
+                          library={"m": LibraryFile(path=src_upper)})
+        dest = tmp_path / f"{name}.mp4"
+        ff.compose(c, dest)
+        return raw_frame(dest, 0.5).reshape(45, 80, 3)
+
+    centre = (slice(18, 27), slice(32, 48))
+    corner = (slice(0, 5), slice(0, 8))
+
+    screen = render_from(white_src, "screen", blend="screen")
+    assert screen[centre].mean() > 230
+    assert abs(screen[corner].mean() - 128) < 12, "outside the clip unchanged"
+
+    multiply = render_from(white_src, "multiply", blend="multiply")
+    assert abs(multiply[centre].mean() - 128) < 12
+
+    keyed = render_from(green_src, "keyed", chroma={"color": "#00ff00"})
+    assert abs(keyed[centre].mean() - 128) < 15, "the green was not keyed out"
+
+    plain = render_from(green_src, "plain")
+    assert plain[centre][..., 1].mean() > 200
