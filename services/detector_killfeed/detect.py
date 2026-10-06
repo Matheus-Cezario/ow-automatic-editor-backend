@@ -55,12 +55,33 @@ team-colour assumption fell, so its 11 were the kills of *everyone*, and its 7
 were mostly teammates'. It is kept here only as the reason the tracking exists.
 What the killfeed answers now is a narrower question, and one worth answering:
 which of these were the player's.
+
+Two things a single frame cannot be trusted with are now decided over the
+line's whole life:
+
+* **which icon it was.** Every frame of the line casts a vote for its best
+  match, and the line takes the ability that won most of them (see
+  `_Line.ability`). A single frame above the threshold used to be enough to
+  name it -- and a line whose icon never got a good frame was lost even when it
+  matched the same ability in twenty frames in a row. Voting is also what keeps
+  the gun kills out: a gap with no icon matches whatever is closest in each
+  frame, and noise never agrees with itself for long;
+* **whose it was.** The killer's name is read on every frame where the plate is
+  at its widest, and one good reading is enough (see `_Line.killer_is`).
+  Keeping only the last reading meant that one frame where two letters touched
+  -- a different letter count, and so a score of 0 -- gave the player's own kill
+  to "someone else".
+
+The icon itself is compared in shades of grey and at the size it was seen
+(`owcore.vision.soft_glyph_on_dark`, `IconBank.rank`) rather than as a
+black-and-white cut. The cut is where small icons went: at low resolution the
+thin strokes of a drawing come out grey and fall under it.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -68,9 +89,15 @@ import cv2
 import numpy as np
 
 from owcore.models import DetectionEvent, EventKind
-from owcore.nameplate import read_name, read_player_name
+from owcore.nameplate import read_name, read_player_name, same_name
 from owcore.profiles import Profile
-from owcore.vision import IconBank, glyph_in_disc, glyph_on_dark, iter_frames
+from owcore.vision import (
+    Glyph,
+    IconBank,
+    iter_frames,
+    soft_glyph_in_disc,
+    soft_glyph_on_dark,
+)
 
 log = logging.getLogger(__name__)
 
@@ -128,7 +155,7 @@ def _plates(bgr: np.ndarray, ranges: Sequence[dict], cfg: dict) -> list[Plate]:
 
 def _line_icon(
     bgr: np.ndarray, killer: Plate, victim: Plate, cfg: dict
-) -> tuple[np.ndarray | None, str]:
+) -> tuple[Glyph | None, str]:
     """Crops the icon's glyph from between the two plates.
 
     The window is a fraction of the **gap** between them, and not an offset in
@@ -149,25 +176,28 @@ def _line_icon(
     # ultimate first: it is a white disc, and the disc test is the more
     # specific of the two -- the bright-on-dark glyph would match the whole disc
     # and return a circle instead of the drawing
-    glyph = glyph_in_disc(crop)
+    glyph = soft_glyph_in_disc(crop)
     if glyph is not None:
         return glyph, "ult"
-    return glyph_on_dark(crop), "ability"
+    return soft_glyph_on_dark(crop, drop_right_edge=True), "ability"
 
 
 def _read_killer(bgr: np.ndarray, killer: Plate, line: "_Line") -> None:
     """Stores the name written on the killer's plate.
 
-    It only reads when the plate is wider than anything seen so far on this
-    line. The line slides in and the plate opens up: in the first frames the
-    name is still half shown, and comparing half a word with the player's full
-    name only ever answers "no". The widest plate is the one with the full name.
+    It only reads when the plate is about as wide as the widest seen so far on
+    this line. The line slides in and the plate opens up: in the first frames
+    the name is still half shown, and comparing half a word with the player's
+    full name only ever answers "no". The widest plate is the one with the full
+    name.
 
-    While there is no reading at all, it tries again on every frame: the widest
-    plate may happen to be the one an explosion covered, and giving up on it
-    would throw the line away over one bad frame.
+    Every reading at that width is kept, not just the last: one frame where an
+    explosion covers the plate, or where compression glues two letters together,
+    reads as a name of another length -- and a single bad reading was enough to
+    give the player's own kill to someone else.
     """
-    if killer.w <= line.plate_w and line.killer_name is not None:
+    tol = max(2, int(0.1 * killer.h))
+    if killer.w < line.plate_w - tol:
         return
     pad = max(1, int(0.12 * killer.h))
     h, w = bgr.shape[:2]
@@ -175,8 +205,10 @@ def _read_killer(bgr: np.ndarray, killer: Plate, line: "_Line") -> None:
                max(0, killer.x): min(w, killer.right)]
     if crop.size == 0:
         return
-    line.plate_w = killer.w
-    line.killer_name = read_name(crop) or line.killer_name
+    line.plate_w = max(line.plate_w, killer.w)
+    name = read_name(crop)
+    if name:
+        line.readings.append((killer.w, name))
 
 
 def detect_ability_kills(
@@ -200,10 +232,11 @@ def read_killfeed(
       was. It is what confirms the crosshair skull: destroying a deployable (a
       Symmetra turret) draws the skull and puts nothing here.
 
-    The two are tracked apart on purpose. Ability lines only open a track on a
-    recognised icon (see the note in the loop); the plain lines need no icon,
-    and so they also work without `templates/abilities/` and without the
-    player's name -- then they come out with killer "unknown".
+    Both come from the same tracked lines: every line is a `KILLFEED_LINE`,
+    and the ones whose icon the frames agree on are also an `ABILITY_KILL`.
+    The plain lines need no icon, and so they also work without
+    `templates/abilities/` and without the player's name -- then they come out
+    with killer "unknown".
     """
     cfg = profile.section("killfeed")
     roi = profile.roi("killfeed")
@@ -236,7 +269,10 @@ def read_killfeed(
         )
 
     name_threshold = float(cfg.get("name_threshold", 0.40))
-    threshold = float(cfg.get("icon_threshold", 0.55))
+    threshold = float(cfg.get("icon_threshold", 0.85))
+    min_votes = int(cfg.get("icon_min_votes", 3))
+    vote_share = float(cfg.get("icon_vote_share", 0.5))
+    min_side = int(cfg.get("icon_min_side_px", 8))
     gap_lo, gap_hi = cfg.get("gap_range", [0.4, 4.0])
     hold = float(cfg.get("hold_s", 7.0))
     slide = float(cfg.get("slide_s", 0.6))
@@ -248,19 +284,14 @@ def read_killfeed(
     #: same line disappearing and coming back (the icon crop fails for seconds
     #: at a stretch on a real recording), and a new line appearing with the
     #: ability that was already on screen.
-    lines: list[_Line] = []
-    #: every line, tracked by its plates alone
+    #:
+    #: There used to be a second set of tracks just for ability lines, opened
+    #: only on a frame whose icon passed the threshold -- because back then
+    #: every plate was crossed with every other and a meaningless pair could
+    #: land on a track and split it. `_assign` gives each track one pair per
+    #: frame, so the icon now rides on the same tracks as everything else and
+    #: every frame of the line gets to vote.
     feed: list[_Line] = []
-
-    def _alive(tracks: list[_Line], killer: Plate, victim: Plate, t: float):
-        return next(
-            (
-                ln
-                for ln in reversed(tracks)
-                if t - ln.last_seen <= hold and ln.same_as(killer, victim, t, slide)
-            ),
-            None,
-        )
 
     def _follow(ln: _Line, killer: Plate, victim: Plate, t: float) -> None:
         ln.last_seen = t
@@ -287,88 +318,30 @@ def read_killfeed(
                     continue
                 pairs.append((killer, victim))
 
-        for (killer, victim), plain in _assign(feed, pairs, frame.t, hold, slide):
-            if plain is None:
-                plain = _Line(killer.right, victim.x, killer.x, victim.right,
-                              killer.h, frame.t, frame.t, "", 0.0, "")
-                feed.append(plain)
+        for (killer, victim), line in _assign(feed, pairs, frame.t, hold, slide):
+            if line is None:
+                line = _Line(killer.right, victim.x, killer.x, victim.right,
+                             killer.h, frame.t, frame.t)
+                feed.append(line)
             else:
-                _follow(plain, killer, victim, frame.t)
+                _follow(line, killer, victim, frame.t)
             if player is not None:
-                _read_killer(frame.bgr, killer, plain)
-
-        for killer, victim in pairs:
-            if not bank or player is None:
-                continue
-            glyph, style = _line_icon(frame.bgr, killer, victim, cfg)
-            if glyph is None:
-                continue
-            key, score = bank.best_match(glyph)
-            if not key or score < threshold:
-                # With no recognised icon, no ability track is opened or
-                # extended. It is almost always a kill with a normal weapon,
-                # which draws no icon -- that line is in `feed`. Tracking
-                # the ability line by its plates and letting the icon merely
-                # label it sounds better (a plate is a solid rectangle, an
-                # icon is thirty pixels), but it was worse in practice: the
-                # loop crosses every plate with every other, and a
-                # meaningless pair landing on the same track overwrote its
-                # edges and split a real line into four.
-                continue
-            alive = _alive(lines, killer, victim, frame.t)
-            if alive is None:
-                alive = _Line(killer.right, victim.x, killer.x, victim.right,
-                              killer.h, frame.t, frame.t, key, score, style)
-                lines.append(alive)
-                _read_killer(frame.bgr, killer, alive)
-                continue
-            _follow(alive, killer, victim, frame.t)
-            if score > alive.score:
-                # the line's best frame is what names it: as it enters it
-                # slides and the icon comes out blurred, and a bad frame
-                # matches anything
-                alive.key, alive.score, alive.style = key, score, style
-            _read_killer(frame.bgr, killer, alive)
+                _read_killer(frame.bgr, killer, line)
+            if bank and player is not None:
+                glyph, style = _line_icon(frame.bgr, killer, victim, cfg)
+                # a drawing a few pixels tall has lost what tells one icon
+                # from its neighbours, and it does not say "I don't know": it
+                # agrees, frame after frame, on the wrong one
+                if glyph is not None and glyph.side >= min_side:
+                    line.vote(*bank.rank(glyph)[:2], style)
 
     events: list[DetectionEvent] = []
     per_ability: dict[str, int] = {}
     by_others = 0
-    for ln in lines:
-        if player is None or not player.matches(ln.killer_name, name_threshold):
-            # the line exists and the ability was recognised, but the killer
-            # was someone else: not the user's material
-            by_others += 1
-            continue
-        hero, _, ability = ln.key.partition("/")
-        per_ability[ln.key] = per_ability.get(ln.key, 0) + 1
-        events.append(
-            DetectionEvent(
-                kind=EventKind.ABILITY_KILL,
-                t=round(ln.start, 3),
-                confidence=round(min(1.0, 0.5 + 0.5 * ln.score), 3),
-                meta={
-                    "ability": ln.key,
-                    "hero": hero,
-                    "name": ability,
-                    "icon_score": round(float(ln.score), 3),
-                    "ultimate": ln.style == "ult",
-                },
-            )
-        )
-    for key, n in sorted(per_ability.items()):
-        log.info("%s: %d kill(s)", key, n)
-    if by_others:
-        log.info("%d line(s) discarded: the killer was not the player",
-                 by_others)
-
     whose: dict[str, int] = {}
     for ln in feed:
-        if player is None or ln.killer_name is None:
-            killer = "unknown"
-        elif player.matches(ln.killer_name, name_threshold):
-            killer = "player"
-        else:
-            killer = "other"
+        mine = ln.killer_is(player, name_threshold)
+        killer = {None: "unknown", True: "player", False: "other"}[mine]
         whose[killer] = whose.get(killer, 0) + 1
         events.append(
             DetectionEvent(
@@ -377,6 +350,40 @@ def read_killfeed(
                 meta={"killer": killer},
             )
         )
+
+        named = ln.ability(threshold, min_votes, vote_share)
+        if named is None:
+            # no icon, or no icon that the frames agree on: almost always a
+            # kill with a normal weapon, which draws none
+            continue
+        if not mine:
+            # the line exists and the ability was recognised, but the killer
+            # was someone else: not the user's material
+            by_others += 1
+            continue
+        key, score, style = named
+        hero, _, ability = key.partition("/")
+        per_ability[key] = per_ability.get(key, 0) + 1
+        events.append(
+            DetectionEvent(
+                kind=EventKind.ABILITY_KILL,
+                t=round(ln.start, 3),
+                confidence=round(min(1.0, 0.5 + 0.5 * score), 3),
+                meta={
+                    "ability": key,
+                    "hero": hero,
+                    "name": ability,
+                    "icon_score": round(float(score), 3),
+                    "icon_votes": len(ln.votes.get(key, [])),
+                    "ultimate": style == "ult",
+                },
+            )
+        )
+    for key, n in sorted(per_ability.items()):
+        log.info("%s: %d kill(s)", key, n)
+    if by_others:
+        log.info("%d line(s) discarded: the killer was not the player",
+                 by_others)
     log.info("killfeed lines: %s", whose or "none")
 
     events.sort(key=lambda e: e.t)
@@ -442,14 +449,68 @@ class _Line:
     h: int
     start: float
     last_seen: float
-    key: str
-    score: float
-    style: str
-    #: the name written on the killer's plate, letter by letter. It is what
-    #: separates the player's kill from a teammate's.
-    killer_name: list[np.ndarray] | None = None
+    #: for each ability that was a frame's best match, that frame's score
+    votes: dict[str, list[float]] = field(default_factory=dict)
+    #: how the icon was drawn when it won (an ultimate's disc, or a box)
+    styles: dict[str, str] = field(default_factory=dict)
+    #: (plate width, letters) of each reading of the name on the killer's
+    #: plate. It is what separates the player's kill from a teammate's.
+    readings: list[tuple[int, list[np.ndarray]]] = field(default_factory=list)
     #: the widest the killer's plate has been seen -- see `_read_killer`
     plate_w: int = 0
+
+    def vote(self, key: str | None, score: float, style: str) -> None:
+        if not key:
+            return
+        self.votes.setdefault(key, []).append(score)
+        if score >= max(self.votes[key]):
+            self.styles[key] = style
+
+    def ability(
+        self, threshold: float, min_votes: int, share: float
+    ) -> tuple[str, float, str] | None:
+        """(key, best score, style) of the ability this line was made with, or
+        None when the frames do not agree on one.
+
+        The winner must have taken at least `min_votes` frames and `share` of
+        all of them, and its best frame must reach `threshold`. The first two
+        are what tell an icon from no icon: a gun kill's empty gap still
+        matches *something* in each frame, but a different something each time,
+        while a real icon wins frame after frame. The threshold keeps a
+        consistent but poor match -- a crop that always lands half on the `>`
+        -- from naming the line.
+        """
+        if not self.votes:
+            return None
+        total = sum(len(v) for v in self.votes.values())
+        key = max(self.votes, key=lambda k: (len(self.votes[k]), max(self.votes[k])))
+        wins = self.votes[key]
+        if len(wins) < min_votes or len(wins) < share * total:
+            return None
+        best = max(wins)
+        if best < threshold:
+            return None
+        return key, best, self.styles.get(key, "ability")
+
+    def killer_is(self, player, threshold: float) -> bool | None:
+        """Whether the killer's plate carries the player's name; None when
+        that cannot be known (no player name, or the plate never read).
+
+        Only the readings taken at the plate's full width count -- the ones
+        before it finished opening show half a name -- and among those, one
+        reading that matches is enough. The names of other players stay far
+        below the threshold in every frame (0.21 at most against 0.40,
+        measured), so a second chance costs nothing in precision; what it
+        saves is the player's kill whose best frame happened to be a bad one.
+        """
+        if player is None or not self.readings:
+            return None
+        # measured against the widest plate that gave a READING, not the
+        # widest seen: that one may be the frame an explosion covered
+        tol = max(2, int(0.1 * self.h))
+        widest = max(w for w, _name in self.readings)
+        full = [name for w, name in self.readings if w >= widest - tol]
+        return max(same_name(player.letters, name) for name in full) >= threshold
 
     def same_as(self, killer: Plate, victim: Plate, t: float, slide: float) -> bool:
         """Whether this line is the same as this pair of plates.

@@ -195,7 +195,7 @@
   "killfeed": {
     "_note": "Each killfeed line is '<killer> <ability icon> > <victim>'. The colour does NOT say the team: measured on the reference recording, the same player shows up on the blue plate of one line and the red of another -- blue is the killer, red is the victim, on both sides of the match. Only the name written on the blue plate answers who it was, and that is what `name_threshold` checks against the footer card.",
     "_note_icon": "The icon lives in the gap between the two plates, and the '>' takes the end of that gap. The icon_span fractions were measured on the real HUD; the glyph is cropped inside that window and compared with templates/abilities/. An ultimate shows up as a white disc with a black drawing; a regular ability, as a white drawing in a dark box.",
-    "_note_measured": "On a real recording the right icon scores 0.65-0.93 and the runner-up stays at 0.27-0.55.",
+    "_note_measured": "Measured with the black-and-white glyph, before the comparison in grey: on a real recording the right icon scored 0.65-0.93 and the runner-up 0.27-0.55. The grey comparison raises every score (right and wrong alike), so those numbers do not carry over -- see _note_threshold.",
     "hsv_killer": [
       {
         "lo": [
@@ -251,8 +251,13 @@
       0.66
     ],
     "icon_height": 1.24,
-    "_note_threshold": "0.65 is the cut between the right icon and a guess. Below it the matching names common weapons and passives -- things that do not even show up in the killfeed -- because a gap with no icon at all (a gun kill) still has the '>' to match something. Measured on 16 min of a real match: at 0.65 there were 7 kills, all checked one by one on the image, and no false ones; at 0.55 there were 19, of which 7 were gaps with no icon.",
-    "icon_threshold": 0.65,
+    "_note_threshold": "The icon is compared in shades of grey and at the size it was seen (IconBank.rank), which raises every score, so the old 0.65 no longer means anything. 0.85 is PROVISIONAL: it comes from synthetic icons degraded to 8-32 px with JPEG compression, where a line's best frame for the right icon passes it at 16 px and up and gun-kill gaps stay at 0.25-0.35 on the sample video. It must be checked on a real match before it is trusted -- the old rule (precision 100%, recall 7/11) was measured on one. What keeps a gun kill out is now mostly the vote below, not this number.",
+    "icon_threshold": 0.85,
+    "_note_votes": "A line names an ability only if that ability was the best match in at least icon_min_votes frames AND in icon_vote_share of the frames that had a glyph. A gap with no icon (a gun kill) still matches something in each frame, but a different something each time; a real icon wins frame after frame. The killfeed runs at 5 fps and a line lives ~5 s, so a real icon has ~25 frames to vote and 3 is a low bar; it exists so one lucky frame cannot name a line on its own.",
+    "icon_min_votes": 3,
+    "icon_vote_share": 0.5,
+    "_note_min_side": "Glyphs smaller than icon_min_side_px (the drawing's own height or width, in pixels of the crop) do not vote. On synthetic icons at 8 px the grey comparison named half the lines -- and gave 18% of them the WRONG ability, consistently, because at that size two drawings really are the same blob. Voting does not catch that kind of error. From ~10 px on the gate barely costs anything. It is roughly a recording below 480p.",
+    "icon_min_side_px": 8,
     "_note_hold": "hold_s holds the line count for a moment: the icon crop fails on isolated frames (the line slides in, and compression eats the drawing), and without it each failure split one line into two kills. It only delays the count's fall -- it does not invent lines. 1s was nowhere near: in a real match the crop of ONE line fails for 3 to 5 seconds in a row, and the same kill came out 2, 3 or 4 times. 7s is a line's life on screen, and it is what the 1s-to-12s sweep points to: from 5s on Ana's result stops changing, and 7s still removes the old line that came back as a new kill when a more recent line pushed it down. Holding longer never lost a real kill -- two with the same ability raise the count to 2, and that is already a rising edge.",
     "hold_s": 7.0,
     "_note_slide": "slide_s is how long the line takes to finish coming in. In that beginning the plates are still opening -- on a real recording one of the outer edges moves 16 to 20 pixels from one frame to the next -- and only the inner edges, which surround the icon, serve to recognise the line. After that time the outer ones count again, and they are what separate two kills by the same player.",

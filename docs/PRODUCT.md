@@ -445,10 +445,25 @@ Three things that only showed up when measuring:
   after the critical marker and covers the same diagonals; at 12 fps there is
   not always a frame left between the two. The kill is still detected — what is
   lost is the "headshot" label;
-- **ability kills find 7 out of every 11**, and that trade-off is deliberate:
-  the icon threshold sits where precision is 100%. A shelf with one moment fewer
-  is better than one that offers a cut that is not what it says: whoever
-  assembles trusts the label and does not go back to check the recording;
+- **ability kills found 7 out of every 11**, and that trade-off was
+  deliberate: the icon threshold sat where precision is 100%. A shelf with one
+  moment fewer is better than one that offers a cut that is not what it says:
+  whoever assembles trusts the label and does not go back to check the
+  recording. Two things in that number were not the threshold's fault, and
+  have changed since. The icon was compared as a black-and-white cut, and at
+  killfeed size compression turns thin strokes grey, under the cut: on
+  synthetic thin-stroke icons at 12-16 px that comparison named **none** of
+  40 frames, and the comparison in grey, at the size the icon was seen, names
+  them in most frames. And one frame above the threshold named a line, so a
+  line whose icon never had a good frame was lost; now every frame of the
+  line votes, and the ability has to win most of them -- which is also what
+  keeps a gun kill's empty gap out. The new threshold (0.85, on a new scale) is
+  **provisional** until it is measured on a real match the way 0.65 was;
+- **whose kill it was used to be decided by one reading of the name.** A frame
+  where two letters of the killer's name touched read as a name of another
+  length and gave the player's own kill to "someone else". Every reading at the
+  plate's full width now counts, and one match is enough -- other players'
+  names stay at 0.21 at most against a threshold of 0.40;
 - **two kills by the same player on the same victim, with the same ability and
   within ~7 s of each other, count as one.** The two lines are identical in
   everything the detector uses to recognise them. It requires the victim to

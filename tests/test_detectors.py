@@ -492,7 +492,7 @@ def _tracked_line():
     kf = service_module("detector_killfeed")
     line = kf._Line(
         inner_left=250, inner_right=290, outer_left=100, outer_right=410, h=30,
-        start=10.0, last_seen=10.0, key="a/b", score=0.8, style="ability",
+        start=10.0, last_seen=10.0,
     )
     return kf, line
 
