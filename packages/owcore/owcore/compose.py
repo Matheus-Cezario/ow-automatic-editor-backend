@@ -1082,6 +1082,9 @@ def compose_graph(
     cut_audio: list[str] = []
     #: the sound of the music blocks, which is not game sound and does not obey it
     music_audio: list[str] = []
+    #: sound effects: on audio layers, but obeying neither volume -- each one
+    #: has its own, on its block
+    sfx_audio: list[str] = []
     n = 0
 
     for layer in timeline.layers:
@@ -1209,7 +1212,11 @@ def compose_graph(
                 chain = _audio_chain(sound, n, f"a{n}", clock)
                 if chain is not None:
                     c.filters.append(chain)
-                    (music_audio if layer.is_audio else cut_audio).append(f"a{n}")
+                    (
+                        (sfx_audio if trimmed.is_sound_effect else music_audio)
+                        if layer.is_audio
+                        else cut_audio
+                    ).append(f"a{n}")
 
     if n == 0:
         raise ValueError("no clip falls inside the recording")
@@ -1293,6 +1300,8 @@ def compose_graph(
         else:
             # with no music at all, the cuts' original audio stands on its own
             parts += cut_audio
+
+    parts += sfx_audio
 
     # with a loudness target the mix goes through one more step
     mixed = "amixed" if exp.loudness is not None else "aout"

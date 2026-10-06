@@ -246,6 +246,11 @@ class JobParams(BaseModel):
 #: nothing below this is worth a cut: it is less than a frame on any recording
 MIN_CUT_S = 0.05
 
+#: The `kind` of a block made from the sound effects library (`owcore.sfx`).
+#: It sits on an audio layer like the music but is not music: it does not
+#: take the game sound away, and the music volume does not govern it.
+SFX_KIND = "sfx"
+
 #: Events worth a thumbnail in the editor's sidebar: the ones that become
 #: blocks. Low health and interruption are the context of the play, not the
 #: play.
@@ -1133,6 +1138,10 @@ class TimelineClip(BaseModel):
         prop = KeyProp(prop)
         return sorted((k for k in self.keys if k.prop == prop), key=lambda k: k.t)
 
+    @property
+    def is_sound_effect(self) -> bool:
+        return self.kind == SFX_KIND
+
     def as_cut(self) -> TimelineCut:
         """The V1 view of this clip, for the cut-and-splice path."""
         return TimelineCut(
@@ -1535,13 +1544,20 @@ class Timeline(BaseModel):
 
     @property
     def has_music(self) -> bool:
-        """The montage has music, that is: any block on an audio layer.
+        """The montage has music, that is: any block on an audio layer that
+        is not a sound effect.
 
         It is what decides what the two volumes mean. With no music the cuts'
         audio comes out as it is; with music, `game_volume` says how much of the
-        game shows through underneath it.
+        game shows through underneath it. A whoosh is not music: one effect on
+        a montage without a song must not silence the game.
         """
-        return any(l.is_audio and l.clips for l in self.layers)
+        return any(
+            not c.is_sound_effect
+            for l in self.layers
+            if l.is_audio
+            for c in l.clips
+        )
 
     @property
     def cuts(self) -> list[TimelineCut]:
@@ -1792,6 +1808,11 @@ class Media(Base):
     #: cannot drag the full file on every seek
     proxy_key: Mapped[str] = mapped_column(String(255), default="")
 
+    #: the sound effect this item was made from (`owcore.sfx`), empty for a
+    #: file the user uploaded. It is what lets adding the same effect twice
+    #: reuse the item, and the app tell an effect from a song
+    sfx_id: Mapped[str] = mapped_column(String(32), default="")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     job: Mapped[Job] = relationship(back_populates="media")
@@ -1898,7 +1919,12 @@ class Montage(Base):
         return {
             "n_clips": len(clips),
             "duration_s": round(max((c.until_s for c in clips), default=0.0), 2),
-            "has_music": any(l.is_audio and l.clips for l in m.layers),
+            "has_music": any(
+                not c.is_sound_effect
+                for l in m.layers
+                if l.is_audio
+                for c in l.clips
+            ),
         }
 
 

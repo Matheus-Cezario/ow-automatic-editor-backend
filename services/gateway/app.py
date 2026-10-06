@@ -7,6 +7,7 @@ workers.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import re
@@ -61,7 +62,7 @@ from owcore.models import (
     new_id,
     utcnow,
 )
-from owcore import fonts
+from owcore import fonts, sfx
 from owcore.ffmpeg import probe
 from owcore.preview import preview_window
 from owcore.storage import get_storage
@@ -254,8 +255,11 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         data["clips"] = [_clip_dict(c) for c in sorted(job.clips, key=lambda c: -c.score)]
         library = sorted(job.media, key=lambda m: m.created_at)
         data["media"] = [_media_dict(m) for m in library]
-        # `tracks` is still only the music: it is what the track picker uses
-        data["tracks"] = [_media_dict(m) for m in library if m.is_audio]
+        # `tracks` is still only the music: it is what the track picker uses,
+        # and a two-second whoosh is not a song to build a montage on
+        data["tracks"] = [
+            _media_dict(m) for m in library if m.is_audio and not m.sfx_id
+        ]
         # the montages come back with the job: that is how the screen rebuilds
         # itself after an F5, and it is the list the picker shows
         montages = sorted(job.montages, key=lambda m: _as_aware(m.updated_at), reverse=True)
@@ -781,6 +785,7 @@ def _media_dict(m: Media) -> dict[str, Any]:
         "created_at": _iso(m.created_at),
     }
     if m.is_audio:
+        data["sfx_id"] = m.sfx_id or None
         data |= {
             "bpm": round(m.bpm, 2),
             "beats": m.beats or [],
@@ -931,6 +936,106 @@ def media_proxy(media_id: str, request: Request) -> Response:
     if not key:
         raise HTTPException(404, "this item has no proxy")
     return _serve_blob(key, request, "video/mp4")
+
+
+# ── the sound effects library ───────────────────────────────────────────────
+#
+# A catalogue the server synthesises (`owcore.sfx`), not files the user brings.
+# Browsing it costs nothing; adding an effect to a match turns it into an
+# ordinary audio item of that match's library, and from there on it is a block
+# like the music -- same layers, same render, same mix.
+
+
+def _sfx_dict(effect: sfx.Effect) -> dict[str, Any]:
+    return {
+        "id": effect.id,
+        "name": effect.name,
+        "category": effect.category,
+        "duration_s": sfx.duration_s(effect.id),
+        "peaks": list(sfx.peaks(effect.id)),
+        "audio_url": f"/api/sfx/{effect.id}/audio",
+    }
+
+
+@app.get("/api/sfx")
+def list_sfx() -> dict[str, Any]:
+    """Every effect on offer, grouped by `category` in the order to show."""
+    return {
+        "categories": list(sfx.CATEGORIES),
+        "effects": [_sfx_dict(e) for e in sfx.EFFECTS],
+    }
+
+
+@app.get("/api/sfx/{sfx_id}/audio")
+def sfx_audio(sfx_id: str, request: Request) -> Response:
+    """The effect itself, to listen to before adding it."""
+    if sfx_id not in sfx.catalog():
+        raise HTTPException(404, "sound effect not found")
+    body = sfx.wav_bytes(sfx_id)
+    total = len(body)
+    # an effect never changes under its id
+    headers = {"accept-ranges": "bytes", "cache-control": "public, max-age=604800"}
+    match = _RANGE.match(request.headers.get("range") or "")
+    if not match:
+        return Response(content=body, media_type="audio/wav", headers=headers)
+    start = int(match.group(1)) if match.group(1) else 0
+    end = int(match.group(2)) if match.group(2) else total - 1
+    start = max(0, min(start, total - 1))
+    end = max(start, min(end, total - 1))
+    return Response(
+        content=body[start : end + 1],
+        status_code=206,
+        media_type="audio/wav",
+        headers=headers | {"content-range": f"bytes {start}-{end}/{total}"},
+    )
+
+
+@app.post("/api/jobs/{job_id}/sfx", status_code=201)
+def add_sfx(job_id: str, body: dict = Body(...)) -> dict[str, Any]:
+    """Brings an effect into the match's library, ready to go on the ruler.
+
+    It comes out `ready` straight away: the server made the sound, so it
+    already knows its duration and waveform, and there is nothing for the
+    analyser to listen to. Adding the same effect again answers the item that
+    is already there -- ten hits on the ruler are ten blocks of one item, not
+    ten copies of the file.
+    """
+    sfx_id = str(body.get("sfx_id") or "")
+    effect = sfx.catalog().get(sfx_id)
+    if effect is None:
+        raise HTTPException(404, f"sound effect {sfx_id!r} not found")
+
+    with session() as s:
+        if s.get(Job, job_id) is None:
+            raise HTTPException(404, "job not found")
+        existing = s.scalars(
+            select(Media).where(Media.job_id == job_id, Media.sfx_id == sfx_id)
+        ).first()
+        if existing is not None and existing.status == TrackStatus.READY:
+            return _media_dict(existing)
+
+    media_id = new_id()
+    key = get_storage().put_stream(
+        f"{job_id}/media/{media_id}.wav", io.BytesIO(sfx.wav_bytes(sfx_id))
+    )
+    with session() as s:
+        item = Media(
+            id=media_id,
+            job_id=job_id,
+            kind=MediaKind.AUDIO,
+            status=TrackStatus.READY,
+            name=effect.name,
+            key=key,
+            sfx_id=sfx_id,
+            duration_s=sfx.duration_s(sfx_id),
+            # no tempo: an effect is not something to cut to the beat of
+            bpm=0.0,
+            beats=[],
+            peaks=list(sfx.peaks(sfx_id)),
+        )
+        s.add(item)
+        s.flush()
+        return _media_dict(item)
 
 
 # ── the music routes, now thin shells over the library ──────────────────────
