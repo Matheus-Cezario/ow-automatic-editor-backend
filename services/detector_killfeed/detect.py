@@ -235,7 +235,7 @@ def read_killfeed(
             len(player.letters), 100 * player.agreement,
         )
 
-    name_threshold = float(cfg.get("name_threshold", 0.48))
+    name_threshold = float(cfg.get("name_threshold", 0.40))
     threshold = float(cfg.get("icon_threshold", 0.55))
     gap_lo, gap_hi = cfg.get("gap_range", [0.4, 4.0])
     hold = float(cfg.get("hold_s", 7.0))
