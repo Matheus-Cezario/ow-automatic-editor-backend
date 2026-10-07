@@ -271,7 +271,7 @@ def read_killfeed(
         )
 
     name_threshold = float(cfg.get("name_threshold", 0.40))
-    threshold = float(cfg.get("icon_threshold", 0.85))
+    threshold = float(cfg.get("icon_threshold", 0.80))
     min_votes = int(cfg.get("icon_min_votes", 2))
     vote_share = float(cfg.get("icon_vote_share", 0.5))
     vote_floor = float(cfg.get("icon_vote_floor", 0.6))

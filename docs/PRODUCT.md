@@ -457,14 +457,17 @@ Three things that only showed up when measuring:
   them in most frames. And one frame above the threshold named a line, so a
   line whose icon never had a good frame was lost; now every frame of the
   line votes, and the ability has to win most of them -- which is also what
-  keeps a gun kill's empty gap out. The new threshold (0.85, on a new scale) is
-  **provisional**: the 1080p Ana match (16 min, 153 killfeed lines checked by
-  eye) was measured with icons cut from that same recording, because the
-  official ones could not be downloaded, and that flatters any threshold. What
-  the match did show for sure: the old crop window held the whole `>` of most
-  gun kills (now erased as the rightmost piece of the mark), the old tracker
-  reported the same kill 14 extra times over 19 kills (now 4), and no gun line
-  named an ability in either version;
+  keeps a gun kill's empty gap out. Measured on a 1080p Ana match (16 min,
+  153 killfeed lines checked by eye, the 270 official icons): the old version
+  named 11 ability kills, repeated 5 of them and named **two gun kills** as
+  weapons; the new one names the same 11, repeats 2 and names no gun kill.
+  The threshold sits at 0.80 on the new scale -- the right icons scored
+  0.85-0.99 and the first wrong name appears at 0.76. Eight ability kills of
+  that match are still missed by both: Ana's sleep dart comes out closer to
+  another hero's icon at killfeed size, and some killfeed icons (a flexed arm,
+  a crossbow) look like none of the official icons at all. The old crop window
+  also held the whole `>` of most gun kills; it is now erased as the rightmost
+  piece of the mark;
 - **on that 1080p match the player's name was not read** (3 letters, in 27% of
   frames: the card's letters are 11 px tall and break into strokes), so no
   kill there would count as the player's -- in either version. Not fixed yet;
