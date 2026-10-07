@@ -479,6 +479,25 @@ def test_a_name_of_the_same_length_is_still_another_name():
     assert same_name(player, other) < 0.4
 
 
+def test_a_small_dim_name_on_a_1080p_card_is_read_whole():
+    """On a real 1080p recording the card's letters are ~11 px tall and, after
+    compression, their strokes come out at 150-185 with a blue cast. The old
+    cut (light above 185, colour under 75) broke every letter into dots: the
+    name came out whole in 2% of the frames."""
+    import cv2
+    import numpy as np
+    from owcore.nameplate import read_name
+
+    text, scale, thick = "UNKNOWN", 0.42, 1
+    (width, letter_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    img = np.full((int(letter_h * 2.6), width + 16, 3), (120, 70, 40), np.uint8)
+    cv2.putText(img, text, (8, (img.shape[0] + letter_h) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, scale, (180, 160, 150), thick, cv2.LINE_AA)
+    ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+    name = read_name(cv2.imdecode(enc, cv2.IMREAD_COLOR))
+    assert name is not None and len(name) == len(text)
+
+
 def test_a_plate_with_nothing_written_does_not_invent_a_name():
     import numpy as np
     from owcore.nameplate import read_name

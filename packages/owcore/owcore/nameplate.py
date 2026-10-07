@@ -43,10 +43,29 @@ LETTER_BOX = 16
 _TEXT_LO = np.array([0, 0, 185], np.uint8)
 _TEXT_HI = np.array([179, 75, 255], np.uint8)
 
+#: ...except that "much light" depends on the recording. On a real 1080p match
+#: the card's letters are ~11 px tall, and after compression their strokes
+#: come out at 150-185 with a blue cast from the plate. The cut above broke
+#: every letter into dots: the name came out whole in 2% of the frames, and
+#: the most repeated reading had 3 letters. This looser cut reads it whole in
+#: 43% of them -- 79% of the frames where the card is on screen at all.
+_DIM_LO = np.array([0, 0, 150], np.uint8)
+_DIM_HI = np.array([179, 100, 255], np.uint8)
+
+#: which of the two cuts a crop gets is decided by its own letters: when what
+#: the loose cut finds is bright (median light at or above this), the writing
+#: is crisp and the strict cut is used. The loose cut on crisp writing lets the
+#: anti-aliased edges in, and small bold letters touch and merge.
+_BRIGHT_TEXT = 200
+
 
 def text_mask(bgr: np.ndarray) -> np.ndarray:
     """What is written, in white on black."""
-    return cv2.inRange(cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV), _TEXT_LO, _TEXT_HI)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    loose = cv2.inRange(hsv, _DIM_LO, _DIM_HI)
+    if not loose.any() or np.median(hsv[:, :, 2][loose > 0]) >= _BRIGHT_TEXT:
+        return cv2.inRange(hsv, _TEXT_LO, _TEXT_HI)
+    return loose
 
 
 def _letter_like(mask: np.ndarray) -> list[tuple[int, int, int, int, np.ndarray]]:
