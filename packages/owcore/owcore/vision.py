@@ -510,6 +510,115 @@ def glyph_in_disc(
     return normalized_glyph((gray < max_dark) & (r < 0.88))
 
 
+@dataclass(slots=True)
+class Glyph:
+    """A mark in shades of grey, with the size it had on screen.
+
+    The binary glyph of `normalized_glyph` is decided by one brightness cut, and
+    that cut is where small icons are lost. A killfeed icon is ~30 px tall at
+    1440p and ~10 at 480p; at that size compression smears every thin stroke
+    into grey, and a stroke that comes out at 150 when the cut is 170 simply
+    vanishes from the drawing. Here each pixel keeps *how much* of the mark it
+    is (0..1, measured against the box's own background), and `side` remembers
+    how many pixels the drawing really had -- `IconBank.rank` uses it to blur
+    the templates down to the same detail before comparing.
+    """
+
+    image: np.ndarray
+    side: int
+
+
+def _soft_glyph(soft: np.ndarray, *, cut: float = 0.35, min_px: int = 6) -> Glyph | None:
+    """Frames a 0..1 mark the way `normalized_glyph` frames a binary one."""
+    ink = soft >= cut
+    if int(np.count_nonzero(ink)) < min_px:
+        return None
+    ys, xs = np.nonzero(ink)
+    crop = soft[ys.min(): ys.max() + 1, xs.min(): xs.max() + 1].astype(np.float32)
+    side = max(crop.shape)
+    square = np.zeros((side, side), np.float32)
+    oy, ox = (side - crop.shape[0]) // 2, (side - crop.shape[1]) // 2
+    square[oy: oy + crop.shape[0], ox: ox + crop.shape[1]] = crop
+    interp = cv2.INTER_AREA if side > GLYPH_SIDE else cv2.INTER_LINEAR
+    return Glyph(cv2.resize(square, (GLYPH_SIDE, GLYPH_SIDE), interpolation=interp), side)
+
+
+def _drop_chevron(soft: np.ndarray, cut: float = 0.35) -> np.ndarray:
+    """Erases the rightmost piece of the mark: in the killfeed, the `>`.
+
+    Every killfeed line ends its gap with a `>` just before the victim's plate,
+    icon or not. The old way to keep it out was a crop window that stopped
+    before it -- a fixed fraction of the gap -- and on a real 1080p match that
+    window held the whole `>` in most gun kills: their gap is narrower, and the
+    `>` sits further left in it. A gun kill then offered a big, clean `>` as its
+    mark in every frame, and voting cannot reject a mark that is the same
+    every time. So the window now runs to the end of the gap, the `>` is always
+    in it, and it is always the rightmost piece: it goes, and what remains is
+    the icon -- or nothing, which is the honest answer for a gun kill.
+    """
+    ink = (soft >= cut).astype(np.uint8)
+    count, labels, stats, _cent = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    if count < 2:
+        return soft
+    right = stats[1:, cv2.CC_STAT_LEFT] + stats[1:, cv2.CC_STAT_WIDTH]
+    out = soft.copy()
+    out[labels == 1 + int(np.argmax(right))] = 0
+    return out
+
+
+def soft_glyph_on_dark(
+    bgr: np.ndarray, *, max_sat: int = 90, min_contrast: float = 50.0,
+    drop_chevron: bool = False,
+) -> Glyph | None:
+    """`glyph_on_dark` without the brightness cut: a light mark on a dark box.
+
+    The background is the crop's own median -- the box is most of the crop --
+    and the mark's full white is its brightest pixels, so a dim recording and a
+    bright one give the same 0..1 drawing. A crop with no contrast at all (an
+    explosion over the killfeed, an empty gap) has no glyph.
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    v = hsv[:, :, 2].astype(np.float32)
+    v[hsv[:, :, 1] > max_sat] = 0
+    bg, peak = float(np.median(v)), float(np.percentile(v, 99.5))
+    if peak - bg < min_contrast:
+        return None
+    soft = np.clip((v - bg) / (peak - bg), 0, 1)
+    if drop_chevron:
+        soft = _drop_chevron(soft)
+    return _soft_glyph(soft)
+
+
+def soft_glyph_in_disc(
+    bgr: np.ndarray, *, min_disc_frac: float = 0.20, max_sat: int = 70,
+    min_val: int = 185, min_contrast: float = 50.0,
+) -> Glyph | None:
+    """`glyph_in_disc` without the darkness cut: a dark mark on a white disc."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    white = ((hsv[:, :, 1] < max_sat) & (hsv[:, :, 2] > min_val)).astype(np.uint8)
+    if white.mean() < min_disc_frac:
+        return None
+    white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    count, _labels, stats, _cent = cv2.connectedComponentsWithStats(white, 8)
+    if count < 2:
+        return None
+    k = 1 + int(np.argmax(stats[1:, 4]))
+    x, y, w, h = (int(v) for v in stats[k, :4])
+    if min(w, h) < 8:
+        return None
+    gray = cv2.cvtColor(bgr[y: y + h, x: x + w], cv2.COLOR_BGR2GRAY).astype(np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    inside = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2) < 0.88
+    if not inside.any():
+        return None
+    disc, ink = float(np.percentile(gray[inside], 90)), float(np.percentile(gray[inside], 0.5))
+    if disc - ink < min_contrast:
+        return None
+    soft = np.clip((disc - gray) / (disc - ink), 0, 1)
+    soft[~inside] = 0
+    return _soft_glyph(soft)
+
+
 class IconBank:
     """The game's ability icons, ready to compare with a glyph.
 
@@ -519,9 +628,19 @@ class IconBank:
     is **one** matrix-vector product, not 270 template matches.
     """
 
-    def __init__(self, keys: list[str], matrix: np.ndarray):
+    #: blur applied to glyph and templates alike before `rank` compares them,
+    #: in pixels of the 56 px square. Correlation punishes a stroke that lands
+    #: one pixel to the side as much as a missing one; blurring both turns
+    #: "almost in place" into "almost the same score".
+    RANK_BLUR = 1.2
+
+    def __init__(self, keys: list[str], matrix: np.ndarray,
+                 soft: list[np.ndarray] | None = None):
         self.keys = keys
         self.matrix = matrix
+        #: each template as a 0..1 mark, the anti-aliasing of its edges kept
+        self.soft = soft or []
+        self._by_side: dict[int, np.ndarray] = {}
 
     def __bool__(self) -> bool:
         return bool(self.keys)
@@ -542,6 +661,7 @@ class IconBank:
         path = Path(path)
         keys: list[str] = []
         vectors: list[np.ndarray] = []
+        soft: list[np.ndarray] = []
         if path.exists():
             for f in sorted(path.rglob("*.png")):
                 img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
@@ -549,12 +669,52 @@ class IconBank:
                     log.warning("unreadable icon, skipping: %s", f)
                     continue
                 glyph = normalized_glyph(img < 128)
-                if glyph is None:
+                shade = _soft_glyph((255 - img.astype(np.float32)) / 255, cut=0.5)
+                if glyph is None or shade is None:
                     log.warning("icon without a readable mark, skipping: %s", f)
                     continue
                 keys.append(f"{f.parent.name}/{f.stem}")
                 vectors.append(cls._vector(glyph))
-        return cls(keys, np.stack(vectors) if vectors else np.zeros((0, GLYPH_SIDE ** 2), np.float32))
+                soft.append(shade.image)
+        return cls(
+            keys,
+            np.stack(vectors) if vectors else np.zeros((0, GLYPH_SIDE ** 2), np.float32),
+            soft,
+        )
+
+    def _at_side(self, side: int) -> np.ndarray:
+        """The bank as it would look drawn `side` pixels tall.
+
+        A 10 px icon on screen has lost every detail finer than a pixel; the
+        128 px template still has them all, and they count against the match.
+        Shrinking each template to the glyph's size and back levels the two
+        before they are compared. Sizes repeat (a recording has one killfeed
+        size), so each one is built once.
+        """
+        side = int(min(GLYPH_SIDE, max(6, side)))
+        if side not in self._by_side:
+            rows = []
+            for t in self.soft:
+                if side < GLYPH_SIDE:
+                    t = cv2.resize(t, (side, side), interpolation=cv2.INTER_AREA)
+                    t = cv2.resize(t, (GLYPH_SIDE, GLYPH_SIDE), interpolation=cv2.INTER_LINEAR)
+                rows.append(self._vector(cv2.GaussianBlur(t, (0, 0), self.RANK_BLUR)))
+            self._by_side[side] = (
+                np.stack(rows) if rows else np.zeros((0, GLYPH_SIDE ** 2), np.float32)
+            )
+        return self._by_side[side]
+
+    def rank(self, glyph: Glyph) -> tuple[str | None, float, float]:
+        """(best key, its correlation, the runner-up's correlation) for a
+        `Glyph`, compared at the size it was seen."""
+        if not self.soft:
+            return None, 0.0, 0.0
+        scores = self._at_side(glyph.side) @ self._vector(
+            cv2.GaussianBlur(glyph.image.astype(np.float32), (0, 0), self.RANK_BLUR)
+        )
+        order = np.argsort(scores)[::-1]
+        second = float(scores[order[1]]) if len(order) > 1 else 0.0
+        return self.keys[int(order[0])], float(scores[order[0]]), second
 
     def best_match(self, glyph: np.ndarray) -> tuple[str | None, float]:
         """Best (key, correlation) in the bank for this glyph. -1..1."""

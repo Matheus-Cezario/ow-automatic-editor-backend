@@ -194,8 +194,8 @@
   },
   "killfeed": {
     "_note": "Each killfeed line is '<killer> <ability icon> > <victim>'. The colour does NOT say the team: measured on the reference recording, the same player shows up on the blue plate of one line and the red of another -- blue is the killer, red is the victim, on both sides of the match. Only the name written on the blue plate answers who it was, and that is what `name_threshold` checks against the footer card.",
-    "_note_icon": "The icon lives in the gap between the two plates, and the '>' takes the end of that gap. The icon_span fractions were measured on the real HUD; the glyph is cropped inside that window and compared with templates/abilities/. An ultimate shows up as a white disc with a black drawing; a regular ability, as a white drawing in a dark box.",
-    "_note_measured": "On a real recording the right icon scores 0.65-0.93 and the runner-up stays at 0.27-0.55.",
+    "_note_icon": "The icon lives in the gap between the two plates, and the '>' takes the end of that gap. The window used to stop at 0.66 of the gap to leave the '>' out; on a real 1080p match the '>' of a gun kill fell inside that window in most frames (the gap is narrower without an icon), so a gun kill offered a clean '>' to be matched every frame. Now the window runs to 1.0 and the glyph step erases the rightmost piece of the mark, which is always the '>'. An ultimate shows up as a white disc with a black drawing; a regular ability, as a white drawing in a dark box.",
+    "_note_measured": "Measured with the black-and-white glyph, before the comparison in grey: on a real recording the right icon scored 0.65-0.93 and the runner-up 0.27-0.55. The grey comparison raises every score (right and wrong alike), so those numbers do not carry over -- see _note_threshold.",
     "hsv_killer": [
       {
         "lo": [
@@ -248,11 +248,17 @@
     ],
     "icon_span": [
       0.03,
-      0.66
+      1.0
     ],
     "icon_height": 1.24,
-    "_note_threshold": "0.65 is the cut between the right icon and a guess. Below it the matching names common weapons and passives -- things that do not even show up in the killfeed -- because a gap with no icon at all (a gun kill) still has the '>' to match something. Measured on 16 min of a real match: at 0.65 there were 7 kills, all checked one by one on the image, and no false ones; at 0.55 there were 19, of which 7 were gaps with no icon.",
-    "icon_threshold": 0.65,
+    "_note_threshold": "The icon is compared in shades of grey and at the size it was seen (IconBank.rank), which raises every score, so the old 0.65 no longer applies. 0.80 was measured on a real 1080p Ana match (16 min, 153 killfeed lines checked by eye) against the 270 official icons: the right icons of 11 ability kills scored 0.85-0.99; the first wrong name to pass appears at 0.76 (a headshot marker read as mercy/guardian_angel), and at 0.70 Ana's sleep dart comes out as symmetra/sentry_turret. At 0.85 the Sigma ultimate (0.846) was lost. The old binary comparison at 0.65 on the same match named two gun kills as weapons (illari/solar_rifle, dmon/portable_fusion_repeater).",
+    "icon_threshold": 0.8,
+    "_note_votes": "A line names an ability only if that ability was the best match in at least icon_min_votes frames AND in icon_vote_share of the voting frames, and only frames whose best match reaches icon_vote_floor vote at all. A gap with no icon (a gun kill) matches something different in each frame, and poorly; a real icon wins frame after frame. Measured on a real 1080p Ana match (16 min, 153 lines checked by eye): tracks there are short -- the plates' edges jump with the scenery behind them and a line often splits into 2-4 tracks -- so min_votes 3 lost kills whose track had 2 frames, and without the floor a 13-frame blade at 0.97 lost its line to 20 frames of a crop that had landed on hero portraits. No gun line named an ability with these values.",
+    "icon_min_votes": 2,
+    "icon_vote_share": 0.5,
+    "icon_vote_floor": 0.6,
+    "_note_min_side": "Glyphs smaller than icon_min_side_px (the drawing's own height or width, in pixels of the crop) do not vote. On synthetic icons at 8 px the grey comparison named half the lines -- and gave 18% of them the WRONG ability, consistently, because at that size two drawings really are the same blob. Voting does not catch that kind of error. From ~10 px on the gate barely costs anything. It is roughly a recording below 480p.",
+    "icon_min_side_px": 8,
     "_note_hold": "hold_s holds the line count for a moment: the icon crop fails on isolated frames (the line slides in, and compression eats the drawing), and without it each failure split one line into two kills. It only delays the count's fall -- it does not invent lines. 1s was nowhere near: in a real match the crop of ONE line fails for 3 to 5 seconds in a row, and the same kill came out 2, 3 or 4 times. 7s is a line's life on screen, and it is what the 1s-to-12s sweep points to: from 5s on Ana's result stops changing, and 7s still removes the old line that came back as a new kill when a more recent line pushed it down. Holding longer never lost a real kill -- two with the same ability raise the count to 2, and that is already a rising edge.",
     "hold_s": 7.0,
     "_note_slide": "slide_s is how long the line takes to finish coming in. In that beginning the plates are still opening -- on a real recording one of the outer edges moves 16 to 20 pixels from one frame to the next -- and only the inner edges, which surround the icon, serve to recognise the line. After that time the outer ones count again, and they are what separate two kills by the same player.",

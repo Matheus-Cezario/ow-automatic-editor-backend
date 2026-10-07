@@ -22,7 +22,11 @@ from owcore.vision import (
     glyph_on_dark,
     hsv_ratio,
     normalized_glyph,
+    soft_glyph_in_disc,
+    soft_glyph_on_dark,
 )
+
+from conftest import service_module
 
 
 # ─────────────────────────────────── bus ────────────────────────────────────
@@ -391,6 +395,201 @@ def test_the_icon_key_carries_hero_and_ability(tmp_path):
     assert set(IconBank.from_dir(tmp_path).keys) == {
         "orisa/energy_javelin", "domina/panopticon",
     }
+
+
+def _thin_icons(folder) -> dict[str, np.ndarray]:
+    """Four icons drawn in thin strokes, the hard case: a dart, not a rock."""
+    import cv2
+
+    def canvas():
+        return np.zeros((128, 128), np.uint8)
+
+    ring, cross, zed, hook = canvas(), canvas(), canvas(), canvas()
+    cv2.circle(ring, (64, 64), 44, 255, 7)
+    cv2.line(ring, (64, 20), (64, 108), 255, 7)
+    cv2.line(cross, (20, 20), (108, 108), 255, 7)
+    cv2.line(cross, (108, 20), (20, 108), 255, 7)
+    cv2.polylines(zed, [np.array([[22, 22], [106, 22], [22, 106], [106, 106]])], False, 255, 7)
+    cv2.ellipse(hook, (64, 50), (36, 30), 0, 180, 450, 255, 7)
+    cv2.line(hook, (64, 80), (64, 112), 255, 7)
+    icons = {"ana/ring": ring, "ana/cross": cross, "sigma/zed": zed, "sigma/hook": hook}
+    for key, img in icons.items():
+        hero, name = key.split("/")
+        (folder / hero).mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(folder / hero / f"{name}.png"), 255 - img)
+    return icons
+
+
+def _as_killfeed_shows_it(icon: np.ndarray, side: int, seed: int) -> np.ndarray:
+    """The whole gap of a killfeed line: the icon white on the dark box,
+    `side` px tall, then the `>` before the victim's plate -- blurred and
+    compressed the way a 1080p-and-under recording delivers it. A blank `icon`
+    is a gun kill."""
+    import cv2
+
+    rng = np.random.default_rng(seed)
+    h, w = int(side * 1.5), int(side * 2.3)
+    img = np.full((h, w, 3), (40, 38, 36), np.float32)
+
+    def paste(mark, x, y, s):
+        m = cv2.resize(mark, (s, s), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+        x0, y0, x1, y1 = max(0, x), max(0, y), min(w, x + s), min(h, y + s)
+        m = m[y0 - y: y1 - y, x0 - x: x1 - x, None]
+        img[y0:y1, x0:x1] = img[y0:y1, x0:x1] * (1 - m) + 235 * m
+
+    paste(icon, int(side * 0.25), (h - side) // 2, side)
+    tip = np.zeros((128, 128), np.uint8)
+    cv2.polylines(tip, [np.array([[40, 24], [96, 64], [40, 104]])], False, 255, 18)
+    s = int(side * 0.6)
+    paste(tip, w - s - 2, (h - s) // 2, s)
+    img = cv2.GaussianBlur(img, (0, 0), 0.6)
+    img = np.clip(img + rng.normal(0, 4, img.shape), 0, 255).astype(np.uint8)
+    ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 35])
+    return cv2.imdecode(enc, cv2.IMREAD_COLOR)
+
+
+@pytest.mark.parametrize("side", [12, 16, 24])
+def test_a_small_thin_icon_is_named_in_grey(tmp_path, side):
+    """At 12-16 px the thin strokes come out grey after compression, and the
+    black-and-white cut of `glyph_on_dark` drops them: the drawing falls apart
+    or disappears. Compared in grey, at the size it was seen, it is still
+    itself -- in most frames, which is what the line's vote needs."""
+    icons = _thin_icons(tmp_path)
+    bank = IconBank.from_dir(tmp_path)
+    for key, icon in icons.items():
+        right = 0
+        for seed in range(10):
+            glyph = soft_glyph_on_dark(_as_killfeed_shows_it(icon, side, seed),
+                                       drop_chevron=True)
+            assert glyph is not None
+            best, score, second = bank.rank(glyph)
+            right += best == key and score > second
+        assert right >= 8, f"{key} at {side}px: named right in {right}/10 frames"
+
+
+def test_the_chevron_alone_is_no_icon(tmp_path):
+    """A gun kill's gap has no icon, only the `>`. It must not offer itself as
+    a mark to be matched: on a real match it did, in every frame of the line."""
+    blank = np.zeros((128, 128), np.uint8)
+    for side in (12, 16, 24):
+        for seed in range(5):
+            crop = _as_killfeed_shows_it(blank, side, seed)
+            assert soft_glyph_on_dark(crop, drop_chevron=True) is None
+    # and with an icon there, the `>` does not get into its drawing
+    icons = _thin_icons(tmp_path)
+    bank = IconBank.from_dir(tmp_path)
+    crop = _as_killfeed_shows_it(icons["ana/cross"], 24, seed=2)
+    assert bank.rank(soft_glyph_on_dark(crop, drop_chevron=True))[0] == "ana/cross"
+
+
+def test_the_soft_disc_glyph_reads_an_ultimate(tmp_path):
+    import cv2
+
+    _write_icon(tmp_path, "sample", "arrow")
+    disc = np.full((60, 60, 3), 20, np.uint8)
+    cv2.circle(disc, (30, 30), 26, (250, 250, 250), -1)
+    disc[15:45, 15:45][_arrow(30) > 0] = (15, 15, 15)
+    key, score, _ = IconBank.from_dir(tmp_path).rank(soft_glyph_in_disc(disc))
+    assert key == "sample/arrow" and score > 0.9
+
+
+def test_a_box_with_no_contrast_has_no_soft_glyph():
+    flat = np.full((30, 40, 3), 60, np.uint8)
+    assert soft_glyph_on_dark(flat) is None
+
+
+# ─────────────────────── killfeed: deciding a line ──────────────────────────
+
+
+def _line():
+    detect = service_module("detector_killfeed")
+    return detect._Line(0, 0, 0, 0, 26, 0.0, 0.0)
+
+
+def test_a_line_is_named_by_the_icon_its_frames_agree_on():
+    ln = _line()
+    for score in (0.70, 0.80, 0.90, 0.88, 0.86):
+        ln.vote("ana/sleep_dart", score, "ability")
+    ln.vote("dva/light_gun", 0.95, "ability")  # one lucky frame
+    key, best, style = ln.ability(0.85, 3, 0.5)
+    assert (key, best, style) == ("ana/sleep_dart", 0.90, "ability")
+
+
+def test_a_gap_whose_frames_disagree_names_nothing():
+    """A gun kill's gap still matches something in every frame -- a different
+    something each time. Even with good scores, that is no icon."""
+    ln = _line()
+    for key in ("a/x", "b/y", "c/z", "a/x", "d/w", "e/v", "b/y", "f/u"):
+        ln.vote(key, 0.9, "ability")
+    assert ln.ability(0.85, 3, 0.5) is None
+
+
+def test_a_consistent_but_poor_match_names_nothing():
+    ln = _line()
+    for _ in range(20):
+        ln.vote("sample/ability_kill", 0.34, "ability")
+    assert ln.ability(0.85, 3, 0.5) is None
+
+
+def test_one_good_frame_is_not_enough_to_name_a_line():
+    ln = _line()
+    ln.vote("ana/nano_boost", 0.97, "ult")
+    assert ln.ability(0.85, 2, 0.5) is None
+
+
+def test_noise_frames_do_not_outvote_a_clear_icon():
+    """Measured on a real match: a track ran for seconds over frames where the
+    crop sat on hero portraits, and a blade that won 13 frames at 0.97 lost
+    the line to 20 frames of noise at 0.4-0.5. Below the floor, a frame does
+    not vote."""
+    ln = _line()
+    for _ in range(13):
+        ln.vote("z/blade", 0.97, "ability")
+    for key in ("a/x", "b/y") * 10:
+        ln.vote(key, 0.45, "ability")
+    assert ln.ability(0.85, 2, 0.5) is None
+    assert ln.ability(0.85, 2, 0.5, floor=0.6)[0] == "z/blade"
+
+
+class _Player:
+    def __init__(self, letters):
+        self.letters = letters
+
+
+def _name(*shapes):
+    return [np.full((8, 8), v, np.uint8) for v in shapes]
+
+
+def test_one_good_reading_of_the_name_is_enough():
+    """One frame where two letters touch reads as a name one letter short --
+    score 0. The player's kill must not go to someone else over it."""
+    ln = _line()
+    ln.plate_w = 160
+    me = _name(255, 255, 255, 255)
+    ln.readings = [(160, _name(255, 255, 255)), (160, me), (158, _name(255, 255))]
+    assert ln.killer_is(_Player(me), 0.4) is True
+
+
+def test_a_half_open_plate_does_not_vote_on_the_name():
+    ln = _line()
+    ln.plate_w = 160
+    me = _name(255, 255, 255, 255)
+    ln.readings = [(90, me), (160, _name(255, 255, 255))]
+    assert ln.killer_is(_Player(me), 0.4) is False
+
+
+def test_when_the_widest_plate_gave_no_reading_the_next_widest_decides():
+    ln = _line()
+    ln.plate_w = 170  # the frame an explosion covered: no letters came out
+    me = _name(255, 255, 255, 255)
+    ln.readings = [(90, _name(255, 255)), (150, me)]
+    assert ln.killer_is(_Player(me), 0.4) is True
+
+
+def test_without_readings_the_killer_is_unknown():
+    ln = _line()
+    assert ln.killer_is(_Player(_name(255, 255, 255)), 0.4) is None
+    assert ln.killer_is(None, 0.4) is None
 
 
 def test_the_crosshair_inside_the_roi_comes_from_the_roi_geometry():
