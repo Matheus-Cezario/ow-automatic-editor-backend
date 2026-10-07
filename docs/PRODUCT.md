@@ -445,10 +445,41 @@ Three things that only showed up when measuring:
   after the critical marker and covers the same diagonals; at 12 fps there is
   not always a frame left between the two. The kill is still detected — what is
   lost is the "headshot" label;
-- **ability kills find 7 out of every 11**, and that trade-off is deliberate:
-  the icon threshold sits where precision is 100%. A shelf with one moment fewer
-  is better than one that offers a cut that is not what it says: whoever
-  assembles trusts the label and does not go back to check the recording;
+- **ability kills found 7 out of every 11**, and that trade-off was
+  deliberate: the icon threshold sat where precision is 100%. A shelf with one
+  moment fewer is better than one that offers a cut that is not what it says:
+  whoever assembles trusts the label and does not go back to check the
+  recording. Two things in that number were not the threshold's fault, and
+  have changed since. The icon was compared as a black-and-white cut, and at
+  killfeed size compression turns thin strokes grey, under the cut: on
+  synthetic thin-stroke icons at 12-16 px that comparison named **none** of
+  40 frames, and the comparison in grey, at the size the icon was seen, names
+  them in most frames. And one frame above the threshold named a line, so a
+  line whose icon never had a good frame was lost; now every frame of the
+  line votes, and the ability has to win most of them -- which is also what
+  keeps a gun kill's empty gap out. Measured on a 1080p Ana match (16 min,
+  153 killfeed lines checked by eye, the 270 official icons): the old version
+  named 11 ability kills, repeated 5 of them and named **two gun kills** as
+  weapons; the new one names the same 11, repeats 2 and names no gun kill.
+  The threshold sits at 0.80 on the new scale -- the right icons scored
+  0.85-0.99 and the first wrong name appears at 0.76. Eight ability kills of
+  that match are still missed by both: Ana's sleep dart comes out closer to
+  another hero's icon at killfeed size, and some killfeed icons (a flexed arm,
+  a crossbow) look like none of the official icons at all. The old crop window
+  also held the whole `>` of most gun kills; it is now erased as the rightmost
+  piece of the mark;
+- **on that 1080p match the player's name was not read** (3 letters, in 27% of
+  frames: the card's letters are 11 px tall and break into strokes), so no
+  kill there would count as the player's -- in either version. Not fixed yet;
+- **a line's plates are not stable on a real match**: the scenery behind the
+  translucent HUD moves their edges by tens of pixels between frames, and one
+  line still splits into 2-4 tracks. That is where the remaining repeats come
+  from. Not fixed yet;
+- **whose kill it was used to be decided by one reading of the name.** A frame
+  where two letters of the killer's name touched read as a name of another
+  length and gave the player's own kill to "someone else". Every reading at the
+  plate's full width now counts, and one match is enough -- other players'
+  names stay at 0.21 at most against a threshold of 0.40;
 - **two kills by the same player on the same victim, with the same ability and
   within ~7 s of each other, count as one.** The two lines are identical in
   everything the detector uses to recognise them. It requires the victim to
