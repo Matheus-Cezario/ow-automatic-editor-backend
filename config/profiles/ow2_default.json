@@ -257,8 +257,8 @@
     "hold_s": 7.0,
     "_note_slide": "slide_s is how long the line takes to finish coming in. In that beginning the plates are still opening -- on a real recording one of the outer edges moves 16 to 20 pixels from one frame to the next -- and only the inner edges, which surround the icon, serve to recognise the line. After that time the outer ones count again, and they are what separate two kills by the same player.",
     "slide_s": 0.6,
-    "_note_name": "0.40 sits in the middle of the gap. Measured on the reference recording, with 81 killfeed lines checked one by one: the player's 3 lines score 0.59, 0.66 and 0.66, and the highest score among the 78 others is 0.21 -- and it belongs to MATEUSKCZ, which happens to have the same 9 letters as CENOURAET. Names of different lengths score 0 on their own.",
-    "name_threshold": 0.4
+    "_note_name": "0.48 sits in the middle of the gap, measured on two recordings. 1440p reference, 81 killfeed lines checked one by one: the player's 3 lines score 0.59, 0.66 and 0.66, and the highest of the 78 others is 0.21 (MATEUSKCZ, same 9 letters as CENOURAET). 1080p Ana match, 153 lines: the player's lines score 0.59-0.69, and the highest of everyone else's, over every frame of their lines, is 0.38. It was 0.40, which that second recording showed to be too close to the others. Names of different lengths score 0 on their own.",
+    "name_threshold": 0.48
   },
   "banner": {
     "_note": "The footer shows several banners with the same colour and shape (SAVED BY, ORB OF HARMONY, GAINED FROM, ... STUNNED BY, PUT ... TO SLEEP). Colour and geometry find the banner; what says WHICH ability is the ICON on the left end, compared with the templates in config/shapes/. Icon and not text on purpose: text changes with the language, the icon does not.",
