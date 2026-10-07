@@ -543,30 +543,32 @@ def _soft_glyph(soft: np.ndarray, *, cut: float = 0.35, min_px: int = 6) -> Glyp
     return Glyph(cv2.resize(square, (GLYPH_SIDE, GLYPH_SIDE), interpolation=interp), side)
 
 
-def _drop_right_edge(soft: np.ndarray, cut: float = 0.35) -> np.ndarray:
-    """Erases the pieces of the mark that touch the crop's right border.
+def _drop_chevron(soft: np.ndarray, cut: float = 0.35) -> np.ndarray:
+    """Erases the rightmost piece of the mark: in the killfeed, the `>`.
 
-    In the killfeed that is where the `>` lives. The crop window is meant to stop
-    before it, but on a sliding line or a resolution the window was not measured
-    on, its tip comes in -- and a gun kill, which has no icon at all, then
-    offers the `>` as a mark, which always matches *some* ability. Only what
-    touches that border goes: the icon itself sits in the middle of the gap.
+    Every killfeed line ends its gap with a `>` just before the victim's plate,
+    icon or not. The old way to keep it out was a crop window that stopped
+    before it -- a fixed fraction of the gap -- and on a real 1080p match that
+    window held the whole `>` in most gun kills: their gap is narrower, and the
+    `>` sits further left in it. A gun kill then offered a big, clean `>` as its
+    mark in every frame, and voting cannot reject a mark that is the same
+    every time. So the window now runs to the end of the gap, the `>` is always
+    in it, and it is always the rightmost piece: it goes, and what remains is
+    the icon -- or nothing, which is the honest answer for a gun kill.
     """
     ink = (soft >= cut).astype(np.uint8)
-    count, labels = cv2.connectedComponents(ink, connectivity=8)
+    count, labels, stats, _cent = cv2.connectedComponentsWithStats(ink, connectivity=8)
     if count < 2:
         return soft
-    edge = set(np.unique(labels[:, -1]).tolist()) - {0}
-    if not edge:
-        return soft
+    right = stats[1:, cv2.CC_STAT_LEFT] + stats[1:, cv2.CC_STAT_WIDTH]
     out = soft.copy()
-    out[np.isin(labels, list(edge))] = 0
+    out[labels == 1 + int(np.argmax(right))] = 0
     return out
 
 
 def soft_glyph_on_dark(
     bgr: np.ndarray, *, max_sat: int = 90, min_contrast: float = 50.0,
-    drop_right_edge: bool = False,
+    drop_chevron: bool = False,
 ) -> Glyph | None:
     """`glyph_on_dark` without the brightness cut: a light mark on a dark box.
 
@@ -582,8 +584,8 @@ def soft_glyph_on_dark(
     if peak - bg < min_contrast:
         return None
     soft = np.clip((v - bg) / (peak - bg), 0, 1)
-    if drop_right_edge:
-        soft = _drop_right_edge(soft)
+    if drop_chevron:
+        soft = _drop_chevron(soft)
     return _soft_glyph(soft)
 
 

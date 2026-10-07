@@ -160,10 +160,12 @@ def _line_icon(
 
     The window is a fraction of the **gap** between them, and not an offset in
     pixels: the killfeed shrinks and grows with the recording's resolution, but
-    the line's internal proportions do not change. The end of the gap belongs to
-    the `>`, so the window stops before it.
+    the line's internal proportions do not change. The window runs to the end
+    of the gap on purpose, `>` included: the glyph step erases the `>` as the
+    rightmost piece of the mark (see `owcore.vision._drop_chevron`), and that
+    only works if the whole `>` is always inside.
     """
-    lo, hi = cfg.get("icon_span", [0.03, 0.66])
+    lo, hi = cfg.get("icon_span", [0.03, 1.0])
     gap = victim.x - killer.right
     x0 = int(killer.right + lo * gap)
     x1 = int(killer.right + hi * gap)
@@ -179,7 +181,7 @@ def _line_icon(
     glyph = soft_glyph_in_disc(crop)
     if glyph is not None:
         return glyph, "ult"
-    return soft_glyph_on_dark(crop, drop_right_edge=True), "ability"
+    return soft_glyph_on_dark(crop, drop_chevron=True), "ability"
 
 
 def _read_killer(bgr: np.ndarray, killer: Plate, line: "_Line") -> None:
@@ -270,8 +272,9 @@ def read_killfeed(
 
     name_threshold = float(cfg.get("name_threshold", 0.40))
     threshold = float(cfg.get("icon_threshold", 0.85))
-    min_votes = int(cfg.get("icon_min_votes", 3))
+    min_votes = int(cfg.get("icon_min_votes", 2))
     vote_share = float(cfg.get("icon_vote_share", 0.5))
+    vote_floor = float(cfg.get("icon_vote_floor", 0.6))
     min_side = int(cfg.get("icon_min_side_px", 8))
     gap_lo, gap_hi = cfg.get("gap_range", [0.4, 4.0])
     hold = float(cfg.get("hold_s", 7.0))
@@ -351,7 +354,7 @@ def read_killfeed(
             )
         )
 
-        named = ln.ability(threshold, min_votes, vote_share)
+        named = ln.ability(threshold, min_votes, vote_share, vote_floor)
         if named is None:
             # no icon, or no icon that the frames agree on: almost always a
             # kill with a normal weapon, which draws none
@@ -467,24 +470,29 @@ class _Line:
             self.styles[key] = style
 
     def ability(
-        self, threshold: float, min_votes: int, share: float
+        self, threshold: float, min_votes: int, share: float, floor: float = 0.0
     ) -> tuple[str, float, str] | None:
         """(key, best score, style) of the ability this line was made with, or
         None when the frames do not agree on one.
 
-        The winner must have taken at least `min_votes` frames and `share` of
-        all of them, and its best frame must reach `threshold`. The first two
-        are what tell an icon from no icon: a gun kill's empty gap still
-        matches *something* in each frame, but a different something each time,
-        while a real icon wins frame after frame. The threshold keeps a
-        consistent but poor match -- a crop that always lands half on the `>`
-        -- from naming the line.
+        Only frames whose best match reaches `floor` vote at all. The winner
+        must have taken at least `min_votes` of those frames and `share` of
+        them, and its best frame must reach `threshold`. The vote is what tells
+        an icon from no icon: a gun kill's empty gap still matches *something*
+        in each frame, but a different something each time and poorly, while a
+        real icon wins frame after frame. The floor keeps those poor frames from
+        diluting a real icon's share: on a real match a track can run for
+        seconds over frames where the crop landed on a hero portrait, and a
+        blade that won 13 frames at 0.97 lost the line to 20 frames of noise
+        at 0.4-0.5.
         """
-        if not self.votes:
+        votes = {k: [s for s in v if s >= floor] for k, v in self.votes.items()}
+        votes = {k: v for k, v in votes.items() if v}
+        if not votes:
             return None
-        total = sum(len(v) for v in self.votes.values())
-        key = max(self.votes, key=lambda k: (len(self.votes[k]), max(self.votes[k])))
-        wins = self.votes[key]
+        total = sum(len(v) for v in votes.values())
+        key = max(votes, key=lambda k: (len(votes[k]), max(votes[k])))
+        wins = votes[key]
         if len(wins) < min_votes or len(wins) < share * total:
             return None
         best = max(wins)

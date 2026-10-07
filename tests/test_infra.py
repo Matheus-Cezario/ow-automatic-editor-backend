@@ -420,14 +420,15 @@ def _thin_icons(folder) -> dict[str, np.ndarray]:
     return icons
 
 
-def _as_killfeed_shows_it(icon: np.ndarray, side: int, seed: int,
-                          chevron: bool = False) -> np.ndarray:
-    """The icon white on the dark box, `side` px tall, blurred and compressed
-    the way a 1080p-and-under recording delivers it."""
+def _as_killfeed_shows_it(icon: np.ndarray, side: int, seed: int) -> np.ndarray:
+    """The whole gap of a killfeed line: the icon white on the dark box,
+    `side` px tall, then the `>` before the victim's plate -- blurred and
+    compressed the way a 1080p-and-under recording delivers it. A blank `icon`
+    is a gun kill."""
     import cv2
 
     rng = np.random.default_rng(seed)
-    h, w = int(side * 1.5), int(side * 1.9)
+    h, w = int(side * 1.5), int(side * 2.3)
     img = np.full((h, w, 3), (40, 38, 36), np.float32)
 
     def paste(mark, x, y, s):
@@ -436,12 +437,11 @@ def _as_killfeed_shows_it(icon: np.ndarray, side: int, seed: int,
         m = m[y0 - y: y1 - y, x0 - x: x1 - x, None]
         img[y0:y1, x0:x1] = img[y0:y1, x0:x1] * (1 - m) + 235 * m
 
-    paste(icon, (w - side) // 2 - 2, (h - side) // 2, side)
-    if chevron:
-        tip = np.zeros((128, 128), np.uint8)
-        cv2.polylines(tip, [np.array([[30, 20], [100, 64], [30, 108]])], False, 255, 18)
-        s = int(side * 0.7)
-        paste(tip, w - int(s * 0.45), (h - s) // 2, s)
+    paste(icon, int(side * 0.25), (h - side) // 2, side)
+    tip = np.zeros((128, 128), np.uint8)
+    cv2.polylines(tip, [np.array([[40, 24], [96, 64], [40, 104]])], False, 255, 18)
+    s = int(side * 0.6)
+    paste(tip, w - s - 2, (h - s) // 2, s)
     img = cv2.GaussianBlur(img, (0, 0), 0.6)
     img = np.clip(img + rng.normal(0, 4, img.shape), 0, 255).astype(np.uint8)
     ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 35])
@@ -460,7 +460,7 @@ def test_a_small_thin_icon_is_named_in_grey(tmp_path, side):
         right = 0
         for seed in range(10):
             glyph = soft_glyph_on_dark(_as_killfeed_shows_it(icon, side, seed),
-                                       drop_right_edge=True)
+                                       drop_chevron=True)
             assert glyph is not None
             best, score, second = bank.rank(glyph)
             right += best == key and score > second
@@ -468,17 +468,18 @@ def test_a_small_thin_icon_is_named_in_grey(tmp_path, side):
 
 
 def test_the_chevron_alone_is_no_icon(tmp_path):
-    """A gun kill's gap has no icon, only the tip of the `>` at the window's
-    right edge. It must not offer itself as a mark to be matched."""
+    """A gun kill's gap has no icon, only the `>`. It must not offer itself as
+    a mark to be matched: on a real match it did, in every frame of the line."""
     blank = np.zeros((128, 128), np.uint8)
-    for side in (12, 24):
-        crop = _as_killfeed_shows_it(blank, side, seed=1, chevron=True)
-        assert soft_glyph_on_dark(crop, drop_right_edge=True) is None
-    # and with an icon there, the tip does not get into its drawing
+    for side in (12, 16, 24):
+        for seed in range(5):
+            crop = _as_killfeed_shows_it(blank, side, seed)
+            assert soft_glyph_on_dark(crop, drop_chevron=True) is None
+    # and with an icon there, the `>` does not get into its drawing
     icons = _thin_icons(tmp_path)
     bank = IconBank.from_dir(tmp_path)
-    crop = _as_killfeed_shows_it(icons["ana/cross"], 24, seed=2, chevron=True)
-    assert bank.rank(soft_glyph_on_dark(crop, drop_right_edge=True))[0] == "ana/cross"
+    crop = _as_killfeed_shows_it(icons["ana/cross"], 24, seed=2)
+    assert bank.rank(soft_glyph_on_dark(crop, drop_chevron=True))[0] == "ana/cross"
 
 
 def test_the_soft_disc_glyph_reads_an_ultimate(tmp_path):
@@ -533,7 +534,21 @@ def test_a_consistent_but_poor_match_names_nothing():
 def test_one_good_frame_is_not_enough_to_name_a_line():
     ln = _line()
     ln.vote("ana/nano_boost", 0.97, "ult")
-    assert ln.ability(0.85, 3, 0.5) is None
+    assert ln.ability(0.85, 2, 0.5) is None
+
+
+def test_noise_frames_do_not_outvote_a_clear_icon():
+    """Measured on a real match: a track ran for seconds over frames where the
+    crop sat on hero portraits, and a blade that won 13 frames at 0.97 lost
+    the line to 20 frames of noise at 0.4-0.5. Below the floor, a frame does
+    not vote."""
+    ln = _line()
+    for _ in range(13):
+        ln.vote("z/blade", 0.97, "ability")
+    for key in ("a/x", "b/y") * 10:
+        ln.vote(key, 0.45, "ability")
+    assert ln.ability(0.85, 2, 0.5) is None
+    assert ln.ability(0.85, 2, 0.5, floor=0.6)[0] == "z/blade"
 
 
 class _Player:

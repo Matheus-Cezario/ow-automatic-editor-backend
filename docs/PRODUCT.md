@@ -458,7 +458,20 @@ Three things that only showed up when measuring:
   line whose icon never had a good frame was lost; now every frame of the
   line votes, and the ability has to win most of them -- which is also what
   keeps a gun kill's empty gap out. The new threshold (0.85, on a new scale) is
-  **provisional** until it is measured on a real match the way 0.65 was;
+  **provisional**: the 1080p Ana match (16 min, 153 killfeed lines checked by
+  eye) was measured with icons cut from that same recording, because the
+  official ones could not be downloaded, and that flatters any threshold. What
+  the match did show for sure: the old crop window held the whole `>` of most
+  gun kills (now erased as the rightmost piece of the mark), the old tracker
+  reported the same kill 14 extra times over 19 kills (now 4), and no gun line
+  named an ability in either version;
+- **on that 1080p match the player's name was not read** (3 letters, in 27% of
+  frames: the card's letters are 11 px tall and break into strokes), so no
+  kill there would count as the player's -- in either version. Not fixed yet;
+- **a line's plates are not stable on a real match**: the scenery behind the
+  translucent HUD moves their edges by tens of pixels between frames, and one
+  line still splits into 2-4 tracks. That is where the remaining repeats come
+  from. Not fixed yet;
 - **whose kill it was used to be decided by one reading of the name.** A frame
   where two letters of the killer's name touched read as a name of another
   length and gave the player's own kill to "someone else". Every reading at the
