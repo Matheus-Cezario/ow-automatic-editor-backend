@@ -3041,6 +3041,73 @@ def test_typewriter_is_an_entrance_only(isolated):
         TextStyle(anim_out="typewriter")
 
 
+def test_each_line_is_its_own_drawtext_on_the_same_rows(isolated):
+    """Typed breaks become lines a line height apart, placed by the baseline,
+    so a line of capitals and one with a `g` sit where the monitor puts them."""
+    from owcore import textfx
+    from owcore.models import TimelineClip
+
+    c = textfx.filter_chain(
+        TimelineClip(at_s=0, duration_s=2, source="text", text="ACE\ngg",
+                     text_style={"size": 0.1}), 720)
+    assert c.count("drawtext=") == 2
+    assert "text='ACE'" in c and "text='gg'" in c
+    assert c.count("-ascent") == 2
+    assert "\n" not in c
+
+
+def test_a_text_box_breaks_between_words(isolated):
+    from owcore import fonts, textlayout
+
+    font = fonts.default_font()
+    one_line = textlayout.wrap(font, "the quick brown fox", 40, None)
+    assert one_line == ["the quick brown fox"]
+    narrow = textlayout.wrap(font, "the quick brown fox", 40, 260)
+    assert len(narrow) > 1
+    assert " ".join(narrow) == "the quick brown fox"
+    assert all(textlayout.width(font, line, 40) <= 260 for line in narrow)
+    # a word wider than the box stays whole
+    assert textlayout.wrap(font, "unbreakable", 40, 10) == ["unbreakable"]
+
+
+def test_alignment_lines_up_on_the_block_edges(isolated):
+    from owcore import textfx
+    from owcore.models import TimelineClip
+
+    def chain(align):
+        return textfx.filter_chain(
+            TimelineClip(at_s=0, duration_s=2, source="text", text="A\nBBBB",
+                         text_style={"size": 0.1, "align": align}), 720)
+
+    assert "-text_w/2" in chain("center")
+    left = chain("left")
+    assert "-text_w" not in left
+    assert "-text_w'" in chain("right")
+
+
+def test_box_and_shadow(isolated):
+    from owcore import textfx
+    from owcore.models import TextStyle, TimelineClip
+
+    def chain(**style):
+        return textfx.filter_chain(
+            TimelineClip(at_s=0, duration_s=2, source="text", text="ACE",
+                         text_style={"size": 0.1, **style}), 720)
+
+    plain = chain()
+    assert "drawbox" not in plain and "shadowx" not in plain
+    boxed = chain(box="black", box_opacity=0.5)
+    # under the text, and replacing the transparent canvas, or it never shows
+    assert boxed.startswith("drawbox=")
+    assert "color=black@0.500" in boxed and "replace=1" in boxed
+    assert "shadowcolor=red@" in chain(shadow="red")
+    # an animated text takes its box along, in steps
+    faded = chain(box="black", anim_in="fade", anim_s=0.5)
+    assert faded.count("drawbox=") > 5
+    with pytest.raises(ValueError, match="colour"):
+        TextStyle(box="black:x=1")
+
+
 def _text_over_red(tmp_path, short_sample, name, **style):
     from owcore.models import Layer, Timeline, TimelineClip
 
@@ -3061,6 +3128,32 @@ def _white(video, t) -> float:
 def test_a_bundled_font_draws(isolated, short_sample, tmp_path):
     video = _text_over_red(tmp_path, short_sample, "anton", font="bangers")
     assert _white(video, 1.0) > 0.02
+
+
+def test_a_box_shows_behind_left_aligned_lines(isolated, short_sample, tmp_path):
+    """The box has to *show*: drawn on the transparent canvas without
+    replacing it, it kept alpha 0 and vanished."""
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    lib = _solid_colours(tmp_path)
+    t = Timeline(layers=[
+        Layer(clips=[TimelineClip(at_s=0, duration_s=2, source="media", media_id="red")]),
+        Layer(clips=[TimelineClip(at_s=0, duration_s=2, source="text", text="MM\nMMMMMM",
+                                  text_style={"size": 0.2, "outline": 0, "align": "left",
+                                              "box": "black", "box_opacity": 1.0},
+                                  transform={"x": 0.0})]),
+    ])
+    video = _render_with_library(t, lib, short_sample, tmp_path / "box.mp4")
+    q = raw_frame(video, 1.0).reshape(45, 80, 3)
+    black = (q.sum(axis=2) < 60)
+    assert black.mean() > 0.05, "the box did not show"
+    white = (q[:, :, 1] > 200) & (q[:, :, 2] > 200)
+    rows = [r for r in range(45) if white[r].any()]
+    first = [c for c in range(80) if white[rows[0]][c]]
+    last = [c for c in range(80) if white[rows[-1]][c]]
+    # left-aligned: both lines start at the same column, the second runs longer
+    assert abs(first[0] - last[0]) <= 1
+    assert last[-1] > first[-1] + 5
 
 
 def test_a_fade_in_text_starts_faint(isolated, short_sample, tmp_path):

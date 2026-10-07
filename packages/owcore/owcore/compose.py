@@ -643,7 +643,7 @@ def _video_chain(
     if clip.source is ClipSource.TEXT:
         # the canvas already arrives as rgba from the source itself (see
         # `_clip_input`): the text is drawn straight onto it
-        steps.append(textfx.filter_chain(clip, height))
+        steps.append(textfx.filter_chain(clip, height, width))
 
     # before anything that depends on size, the clip takes on the size of the
     # output canvas

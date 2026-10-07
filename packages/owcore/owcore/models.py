@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -770,6 +771,14 @@ class TextAnim(StrEnum):
     TYPEWRITER = "typewriter"
 
 
+class TextAlign(StrEnum):
+    """How the lines of a text line up with each other."""
+
+    LEFT = "left"
+    CENTER = "center"
+    RIGHT = "right"
+
+
 class TextStyle(BaseModel):
     """How the text looks.
 
@@ -792,6 +801,19 @@ class TextStyle(BaseModel):
     anim_in: TextAnim = TextAnim.NONE
     anim_out: TextAnim = TextAnim.NONE
     anim_s: float = 0.35
+    #: how the lines line up; the block as a whole stays centred on the
+    #: clip's position
+    align: TextAlign = TextAlign.CENTER
+    #: the box the text breaks inside, 0 to 1 of the frame **width**. 0 is no
+    #: box: lines break only where they were typed
+    width: float = 0.0
+    #: a colour behind the text, or empty for none. One box behind all the
+    #: lines, as wide as the widest (or as the `width`, when set)
+    box: str = ""
+    #: how much the box covers, 0 (see-through) to 1 (solid)
+    box_opacity: float = 0.6
+    #: a drop shadow's colour, or empty for none -- down and to the right
+    shadow: str = ""
 
     @model_validator(mode="after")
     def _check_coherent(self) -> "TextStyle":
@@ -803,6 +825,14 @@ class TextStyle(BaseModel):
             raise ValueError("a text animation lasts from 0.05 to 3 seconds")
         if self.anim_out is TextAnim.TYPEWRITER:
             raise ValueError("typewriter is an entrance only")
+        if self.width and not 0.05 <= self.width <= 1.0:
+            raise ValueError("a text box is 0.05 to 1 of the frame width, or 0")
+        if not 0.0 <= self.box_opacity <= 1.0:
+            raise ValueError("box opacity goes from 0 to 1")
+        # they go into the filtergraph as they are
+        for colour in (self.box, self.shadow):
+            if colour and not re.fullmatch(r"[A-Za-z]+|#[0-9A-Fa-f]{6}", colour):
+                raise ValueError(f"not a colour: {colour!r}")
         return self
 
 

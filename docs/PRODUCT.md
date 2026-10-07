@@ -252,6 +252,12 @@ the line across the frame, and tap it to type. Size, colour and outline are on
 the block's panel — the outline is not decoration, it is what makes white text
 survive a bright scene.
 
+A text can have **several lines**: Enter breaks one where you want it, and a
+**box width** makes the words break by themselves inside it. The lines line up
+on the left, the centre or the right; a **box** behind them (any of the
+colours, with its opacity) and a **drop shadow** are on the same panel. The
+box follows the text's entrance and exit — it fades, pops and slides with it.
+
 ### Choosing the output format
 
 A montage has no format: it has cuts, layers and effects. The format is the
