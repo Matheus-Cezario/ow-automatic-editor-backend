@@ -124,10 +124,13 @@
     }
   },
   "death": {
-    "_note": "Death = health dropping to zero and coming back full on the next frame (you start spectating a teammate), or the bar disappearing altogether (menu, round change). For the rules both cases mean the same: the streak was interrupted.",
+    "_note": "Death = health dropping to zero, the bar disappearing altogether (menu, round change, killcam), or the dead bar: after dying OW2 keeps the player's own bar on screen until the respawn, a dim track with no ticks and the scenery behind it. That bar is told by being weak (under dim_bar_ratio of the recording's usual strength) AND irregular (under dead_bar_regularity -- the scoreboard dims the bar too, but its ticks stay regular), for at least dim_min_duration_s. For the rules all of these mean the same: the streak was interrupted.",
     "dead_hp_frac": 0.06,
     "min_duration_s": 0.1,
-    "min_gap_s": 3.0
+    "min_gap_s": 3.0,
+    "dim_bar_ratio": 0.45,
+    "dead_bar_regularity": 0.5,
+    "dim_min_duration_s": 2.0
   },
   "survival": {
     "_note": "Reads the health bar directly. The red vignette on the edges does NOT work: it is the damage-taken indicator and shows up in ~32% of frames in a real match.",

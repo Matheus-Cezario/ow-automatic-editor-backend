@@ -18,11 +18,13 @@ bright/dark **alternation** of the ticks, which only exists in the filled part.
 Against values read off the screen, the error stayed within 0.05 (0.56 -> 0.55,
 0.53 -> 0.49, 0.95 -> 0.92).
 
-**About `DEATH`.** When you die in OW2 you start spectating a teammate, and
-*their* health appears on the HUD -- which is why the signature of death is
-health going to zero and coming back full on the next frame, rather than the bar
-staying at zero. The bar disappearing entirely (menu, hero select, round change)
-is treated the same, on purpose: for the rules both cases mean the same thing --
+**About `DEATH`.** The first version assumed that on death the HUD moves to the
+teammate being spectated, so death would be one frame at zero and then someone
+else's full bar. In full real matches the HUD stays on the player's own card
+until the respawn, and the bar turns into a dim track with no ticks -- the
+"dead bar", which the reader alone takes for health (see `detect_survival`).
+Both are recognised. The bar disappearing entirely (menu, hero select, round
+change, killcam) is treated the same, on purpose: for the rules both cases mean the same thing --
 the player's run of action was interrupted, so a streak does not count as a solo
 wipe and an escape does not count as survival. That is why the event does not
 promise to be "death" in the strict sense, and `meta` says what triggered it.
@@ -32,13 +34,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import NamedTuple
 
 import cv2
 import numpy as np
 
 from owcore.models import DetectionEvent, EventKind
 from owcore.profiles import Profile
-from owcore.vision import find_pulses, iter_frames
+from owcore.vision import Pulse, find_pulses, iter_frames
 
 log = logging.getLogger(__name__)
 
@@ -47,20 +50,37 @@ log = logging.getLogger(__name__)
 PROFILE_SAMPLES = 256
 
 
-def read_health_fraction(
+class BarReading(NamedTuple):
+    #: filled fraction of the bar; None when there is no bar on screen
+    fraction: float | None
+    #: how strong the bar's strongest step is, in grey levels
+    strength: float
+    #: how regular the alternation over the "filled" part is, 0 to 1
+    regularity: float
+
+
+def read_health(
     bgr: np.ndarray, *, energy_floor: float, tick_threshold: float
-) -> float | None:
-    """Filled fraction of the health bar, or None if the bar is off screen.
+) -> BarReading:
+    """Filled fraction of the health bar, plus what tells a lit bar from a
+    dead one.
 
     It measures the bright/dark alternation of the ticks along the strip: where
     the bar is filled the horizontal profile oscillates, and where it is empty
     the profile is flat. That way a bright background behind the HUD does not
     become "full health".
+
+    The fraction alone cannot tell a lit bar from a dead one: it is measured
+    against the strongest step in the strip, so whatever is there -- bright
+    ticks or the scenery seen through a dead bar -- becomes the scale. Hence
+    the other two: lit ticks are strong steps, and they repeat at a fixed pitch
+    (one tick per 25 health), which scenery does not. `detect_survival` weighs
+    them against the rest of the recording.
     """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     profile = gray.mean(axis=0)
     if profile.size < 16:
-        return None
+        return BarReading(None, 0.0, 0.0)
 
     # The windows below are counted in samples, so they would depend on the
     # strip's width -- and the strip comes out at the video's native width,
@@ -76,10 +96,11 @@ def read_health_fraction(
 
     gradient = np.abs(np.diff(profile))
     energy = np.convolve(gradient, np.ones(5) / 5, mode="same")
-    if float(energy.max()) < energy_floor:
-        return None  # no bar on screen
+    strength = float(energy.max())
+    if strength < energy_floor:
+        return BarReading(None, strength, 0.0)  # no bar on screen
 
-    normalized = energy / energy.max()
+    normalized = energy / strength
     hot = (normalized > tick_threshold).astype(np.float32)
 
     # Finding the rightmost column with a high gradient is not enough: the
@@ -91,8 +112,41 @@ def read_health_fraction(
     density = np.convolve(hot, np.ones(window) / window, mode="same")
     filled = np.flatnonzero(density > 0.25)
     if filled.size == 0:
-        return 0.0  # bar on screen, but empty
-    return float(filled.max() + 1) / float(normalized.size)
+        return BarReading(0.0, strength, 0.0)  # bar on screen, but empty
+    end = int(filled.max() + 1)
+    return BarReading(end / float(normalized.size), strength, _regularity(profile[:end]))
+
+
+def _regularity(profile: np.ndarray) -> float:
+    """Best autocorrelation of the profile's detail over the tick pitches a
+    bar can have (from ~6 ticks across the bar to ~30), 0 to 1.
+
+    The ticks repeat at a fixed pitch, so the profile matches itself shifted by
+    one pitch: lit bars measured 0.75-0.92. Scenery behind a dead bar has no
+    pitch, and measured 0.1-0.36. A bar with only one or two ticks left is too
+    short to measure, and reads low too -- which is why this only decides
+    together with the strength.
+    """
+    if profile.size < 24:
+        return 0.0
+    detail = profile - np.convolve(profile, np.ones(9) / 9, mode="same")
+    detail = detail[4:-4]
+    best = 0.0
+    for lag in range(4, min(41, detail.size // 2 + 1)):
+        a, b = detail[:-lag], detail[lag:]
+        norm = float(np.sqrt((a * a).sum() * (b * b).sum()))
+        if norm > 0:
+            best = max(best, float((a * b).sum()) / norm)
+    return best
+
+
+def read_health_fraction(
+    bgr: np.ndarray, *, energy_floor: float, tick_threshold: float
+) -> float | None:
+    """Filled fraction of the health bar, or None if the bar is off screen."""
+    return read_health(
+        bgr, energy_floor=energy_floor, tick_threshold=tick_threshold
+    ).fraction
 
 
 def _median3(series: list[float | None]) -> list[float | None]:
@@ -120,13 +174,14 @@ def detect_survival(health_video: Path, profile: Profile) -> list[DetectionEvent
 
     times: list[float] = []
     health: list[float | None] = []
+    readings: list[BarReading] = []
     for frame in iter_frames(health_video, fps_hint=roi.fps):
         times.append(frame.t)
-        health.append(
-            read_health_fraction(
-                frame.bgr, energy_floor=energy_floor, tick_threshold=tick_threshold
-            )
+        r = read_health(
+            frame.bgr, energy_floor=energy_floor, tick_threshold=tick_threshold
         )
+        readings.append(r)
+        health.append(r.fraction)
 
     if not times:
         return []
@@ -140,37 +195,97 @@ def detect_survival(health_video: Path, profile: Profile) -> list[DetectionEvent
     death_frac = float(death_cfg.get("dead_hp_frac", 0.06))
     events: list[DetectionEvent] = []
 
+    # -- the dead bar --------------------------------------------------------
+    # After dying in OW2 the HUD stays on the *player's* card, health at 0,
+    # until the respawn: the bar becomes a dark translucent track with no
+    # ticks, and the scenery shows through it. The reader measures the
+    # alternation against the strongest step in the strip, so with no ticks
+    # the scenery became the scale and the dead bar was read as half or nearly
+    # full -- which turned deaths into recoveries, and the low-health stretch
+    # before them into escapes (d1).
+    #
+    # Two things give it away, and it takes both. The strength: lit ticks are
+    # bright on dark, the scenery through the dead track is dimmed -- on two
+    # real 1080p matches (PC and PS5) the lit bar ran at 23-34 and the dead one
+    # at 3-11. And the pitch: the scoreboard (Tab) dims a lit bar just as much,
+    # but its ticks are still there, still regular (0.8), and the dead bar's
+    # scenery is not (under 0.4).
+    #
+    # The strength's scale changes with resolution and compression, so the
+    # reference is the recording's own: the bar is lit most of the time, and an
+    # upper percentile of the strength is what a lit bar looks like here.
+    present = [r.strength for r in readings if r.fraction is not None]
+    reference = float(np.percentile(present, 75)) if present else 0.0
+    dim_below = reference * float(death_cfg.get("dim_bar_ratio", 0.45))
+    irregular = float(death_cfg.get("dead_bar_regularity", 0.5))
+    dim = [
+        1.0
+        if r.fraction is not None and r.strength < dim_below
+        and r.regularity < irregular
+        else 0.0
+        for r in readings
+    ]
+
     # The two readings use different series on purpose. Death is a *transient*
     # event -- sometimes a single frame with zeroed health -- so it has to come
     # out of the raw series; smoothing here would erase exactly what we want to
     # see. Low health is the opposite: it lasts seconds, and a median of 3
-    # removes reading noise without shortening any episode.
+    # removes reading noise without shortening any episode. For low health, a
+    # dead bar is no health at all.
+    health = [0.0 if d else h for h, d in zip(health, dim)]
     smooth = _median3(health)
 
     # -- interruptions -------------------------------------------------------
-    # Health dropping to zero and returning to the top on the next frame is the
-    # signature of death: when you die you start spectating a teammate, with
-    # *their* health on screen. No heal climbs like that. The bar disappearing
-    # entirely (menu, round change) counts the same, because it means the same
-    # thing for the rules.
-    down = [1.0 if (h is None or h <= death_frac) else 0.0 for h in health]
-    absent_pulses = find_pulses(
-        times,
-        down,
-        rise=0.5,
-        fall=0.5,
-        min_duration=float(death_cfg.get("min_duration_s", 0.1)),
-        min_gap=float(death_cfg.get("min_gap_s", 3.0)),
-    )
-    interruptions = [p.start for p in absent_pulses]
-    for p in absent_pulses:
+    # Health dropping to zero is the signature of death; the bar disappearing
+    # entirely (menu, round change, killcam) counts the same, because it means
+    # the same thing for the rules. A bar read at zero for a single frame and
+    # then full is death too: depending on the recording, the HUD can move to
+    # the teammate being spectated, with *their* health on screen.
+    #
+    # A dead bar has to last before it is a death: a lone dim, irregular frame
+    # can be a lit bar under a flash or a compression smear, and a false death
+    # throws away the escape and the streak around it. A real dead bar stays
+    # until the respawn or the killcam: 4 s or more on the real matches.
+    zero_or_absent = [
+        1.0 if (r.fraction is None or r.fraction <= death_frac) else 0.0
+        for r in readings
+    ]
+    pulses = [
+        (p, "zero_health_or_hud_absent")
+        for p in find_pulses(
+            times, zero_or_absent, rise=0.5, fall=0.5,
+            min_duration=float(death_cfg.get("min_duration_s", 0.1)),
+        )
+    ] + [
+        (p, "dead_bar")
+        # averaged over ~5 frames: through a dead bar, a frame of bright
+        # scenery can read as lit, and it must not cut the stretch in two
+        for p in find_pulses(
+            times, np.convolve(dim, np.ones(5) / 5, mode="same").tolist(),
+            rise=0.6, fall=0.2,
+            min_duration=float(death_cfg.get("dim_min_duration_s", 2.0)),
+        )
+    ]
+    # One death per stretch: the two readings overlap on the same death, and a
+    # dead bar lasts seconds, so what starts before the last one has ended
+    # (plus the gap) is the same death.
+    pulses.sort(key=lambda x: x[0].start)
+    gap = float(death_cfg.get("min_gap_s", 3.0))
+    merged: list[tuple[Pulse, str]] = []
+    for p, why in pulses:
+        if merged and p.start - merged[-1][0].end < gap:
+            q, first = merged[-1]
+            merged[-1] = (Pulse(start=q.start, end=max(q.end, p.end), peak=1.0), first)
+        else:
+            merged.append((p, why))
+    interruptions = [p.start for p, _ in merged]
+    for p, why in merged:
         events.append(
             DetectionEvent(
                 kind=EventKind.DEATH,
                 t=round(p.start, 3),
                 confidence=0.7,
-                meta={"reason": "zero_health_or_hud_absent",
-                      "duration_s": round(p.duration, 2)},
+                meta={"reason": why, "duration_s": round(p.duration, 2)},
             )
         )
 

@@ -338,7 +338,7 @@ synthetic video. That changed a lot:
 |---|---|---|
 | Kill precision | ~17% | **~91%** |
 | Kills in 19 min | 491 (almost all false) | 11 |
-| "Escapes" in 19 min | 122 (the damage vignette firing) | 8 |
+| "Escapes" in 19 min | 122 (the damage vignette firing) | 8 (later, deaths read as escapes were removed: see "The escape that ended in a death") |
 | Deaths detected | 0 | 15 |
 
 The **abilities announced in the footer** were calibrated the same way, on two
@@ -438,6 +438,48 @@ Three things that only showed up when measuring:
   not: half the game's icons are made of loose parts, and cutting them changes
   the framing from one frame to the next. On a real recording that turned one
   kill into four.
+
+### The escape that ended in a death
+
+*d1, 2026-10-07.* Some survival cuts ended with the hero dying right at the end
+of the clip. Measured on the same two full matches (16 min of Ana on PC, 12 of
+Sigma on PS5, both 1080p), every one of those came from the same place: **the
+death was read as health coming back.**
+
+The detector assumed that on death the HUD moves to the teammate being
+spectated, so death would be a single frame at zero followed by someone else's
+full bar. In these recordings it does not: the HUD stays on the player's own
+card, health 0, until the respawn — and the bar becomes a **dim track with no
+ticks, with the scenery showing through it.** The reader measures the ticks
+against the strongest step in the strip, so the scenery became the scale and
+the dead bar read as half or nearly full. The low-health stretch then "ended
+in a recovery" at the very instant of the death, and became an escape whose cut
+put the death at 70% of the block.
+
+What tells the dead bar apart, and it takes both:
+
+| | lit bar | dead bar | scoreboard (Tab) |
+|---|---|---|---|
+| strength of the steps | 23–34 | 3–11 | 8–11 |
+| regularity of the pitch | 0.75–0.92 | 0.1–0.36 | ~0.82 |
+
+The scoreboard darkens the bar as much as dying does, but its ticks stay
+regular; a first version that looked at strength alone turned every Tab into a
+death. The strength's scale is the recording's own (an upper percentile of the
+whole match), and a dead bar must last 2 s — every real one lasted 4 s or more.
+
+A death is now also **one event per stretch**: the dead bar, the killcam and the
+round's end used to come out as two to five "deaths" a few seconds apart for
+the same death (54 events in the two matches, against 23 now).
+
+| | escapes | the hero died in the cut |
+|---|---|---|
+| before | 9 | 3 (Sigma, 0–2 s after the escape) |
+| after | **6** | **0** — all six checked by eye, alive and healed |
+
+The cut's end needed no change: a block puts the escape at 70% of its length,
+so its tail is under the 4 s (`safe_after_s`) the detector already checks for a
+death — as long as the death is seen.
 
 **Known limits:**
 

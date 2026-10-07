@@ -117,6 +117,84 @@ def test_reading_the_health_bar(rois):
     assert float(np.median(full)) > 0.85
 
 
+def _health_strip(path, seconds, state_at, fps=6.0):
+    """A health-bar strip as the preprocessor cuts it, for one life story.
+
+    `state_at(t)` gives `(lit_ticks, dim)`: how many of the 20 ticks are lit,
+    and whether the whole HUD is darkened (the scoreboard). `lit_ticks=None` is
+    the dead bar -- the track stays, with no ticks, and the scenery shows
+    through it, which is what OW2 draws until the respawn.
+    """
+    import cv2
+    import numpy as np
+
+    w, h, n = 256, 40, 20
+    x0, x1, y0, y1 = 12, 244, 10, 30
+    out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (w, h))
+    yy, xx = np.mgrid[0:h, 0:w]
+    for i in range(int(seconds * fps)):
+        t = i / fps
+        # bright, moving diagonal scenery: what a dead bar lets through
+        band = ((xx + yy * 2 + int(t * 40)) // 17) % 3
+        frame = np.dstack([90 + 70 * band] * 3).astype(np.float32)
+        lit, dim = state_at(t)
+        frame[y0:y1, x0:x1] = frame[y0:y1, x0:x1] * 0.6 + 15  # the track
+        step = (x1 - x0) / n
+        for k in range(lit or 0):
+            tx = int(x0 + k * step)
+            frame[y0 + 2 : y1 - 2, tx + 2 : int(tx + step) - 2] = 235
+        if dim:
+            frame *= 0.3
+        out.write(np.clip(frame, 0, 255).astype(np.uint8))
+    out.release()
+    return path
+
+
+def test_an_escape_that_ends_in_death_is_not_an_escape(tmp_path):
+    """d1: low health, then the hero dies. OW2 keeps the player's own dead bar
+    on screen until the respawn, and its scenery used to be read as health
+    coming back -- the death became a recovery and the stretch an escape, cut
+    to end right as the hero died."""
+    detect = service_module("detector_survival")
+
+    def story(t):
+        if t < 8:
+            return 18, False
+        if t < 11:
+            return 2, False  # low health
+        if t < 21:
+            return None, False  # dead until the respawn
+        return 20, False
+
+    strip = _health_strip(tmp_path / "died.avi", 30, story)
+    ev = detect.detect_survival(strip, load_profile("ow2_default"))
+
+    assert [e.t for e in ev if e.kind == EventKind.LOW_HP] == pytest.approx([8], abs=0.4)
+    deaths = [e for e in ev if e.kind == EventKind.DEATH]
+    assert [e.t for e in deaths] == pytest.approx([11], abs=0.4)
+    assert deaths[0].meta["reason"] == "dead_bar"
+    assert not [e for e in ev if e.kind == EventKind.ESCAPE]
+
+
+def test_the_scoreboard_is_not_a_death(tmp_path):
+    """The scoreboard darkens the bar as much as dying does -- but its ticks
+    are still there, and the escape before it stands."""
+    detect = service_module("detector_survival")
+
+    def story(t):
+        if 8 <= t < 11:
+            return 2, False  # low health
+        if 12 <= t < 16:
+            return 20, True  # healed, then holding Tab
+        return 18, False
+
+    strip = _health_strip(tmp_path / "tab.avi", 25, story)
+    ev = detect.detect_survival(strip, load_profile("ow2_default"))
+
+    assert not [e for e in ev if e.kind == EventKind.DEATH]
+    assert [e.t for e in ev if e.kind == EventKind.ESCAPE] == pytest.approx([11], abs=0.4)
+
+
 def test_without_templates_or_audio_the_detector_does_not_invent(rois, tmp_path):
     """Explicit contract: without the game icons and with the audio path off
     (the default), the detector returns nothing -- instead of faking detection."""
