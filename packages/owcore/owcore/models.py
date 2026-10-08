@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -251,6 +251,11 @@ MIN_CUT_S = 0.05
 #: It sits on an audio layer like the music but is not music: it does not
 #: take the game sound away, and the music volume does not govern it.
 SFX_KIND = "sfx"
+
+#: The `kind` of a block recorded in the editor as a voice-over. Not music
+#: either -- it plays at its own volume -- and the rest of the mix steps back
+#: while it speaks (`Timeline.voice_spans`).
+VOICE_KIND = "voice"
 
 #: Events worth a thumbnail in the editor's sidebar: the ones that become
 #: blocks. Low health and interruption are the context of the play, not the
@@ -1178,6 +1183,15 @@ class TimelineClip(BaseModel):
     def is_sound_effect(self) -> bool:
         return self.kind == SFX_KIND
 
+    @property
+    def is_voice(self) -> bool:
+        return self.kind == VOICE_KIND
+
+    @property
+    def is_music(self) -> bool:
+        """On an audio layer, a song: not an effect and not a voice-over."""
+        return not (self.is_sound_effect or self.is_voice)
+
     def as_cut(self) -> TimelineCut:
         """The V1 view of this clip, for the cut-and-splice path."""
         return TimelineCut(
@@ -1578,6 +1592,17 @@ class Timeline(BaseModel):
                     out.append(c.at_s + local)
         return sorted(out)
 
+    def voice_spans(self) -> list[tuple[float, float]]:
+        """Where a voice-over speaks in the video: (from, until) of every voice
+        block on an audio layer that is heard."""
+        return sorted(
+            (c.at_s, c.until_s)
+            for layer in self.layers
+            if layer.is_audio and not layer.muted and not layer.hidden
+            for c in layer.clips
+            if c.is_voice and not c.audio.mute
+        )
+
     @property
     def has_music(self) -> bool:
         """The montage has music, that is: any block on an audio layer that
@@ -1586,10 +1611,11 @@ class Timeline(BaseModel):
         It is what decides what the two volumes mean. With no music the cuts'
         audio comes out as it is; with music, `game_volume` says how much of the
         game shows through underneath it. A whoosh is not music: one effect on
-        a montage without a song must not silence the game.
+        a montage without a song must not silence the game -- and neither must a
+        voice-over.
         """
         return any(
-            not c.is_sound_effect
+            c.is_music
             for l in self.layers
             if l.is_audio
             for c in l.clips
@@ -1852,6 +1878,9 @@ class Media(Base):
     #: "arrow:red"), empty for a picture the user uploaded -- the same job as
     #: `sfx_id`, for pictures
     sticker_id: Mapped[str] = mapped_column(String(48), default="")
+    #: recorded in the editor as a voice-over, not a song: it stays out of the
+    #: track picker, and its blocks go in as `VOICE_KIND`
+    voice: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -1960,7 +1989,7 @@ class Montage(Base):
             "n_clips": len(clips),
             "duration_s": round(max((c.until_s for c in clips), default=0.0), 2),
             "has_music": any(
-                not c.is_sound_effect
+                c.is_music
                 for l in m.layers
                 if l.is_audio
                 for c in l.clips

@@ -820,6 +820,25 @@ def _duck_curve(plays: list[float]) -> str:
     return expr
 
 
+#: how fast the mix steps back when a voice-over starts, and comes back after
+VOICE_ATTACK = 0.12
+VOICE_RELEASE = 0.35
+
+
+def _voice_curve(spans: list[tuple[float, float]]) -> str:
+    """How far a voice-over has pushed the mix back at `t`, 0 to 1: down just
+    before each span starts, held while it speaks, back up after it ends."""
+    shapes = [
+        f"max(0,min(1,min((t-{a - VOICE_ATTACK:.3f})/{VOICE_ATTACK},"
+        f"({b + VOICE_RELEASE:.3f}-t)/{VOICE_RELEASE})))"
+        for a, b in spans
+    ]
+    expr = shapes[0]
+    for shape in shapes[1:]:
+        expr = f"max({expr},{shape})"
+    return expr
+
+
 def _audio_chain(
     clip: TimelineClip,
     input_index: int,
@@ -1077,6 +1096,15 @@ def compose_graph(
         else []
     )
     duck = _duck_curve(plays) if plays else None
+    # under a voice-over the music and the game step back to the duck level,
+    # whether or not the plays duck
+    spans = [
+        (a - start, b - start)
+        for a, b in timeline.voice_spans()
+        if b > start and a < end
+    ]
+    voice = _voice_curve(spans) if spans else None
+    voice_drop = 1 - timeline.duck_level
     # ducking brings the game sound up at the plays, even when it is
     # otherwise left out of the mix
     game_comes_in = not has_music or timeline.game_volume > 0 or duck is not None
@@ -1086,8 +1114,8 @@ def compose_graph(
     cut_audio: list[str] = []
     #: the sound of the music blocks, which is not game sound and does not obey it
     music_audio: list[str] = []
-    #: sound effects: on audio layers, but obeying neither volume -- each one
-    #: has its own, on its block
+    #: sound effects and voice-overs: on audio layers, but obeying neither
+    #: volume -- each one has its own, on its block
     sfx_audio: list[str] = []
     n = 0
 
@@ -1217,7 +1245,7 @@ def compose_graph(
                 if chain is not None:
                     c.filters.append(chain)
                     (
-                        (sfx_audio if trimmed.is_sound_effect else music_audio)
+                        (music_audio if trimmed.is_music else sfx_audio)
                         if layer.is_audio
                         else cut_audio
                     ).append(f"a{n}")
@@ -1258,11 +1286,16 @@ def compose_graph(
             if timeline.music_volume != 1.0
             else ""
         )
-        if duck is not None:
-            # down to duck_level at each play, on the output's own clock
+        if duck is not None or voice is not None:
+            # down to duck_level at each play and under a voice-over, on the
+            # output's own clock -- the deeper of the two where they meet
             drop = 1 - timeline.duck_level
+            dip = (
+                f"max({duck},{voice})" if duck is not None and voice is not None
+                else duck or voice
+            )
             volume = (
-                f",volume='{timeline.music_volume:.4f}*(1-{drop:.4f}*({duck}))'"
+                f",volume='{timeline.music_volume:.4f}*(1-{drop:.4f}*({dip}))'"
                 ":eval=frame"
             )
         if len(music_audio) == 1 and not volume:
@@ -1296,10 +1329,30 @@ def compose_graph(
                 # up to full at each play: the shot over the song
                 low = timeline.game_volume
                 boost = max(low, 1.0) - low
+                level = f"{low:.4f}+{boost:.4f}*({duck})"
+            else:
+                level = f"{timeline.game_volume:.4f}"
+            if voice is not None:
+                # and back down while a voice-over speaks
                 volume = (
-                    f",volume='{low:.4f}+{boost:.4f}*({duck})':eval=frame"
+                    f",volume='({level})*(1-{voice_drop:.4f}*({voice}))'"
+                    ":eval=frame"
                 )
+            elif duck is not None:
+                volume = f",volume='{level}':eval=frame"
             c.filters.append(f"{game}{join}{volume}[game]")
+            parts.append("game")
+        elif voice is not None:
+            # no music, but a voice-over: the game steps back while it speaks
+            game = "".join(f"[{a}]" for a in cut_audio)
+            join = (
+                f"amix=inputs={len(cut_audio)}:dropout_transition=0:normalize=0"
+                if len(cut_audio) > 1
+                else "anull"
+            )
+            c.filters.append(
+                f"{game}{join},volume='1-{voice_drop:.4f}*({voice})':eval=frame[game]"
+            )
             parts.append("game")
         else:
             # with no music at all, the cuts' original audio stands on its own
