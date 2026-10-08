@@ -33,7 +33,7 @@ from owcore.models import (
     Media,
     Timeline,
 )
-from owcore.compose import LibraryFile
+from owcore.compose import LibraryFile, Recording
 from owcore.storage import get_storage, local_copy
 from owcore.worker import Worker, run_worker
 
@@ -203,6 +203,21 @@ class Editor(Worker):
                         path=local_copy(item.key, work), kind=item.kind
                     )
 
+                # other matches this montage brings moments from, each in a
+                # folder of its own: every recording is called `source.*`
+                recordings: dict[str, Recording] = {}
+                for other_id in spec.recording_jobs() - {job_id}:
+                    other = s.get(Job, other_id)
+                    if other is None:
+                        raise ValueError(
+                            f"montage '{spec.title or i}' uses a match that "
+                            "was deleted"
+                        )
+                    recordings[other_id] = Recording(
+                        path=local_copy(other.video_key, work / "matches" / other_id),
+                        duration_s=other.duration_s or 0.0,
+                    )
+
                 # the track name is only a label -- it lets the video list say
                 # which music that one came out with. It comes from the first
                 # sound block, which is the one that starts playing
@@ -224,6 +239,7 @@ class Editor(Worker):
                         title=spec.title or f"Montage {i}",
                         music_name=music_name,
                         library=library,
+                        recordings=recordings,
                     )
                 )
         return items

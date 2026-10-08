@@ -43,6 +43,8 @@ class TimelineItem:
     music_name: str | None = None
     #: the library items this montage uses, already on disk
     library: dict = field(default_factory=dict)
+    #: other matches' recordings it cuts moments from, by job id, on disk
+    recordings: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -276,6 +278,7 @@ def _render_composition(
         fps=media.fps,
         source_duration_s=media.duration_s,
         library=item.library,
+        recordings=item.recordings,
     )
 
     dest: Path | None = out_dir / f"{index:02d}_custom.mp4"

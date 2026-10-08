@@ -984,6 +984,9 @@ class TimelineClip(BaseModel):
     fill: str = "black"
     #: id of the library item when `source` is MEDIA
     media_id: str | None = None
+    #: for a RECORDING clip, the job whose recording it cuts -- a moment
+    #: brought from another match. None is this montage's own match
+    job_id: str | None = None
     #: the name the user gave the clip -- shown on the editor's ruler, not
     #: drawn in the video
     label: str = ""
@@ -1146,6 +1149,7 @@ class TimelineClip(BaseModel):
         """A clip that V1's cut-and-splice path can handle."""
         return (
             self.source is ClipSource.RECORDING
+            and self.job_id is None
             and self.transform.is_neutral
             and self.audio.is_neutral
             and self.color.is_neutral
@@ -1591,6 +1595,16 @@ class Timeline(BaseModel):
                 if local is not None:
                     out.append(c.at_s + local)
         return sorted(out)
+
+    def recording_jobs(self) -> set[str]:
+        """The other matches this montage cuts from: the job of every moment
+        brought from another recording."""
+        return {
+            c.job_id
+            for layer in self.layers
+            for c in layer.clips
+            if c.source is ClipSource.RECORDING and c.job_id
+        }
 
     def voice_spans(self) -> list[tuple[float, float]]:
         """Where a voice-over speaks in the video: (from, until) of every voice

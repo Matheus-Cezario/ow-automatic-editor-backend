@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from owcore import ffmpeg
-from owcore.compose import LibraryFile, compose_graph
+from owcore.compose import LibraryFile, Recording, compose_graph
 from owcore.config import get_settings
 from owcore.db import session
 from owcore.models import (
@@ -105,6 +105,15 @@ class Previewer(Worker):
                 for m in (s.get(Media, i) for i in media_ids)
                 if m is not None and m.job_id == job_id
             }
+            # other matches the montage brings moments from
+            others = {}
+            for other_id in spec.recording_jobs() - {job_id}:
+                other = s.get(Job, other_id)
+                if other is None:
+                    raise ValueError("the montage uses a match that was deleted")
+                others[other_id] = (
+                    (other.proxy_key, other.video_key), other.duration_s or 0.0
+                )
 
         set_preview(preview_id, status=RenderStatus.RENDERING, progress=0.1)
 
@@ -118,6 +127,12 @@ class Previewer(Worker):
             mid: LibraryFile(path=playable(*keys, sources), kind=kind)
             for mid, (keys, kind) in media.items()
         }
+        # each in a folder of its own: every match's files have the same names
+        recordings: dict[str, Recording] = {}
+        for oid, (keys, dur) in others.items():
+            folder = work / "matches" / oid
+            folder.mkdir(parents=True, exist_ok=True)
+            recordings[oid] = Recording(path=playable(*keys, folder), duration_s=dur)
         info = ffmpeg.probe(source)
         set_preview(preview_id, progress=0.3)
 
@@ -137,6 +152,7 @@ class Previewer(Worker):
             fps=info.fps,
             source_duration_s=info.duration_s,
             library=library,
+            recordings=recordings,
         )
         dest = work / f"{preview_id}.mp4"
         ffmpeg.compose(comp, dest, preset="ultrafast", audio_kbps=96)

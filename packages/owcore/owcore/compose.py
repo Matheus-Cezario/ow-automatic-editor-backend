@@ -75,6 +75,15 @@ class LibraryFile:
 
 
 @dataclass(slots=True)
+class Recording:
+    """Another match's recording already downloaded, for moments brought from
+    it: where it is, and how long it runs, to trim a clip asking past its end."""
+
+    path: Path
+    duration_s: float = 0.0
+
+
+@dataclass(slots=True)
 class Input:
     """One ffmpeg `-i`, with whatever comes before it."""
 
@@ -945,6 +954,7 @@ def _clip_input(
     height: int,
     fps: float,
     ramp: Ramp | None = None,
+    recordings: dict[str, Recording] | None = None,
 ) -> tuple[Input | None, float, bool]:
     """This clip's ffmpeg input, its usable duration, and whether it has sound.
 
@@ -957,6 +967,13 @@ def _clip_input(
     consumed = ramp.src(clip.duration_s) if ramp else clip.source_consumed_s
 
     if clip.source is ClipSource.RECORDING:
+        if clip.job_id is not None and clip.job_id in (recordings or {}):
+            other = (recordings or {})[clip.job_id]
+            source, source_duration_s = other.path, other.duration_s
+        elif clip.job_id is not None:
+            raise ValueError(
+                f"the recording of match {clip.job_id!r} is not available"
+            )
         wanted = consumed
         if source_duration_s > 0:
             wanted = min(wanted, max(0.0, source_duration_s - clip.start_s))
@@ -1046,6 +1063,7 @@ def compose_graph(
     source_duration_s: float = 0.0,
     library: dict[str, LibraryFile] | None = None,
     video_only: bool = False,
+    recordings: dict[str, Recording] | None = None,
 ) -> Composition:
     """The graph that builds this timeline.
 
@@ -1056,6 +1074,10 @@ def compose_graph(
     one more input in the graph, and from there on it goes through the same
     transformations as a stretch of the recording -- that is the point of having
     a single clip format.
+
+    `recordings` maps another job's id to its recording on disk: a moment
+    brought from another match is a recording clip carrying that `job_id`, cut
+    from that file instead of `source`.
 
     A clip running past the end of the recording is **trimmed**, as in V1 --
     whatever is left of its slot becomes the background canvas, and the clips
@@ -1183,6 +1205,7 @@ def compose_graph(
                 height=height,
                 fps=fps,
                 ramp=ramp,
+                recordings=recordings,
             )
             if clip_input is None:
                 continue  # falls outside the source; its slot stays background

@@ -214,6 +214,17 @@ came out was that — and you can mark one at any moment ("it was good like
 this"). Going back to one of them does not delete what was in front: that also
 becomes a marker first.
 
+### Several matches in one montage
+
+The best plays of a night are spread over several recordings. Upload each
+match as usual; then, in any montage, the moment shelf has a list of your
+other analysed matches. Pick one and its kills are there, already found, to
+place on the ruler like this match's own. The monitor and the video play each
+moment from its own recording.
+
+A match whose moments another montage uses cannot be deleted until they are
+taken out of that montage: the app says which one uses it.
+
 ### Presets: the second match comes out ready
 
 A preset does not store cuts — it stores the **way** of cutting. "Two seconds
