@@ -545,6 +545,16 @@ def _validated_timeline(
                 422,
                 f"unknown media in this job: {clip.media_id!r}",
             )
+    # a moment from another match needs that match's recording to be there
+    others = spec.recording_jobs()
+    if others:
+        with session() as s:
+            for other_id in sorted(others):
+                other = s.get(Job, other_id)
+                if other is None or not other.video_key:
+                    raise HTTPException(
+                        422, f"unknown match in this montage: {other_id!r}"
+                    )
     _check_layers(spec, music_ids)
     # a font the server does not have would only fail at render time
     for clip in spec.clips:
@@ -1378,12 +1388,40 @@ def request_frames(job_id: str) -> dict[str, Any]:
     return {"job_id": job_id, "status": "requested"}
 
 
+def _cuts_from(data: dict | None, job_id: str) -> bool:
+    """Whether a saved montage brings a moment from `job_id`'s recording."""
+    for layer in (data or {}).get("layers") or []:
+        for clip in layer.get("clips") or []:
+            if clip.get("job_id") == job_id:
+                return True
+    return False
+
+
 @app.delete("/api/jobs/{job_id}", status_code=204)
 def delete_job(job_id: str) -> Response:
+    """Deletes a match -- unless another match's montage cuts moments from
+    it: its recording would vanish from under that montage, which could then
+    neither play nor render. The answer names who uses it."""
     with session() as s:
         job = s.get(Job, job_id)
         if job is None:
             raise HTTPException(404, "job not found")
+        users: set[str] = set()
+        others = MontageModel.job_id != job_id
+        for m in s.scalars(select(MontageModel).where(others)):
+            if _cuts_from(m.data, job_id):
+                users.add(m.job_id)
+        for other in s.scalars(select(Job).where(Job.id != job_id)):
+            if _cuts_from(other.draft, job_id):
+                users.add(other.id)
+        if users:
+            names = sorted(s.get(Job, u).video_name or u for u in users)
+            raise HTTPException(
+                409,
+                "moments of this match are used in the montages of "
+                + ", ".join(names)
+                + " -- take them out there first",
+            )
         s.delete(job)
     return Response(status_code=204)
 
