@@ -258,6 +258,14 @@ on the left, the centre or the right; a **box** behind them (any of the
 colours, with its opacity) and a **drop shadow** are on the same panel. The
 box follows the text's entrance and exit — it fades, pops and slides with it.
 
+**Stickers** are in the Library too: arrows, rings, a crosshair, a skull, a
+crown, stars and a few more, in eight colours, each with a dark outline so it
+reads over any scene. Clicking one puts it at the playhead, over the picture,
+small and in the middle; from there it moves, grows, turns and fades like
+any block. A picture you bring yourself (a hero icon, a logo) can be placed the
+same way: **Whole** on its panel shows all of it, transparent around, instead
+of filling the frame.
+
 ### Choosing the output format
 
 A montage has no format: it has cuts, layers and effects. The format is the

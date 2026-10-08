@@ -649,7 +649,11 @@ def _video_chain(
     # output canvas
     framing: list[str] = []
     if clip.source is not ClipSource.TEXT:
-        framing += _fit_chain(fit, width, height, tag=str(input_index))
+        if clip.fit is Fit.CONTAIN:
+            # placed whole on purpose (a sticker): what is around it is
+            # nothing, not black -- and only rgba has a nothing to pad with
+            framing.append("format=rgba")
+        framing += _fit_chain(clip.fit or fit, width, height, tag=str(input_index))
 
     # The lens comes after the framing: it zooms into what is on screen. Before
     # it, a 16:9 recording exported as 9:16 was zoomed in its own aspect and

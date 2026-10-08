@@ -982,6 +982,11 @@ class TimelineClip(BaseModel):
     #: the name the user gave the clip -- shown on the editor's ruler, not
     #: drawn in the video
     label: str = ""
+    #: how this clip fills the frame, when not the export's way. A sticker or
+    #: a hero icon is placed whole (`CONTAIN`), transparent around, so that
+    #: its size and place are the transform's; filling the frame would crop
+    #: it to a slice. None follows the export
+    fit: Fit | None = None
     #: what is written, when `source` is TEXT
     text: str = ""
     text_style: TextStyle = Field(default_factory=TextStyle)
@@ -1142,6 +1147,7 @@ class TimelineClip(BaseModel):
             and self.fx.is_neutral
             and self.blend is BlendMode.NORMAL
             and self.chroma is None
+            and self.fit is None
             and self.fade.is_neutral
             and self.transition is None
             and self.speed == 1.0
@@ -1842,6 +1848,10 @@ class Media(Base):
     #: file the user uploaded. It is what lets adding the same effect twice
     #: reuse the item, and the app tell an effect from a song
     sfx_id: Mapped[str] = mapped_column(String(32), default="")
+    #: the sticker and colour this item was drawn from (`owcore.stickers`,
+    #: "arrow:red"), empty for a picture the user uploaded -- the same job as
+    #: `sfx_id`, for pictures
+    sticker_id: Mapped[str] = mapped_column(String(48), default="")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

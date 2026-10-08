@@ -62,7 +62,7 @@ from owcore.models import (
     new_id,
     utcnow,
 )
-from owcore import fonts, sfx
+from owcore import fonts, sfx, stickers
 from owcore.ffmpeg import probe
 from owcore.preview import preview_window
 from owcore.storage import get_storage
@@ -795,6 +795,7 @@ def _media_dict(m: Media) -> dict[str, Any]:
         }
     else:
         data |= {"width": m.width, "height": m.height, "fps": round(m.fps, 3)}
+        data["sticker_id"] = m.sticker_id or None
     return data
 
 
@@ -920,7 +921,9 @@ def media_thumb(media_id: str, request: Request) -> Response:
         key = item.thumb_key
     if not key:
         raise HTTPException(404, "no thumbnail")
-    response = _serve_blob(key, request, "image/jpeg")
+    # the worker's thumbnails are JPEG; a sticker's is its own transparent PNG
+    mime = "image/png" if key.lower().endswith(".png") else "image/jpeg"
+    response = _serve_blob(key, request, mime)
     response.headers["cache-control"] = "public, max-age=86400"
     return response
 
@@ -1032,6 +1035,108 @@ def add_sfx(job_id: str, body: dict = Body(...)) -> dict[str, Any]:
             bpm=0.0,
             beats=[],
             peaks=list(sfx.peaks(sfx_id)),
+        )
+        s.add(item)
+        s.flush()
+        return _media_dict(item)
+
+
+# ── the stickers library ────────────────────────────────────────────────────
+#
+# The same idea as the sound effects, for pictures: a catalogue the server
+# draws (`owcore.stickers`); adding one, in a colour, turns it into an ordinary
+# image item of the match's library.
+
+
+def _sticker_dict(sticker: stickers.Sticker) -> dict[str, Any]:
+    return {
+        "id": sticker.id,
+        "name": sticker.name,
+        "category": sticker.category,
+        "preview_url": f"/api/stickers/{sticker.id}.png",
+    }
+
+
+@app.get("/api/stickers")
+def list_stickers() -> dict[str, Any]:
+    """Every sticker on offer, grouped by `category` in the order to show, and
+    the colours each one comes in."""
+    return {
+        "categories": list(stickers.CATEGORIES),
+        "colors": [
+            {"id": c, "hex": "#%02x%02x%02x" % rgb}
+            for c, rgb in stickers.COLORS.items()
+        ],
+        "stickers": [_sticker_dict(st) for st in stickers.STICKERS],
+    }
+
+
+@app.get("/api/stickers/{sticker_id}.png")
+def sticker_png(sticker_id: str, color: str = stickers.DEFAULT_COLOR) -> Response:
+    """A small copy of the sticker, for the shelf."""
+    if sticker_id not in stickers.catalog():
+        raise HTTPException(404, "sticker not found")
+    if color not in stickers.COLORS:
+        raise HTTPException(422, f"no colour {color!r}")
+    body = stickers.png_bytes(sticker_id, color, stickers.PREVIEW_SIZE)
+    # a sticker never changes under its id
+    return Response(
+        content=body,
+        media_type="image/png",
+        headers={"cache-control": "public, max-age=604800"},
+    )
+
+
+@app.post("/api/jobs/{job_id}/stickers", status_code=201)
+def add_sticker(job_id: str, body: dict = Body(...)) -> dict[str, Any]:
+    """Brings a sticker, in one colour, into the match's library.
+
+    It comes out `ready` straight away: the server drew it, so it already
+    knows its size, and there is nothing to analyse. Adding the same sticker in
+    the same colour again answers the item already there.
+    """
+    sticker_id = str(body.get("sticker_id") or "")
+    color = str(body.get("color") or stickers.DEFAULT_COLOR)
+    sticker = stickers.catalog().get(sticker_id)
+    if sticker is None:
+        raise HTTPException(404, f"sticker {sticker_id!r} not found")
+    if color not in stickers.COLORS:
+        raise HTTPException(422, f"no colour {color!r}")
+    library_id = stickers.library_id(sticker_id, color)
+
+    with session() as s:
+        if s.get(Job, job_id) is None:
+            raise HTTPException(404, "job not found")
+        existing = s.scalars(
+            select(Media).where(
+                Media.job_id == job_id, Media.sticker_id == library_id
+            )
+        ).first()
+        if existing is not None and existing.status == TrackStatus.READY:
+            return _media_dict(existing)
+
+    media_id = new_id()
+    storage = get_storage()
+    key = storage.put_stream(
+        f"{job_id}/media/{media_id}.png",
+        io.BytesIO(stickers.png_bytes(sticker_id, color)),
+    )
+    thumb_key = storage.put_stream(
+        f"{job_id}/media/{media_id}.thumb.png",
+        io.BytesIO(stickers.png_bytes(sticker_id, color, stickers.PREVIEW_SIZE)),
+    )
+    with session() as s:
+        item = Media(
+            id=media_id,
+            job_id=job_id,
+            kind=MediaKind.IMAGE,
+            status=TrackStatus.READY,
+            name=f"{sticker.name} ({color})",
+            key=key,
+            thumb_key=thumb_key,
+            sticker_id=library_id,
+            width=stickers.SIZE,
+            height=stickers.SIZE,
         )
         s.add(item)
         s.flush()
