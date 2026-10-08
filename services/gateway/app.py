@@ -68,7 +68,9 @@ from owcore.preview import preview_window
 from owcore.storage import get_storage
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"}
-AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus"}
+#: `.weba` is what the editor's voice recorder sends from Chrome: WebM holding
+#: only Opus audio, which `.webm` would have filed as video
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus", ".weba"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 CHUNK = 1024 * 256
 
@@ -105,6 +107,7 @@ AUDIO_MIME = {
     ".ogg": "audio/ogg",
     ".flac": "audio/flac",
     ".opus": "audio/ogg",
+    ".weba": "audio/webm",
 }
 
 
@@ -258,7 +261,9 @@ def _job_dict(job: Job, *, full: bool = False) -> dict[str, Any]:
         # `tracks` is still only the music: it is what the track picker uses,
         # and a two-second whoosh is not a song to build a montage on
         data["tracks"] = [
-            _media_dict(m) for m in library if m.is_audio and not m.sfx_id
+            _media_dict(m)
+            for m in library
+            if m.is_audio and not m.sfx_id and not m.voice
         ]
         # the montages come back with the job: that is how the screen rebuilds
         # itself after an F5, and it is the list the picker shows
@@ -786,6 +791,7 @@ def _media_dict(m: Media) -> dict[str, Any]:
     }
     if m.is_audio:
         data["sfx_id"] = m.sfx_id or None
+        data["voice"] = bool(m.voice)
         data |= {
             "bpm": round(m.bpm, 2),
             "beats": m.beats or [],
@@ -800,7 +806,11 @@ def _media_dict(m: Media) -> dict[str, Any]:
 
 
 def _store_media(
-    job_id: str, upload: UploadFile, kind: MediaKind, expected_bytes: int = 0
+    job_id: str,
+    upload: UploadFile,
+    kind: MediaKind,
+    expected_bytes: int = 0,
+    voice: bool = False,
 ) -> str:
     """Stores the upload and asks for it to be analysed. Returns the id."""
     media_id = new_id()
@@ -821,6 +831,7 @@ def _store_media(
                 status=TrackStatus.PENDING,
                 name=upload.filename or "upload",
                 key=key,
+                voice=voice,
             )
         )
     get_bus().publish(STREAM_MEDIA, MediaUploaded(media_id=media_id).model_dump())
@@ -849,6 +860,7 @@ def add_media(
     job_id: str,
     file: UploadFile = File(..., description="video, image or audio"),
     size: int = Form(0, description="file size, to verify the upload"),
+    voice: bool = Form(False, description="a voice-over recorded in the editor"),
 ) -> dict[str, Any]:
     """Brings a file into the match's library.
 
@@ -867,7 +879,9 @@ def add_media(
             f"don't know what to do with {file.filename!r}: video, image and "
             "audio are accepted",
         )
-    media_id = _store_media(job_id, file, kind, size)
+    if voice and kind != MediaKind.AUDIO:
+        raise HTTPException(422, "a voice-over is audio")
+    media_id = _store_media(job_id, file, kind, size, voice=voice)
     return {"id": media_id, "job_id": job_id, "kind": kind,
             "status": TrackStatus.PENDING}
 

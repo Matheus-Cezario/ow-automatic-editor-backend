@@ -266,6 +266,17 @@ any block. A picture you bring yourself (a hero icon, a logo) can be placed the
 same way: **Whole** on its panel shows all of it, transparent around, instead
 of filling the frame.
 
+### Talking over it, and subtitles
+
+The **microphone** button records a voice-over from the playhead while the
+montage plays, so the words follow the picture; it lands on a **Voice** layer
+exactly where the recording started. While it speaks, the music and the game
+step back to the duck level and come back after.
+
+**Subtitles** live in the text menu: write one at the playhead, import an
+`.srt` or `.vtt`, or download the montage's subtitles as `.srt` for a platform
+that shows its own captions.
+
 ### Choosing the output format
 
 A montage has no format: it has cuts, layers and effects. The format is the
