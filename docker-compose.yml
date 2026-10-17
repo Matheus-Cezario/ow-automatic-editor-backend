@@ -104,22 +104,32 @@ services:
   detector-kills:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_kills } }
+    deploy:
+      replicas: ${OW_DETECTOR_REPLICAS:-1}
 
   detector-survival:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_survival } }
+    deploy:
+      replicas: ${OW_DETECTOR_REPLICAS:-1}
 
   detector-ults:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_ults } }
+    deploy:
+      replicas: ${OW_DETECTOR_REPLICAS:-1}
 
   detector-banner:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_banner } }
+    deploy:
+      replicas: ${OW_DETECTOR_REPLICAS:-1}
 
   detector-killfeed:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: detector_killfeed } }
+    deploy:
+      replicas: ${OW_DETECTOR_REPLICAS:-1}
 
   planner:
     <<: *worker
@@ -133,9 +143,13 @@ services:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: beats } }
 
+  # copies compete for the same queue (one consumer group), so each render
+  # goes to one of them; each copy runs its own ffmpeg, so give it the CPU
   editor:
     <<: *worker
     build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: editor } }
+    deploy:
+      replicas: ${OW_EDITOR_REPLICAS:-1}
 
   # the exact preview: the final video's graph on a small frame, on a queue of
   # its own so it never waits behind a full render
