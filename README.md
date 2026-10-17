@@ -159,7 +159,12 @@ packages/owcore/   shared core, installed in each service
   bus.py           bus (Redis Streams | disk queue)
   storage.py       blobs (S3 | folder)
   db.py            SQLAlchemy (Postgres | SQLite)
-  models.py        domain + tables + bus messages
+  models/          the shared models, split by subject (all re-exported):
+    enums.py       ids, clock, status enums
+    analysis.py    crops, detected events, job parameters
+    timeline.py    the montage the editor renders (the app mirrors it)
+    messages.py    bus streams and messages
+    tables.py      the database tables
   rules.py         rules that cross detectors (pure function)
   timeline.py      manual montage: blocks → pieces to cut (pure function)
   vision.py        computer vision primitives — includes the ability icon
@@ -248,6 +253,8 @@ Everything through environment variables prefixed `OW_` (see `.env.example`):
 | `OW_DETECTOR_TIMEOUT_S` | `900` | when the planner gives up on a silent detector |
 | `OW_STREAM_MAXLEN` | `10000` | cap on messages per Redis stream. Without it Redis RAM grows with the number of matches already processed: `XACK` does not delete the entry |
 | `OW_BUS_RETENTION_S` | `3600` | how long a message already finished by every group stays in the disk queue before being swept (local mode) |
+| `OW_EDITOR_REPLICAS` | `1` | copies of the `editor` in the compose. Two copies render two requests at once instead of queueing them; each runs its own ffmpeg, so only raise it with CPU to spare |
+| `OW_DETECTOR_REPLICAS` | `1` | copies of **each** detector in the compose, to analyse several matches at once. Every copy loads OpenCV (~80 MB, see below) |
 | `OW_DB_POOL_SIZE` / `OW_DB_MAX_OVERFLOW` | `2` / `3` | connections per process. The default suits a single-threaded worker; the gateway raises it to `10`/`10` in the compose |
 
 ### Memory

@@ -938,14 +938,14 @@ def test_the_time_left_comes_from_the_work_since_it_started(isolated):
 
     from owcore.models import Render, utcnow
 
-    gateway = service_module("gateway", "app")
+    common = service_module("gateway", "common")
     r = Render(job_id="x", status="rendering", progress=0.1 + 0.85 * 0.5,
                started_at=utcnow() - timedelta(seconds=60))
-    assert gateway._render_eta_s(r) == pytest.approx(60, abs=2)
+    assert common._render_eta_s(r) == pytest.approx(60, abs=2)
     r.progress = 0.11
-    assert gateway._render_eta_s(r) is None, "too early to say"
+    assert common._render_eta_s(r) is None, "too early to say"
     r.status = "pending"
-    assert gateway._render_eta_s(r) is None
+    assert common._render_eta_s(r) is None
 
 
 def test_stopping_from_the_progress_callback_kills_ffmpeg(isolated):

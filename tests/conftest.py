@@ -77,6 +77,20 @@ def isolated(tmp_path, monkeypatch):
     reset()
 
 
+@pytest.fixture(autouse=True)
+def table_owners():
+    """Fails the test in which a domain wrote to a table it does not own
+    (`tests/ownership.py`)."""
+    import ownership
+
+    ownership.install()
+    ownership.violations.clear()
+    yield
+    found = sorted(set(ownership.violations))
+    ownership.violations.clear()
+    assert not found, "writes outside the table's owner:\n" + "\n".join(found)
+
+
 needs_sample = pytest.mark.skipif(
     not SAMPLE.exists(),
     reason="run: python tools/make_sample.py --out data/sample/match.mp4 "
