@@ -40,7 +40,6 @@ from common import (
     CHUNK,
     VIDEO_EXTS,
     VIDEO_MIME,
-    _adopt_old_draft,
     _as_aware,
     _clip_dict,
     _iso,
@@ -52,6 +51,7 @@ from common import (
     _serve_blob,
     _store_upload,
 )
+from routers.montagens import _adopt_old_draft
 
 LOG = logging.getLogger("gateway")
 router = APIRouter()

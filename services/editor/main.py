@@ -21,7 +21,7 @@ from typing import Any
 
 from owcore.config import get_settings
 from owcore.db import session
-from owcore.jobs import fail_render, render_cancelled, set_render_status
+from owcore.renders import fail_render, render_cancelled, set_render_status
 from owcore.models import (
     CLIP_KIND_CUSTOM,
     STREAM_RENDER_READY,

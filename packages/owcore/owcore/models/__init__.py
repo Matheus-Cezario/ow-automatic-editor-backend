@@ -57,6 +57,7 @@ from .tables import (  # noqa: F401
     Preset,
     Preview,
     Render,
+    TABLE_OWNER,
 )
 from .timeline import (  # noqa: F401
     EASE_SHAPES,

@@ -12,7 +12,7 @@ from typing import Any, Iterator
 from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 
-from owcore.models import Clip, Job, Media, Render, RenderStatus, utcnow
+from owcore.models import Clip, Media, Render, RenderStatus, utcnow
 from owcore.models import Montage as MontageModel
 from owcore.storage import get_storage
 
@@ -292,23 +292,3 @@ def _montage_dict(m: MontageModel, *, full: bool = False) -> dict[str, Any]:
     if full:
         d["data"] = m.data or {}
     return d
-
-
-def _adopt_old_draft(s: Any, job: Job) -> None:
-    """Brings the job's single montage into the list of named montages.
-
-    Until Phase 8 there was a single one, in a column of the job itself. Doing
-    this on read, and not in a database migration, is the same choice as the
-    rest of the system: the code that reads is what knows how to convert the
-    old format, and so a match untouched for months still opens.
-    """
-    if not job.draft or job.montages:
-        return
-    # through the relationship, not through `s.add`: that way `job.montages`
-    # already sees it within this same request, which is where it must appear
-    job.montages.append(
-        MontageModel(name=job.draft.get("title") or "Montage 1", data=job.draft)
-    )
-    # the column is cleared so there are not two truths about the same montage
-    job.draft = {}
-    s.flush()

@@ -22,9 +22,29 @@ from owcore.models import (
 )
 from owcore.models import Montage as MontageModel
 
-from common import _adopt_old_draft, _as_aware, _iso, _montage_dict
+from common import _as_aware, _iso, _montage_dict
 
 router = APIRouter()
+
+
+def _adopt_old_draft(s: Any, job: Job) -> None:
+    """Brings the job's single montage into the list of named montages.
+
+    Until Phase 8 there was a single one, in a column of the job itself. Doing
+    this on read, and not in a database migration, is the same choice as the
+    rest of the system: the code that reads is what knows how to convert the
+    old format, and so a match untouched for months still opens.
+    """
+    if not job.draft or job.montages:
+        return
+    # through the relationship, not through `s.add`: that way `job.montages`
+    # already sees it within this same request, which is where it must appear
+    job.montages.append(
+        MontageModel(name=job.draft.get("title") or "Montage 1", data=job.draft)
+    )
+    # the column is cleared so there are not two truths about the same montage
+    job.draft = {}
+    s.flush()
 
 
 @router.put("/api/jobs/{job_id}/draft")

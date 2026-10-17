@@ -361,3 +361,22 @@ class Preset(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )
+
+
+#: The domain that writes each table. Any domain may read any table -- the
+#: render reads the montage, the analysis lists renders -- but writes come only
+#: from the owner's code, so a change to a table has one place to look.
+#: `tests/ownership.py` holds every test to it, with the few exceptions it
+#: names.
+TABLE_OWNER = {
+    "jobs": "analise",
+    "events": "analise",
+    "detector_reports": "analise",
+    "tracks": "midia",
+    "montages": "montagens",
+    "montage_versions": "montagens",
+    "presets": "montagens",
+    "renders": "render",
+    "clips": "render",
+    "previews": "render",
+}
