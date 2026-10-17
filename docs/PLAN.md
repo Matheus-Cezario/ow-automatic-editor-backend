@@ -49,7 +49,7 @@ putting each moment at the point of it they want, for as long as they want.
    Operational corollary: **every kind of detected event must reach the
    editor's shelf.** A detector whose result does not become a block is wasted
    CPU work. The list lives in two places that must agree — `THUMB_KINDS`
-   (`owcore/models.py`, what thumbnails are extracted for) and `_usefulMoments`
+   (`owcore/models/analysis.py`, what thumbnails are extracted for) and `_usefulMoments`
    (`frontend/lib/screens/timeline_screen.dart`, what the screen shows).
    Diverging gives a card without a frame, or a moment that does not exist.
 6. **Analysis and rendering are separate phases.** The analysis is expensive

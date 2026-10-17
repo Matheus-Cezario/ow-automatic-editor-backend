@@ -159,7 +159,12 @@ packages/owcore/   shared core, installed in each service
   bus.py           bus (Redis Streams | disk queue)
   storage.py       blobs (S3 | folder)
   db.py            SQLAlchemy (Postgres | SQLite)
-  models.py        domain + tables + bus messages
+  models/          the shared models, split by subject (all re-exported):
+    enums.py       ids, clock, status enums
+    analysis.py    crops, detected events, job parameters
+    timeline.py    the montage the editor renders (the app mirrors it)
+    messages.py    bus streams and messages
+    tables.py      the database tables
   rules.py         rules that cross detectors (pure function)
   timeline.py      manual montage: blocks → pieces to cut (pure function)
   vision.py        computer vision primitives — includes the ability icon
