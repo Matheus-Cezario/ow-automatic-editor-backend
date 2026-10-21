@@ -772,6 +772,11 @@ class TimelineClip(BaseModel):
     #: is `duration_s`, and that is what the user drags.
     speed: float = 1.0
 
+    #: Slow motion with in-between frames made by motion interpolation, instead
+    #: of each source frame simply lasting longer (which stutters). Only
+    #: matters while the clip runs slower than the recording.
+    smooth: bool = False
+
     @model_validator(mode="after")
     def _check_coherent(self) -> "TimelineClip":
         if self.start_s < 0:

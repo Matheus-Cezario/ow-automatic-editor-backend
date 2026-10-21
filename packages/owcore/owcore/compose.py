@@ -649,6 +649,13 @@ def _video_chain(
         # dividing the PTS speeds it up: at 2x, each frame is worth half the time
         steps.append(f"setpts=PTS/{clip.speed:.4f}")
 
+    if clip.smooth and not clip.freeze and (ramp is not None or clip.speed < 1.0):
+        # Slowed frames are spread thin in time: motion interpolation fills the
+        # gaps back up to the output rate, so the slow motion flows instead of
+        # stuttering. After the speed (which is what spread them) and before
+        # every effect, so the effects see the full frame rate.
+        steps.append(f"minterpolate=fps={fps:.3f}:mi_mode=mci:mc_mode=aobmc:vsbmc=1")
+
     if clip.source is ClipSource.TEXT:
         # the canvas already arrives as rgba from the source itself (see
         # `_clip_input`): the text is drawn straight onto it

@@ -2991,6 +2991,27 @@ def test_a_ramp_shows_the_source_where_the_integral_says(isolated, tmp_path):
     assert shown(1.0) == pytest.approx(1 + _ramp_source_offset(1.0), abs=0.2)
 
 
+def test_smooth_slow_motion_interpolates_only_what_is_slowed(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def graph(**kw):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=1, **kw),
+        ])])
+        return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
+                             fps=30, source_duration_s=60).filter_complex
+
+    assert "minterpolate" not in graph(speed=0.5), "off unless asked"
+    assert "minterpolate=fps=30.000" in graph(speed=0.5, smooth=True)
+    assert "minterpolate" in graph(keys=_RAMP, smooth=True), "a ramp slows too"
+    assert "minterpolate" not in graph(speed=2, smooth=True), "nothing to fill"
+    assert "minterpolate" not in graph(freeze=True, smooth=True)
+    # after the speed that spread the frames, never before it
+    g = graph(speed=0.5, smooth=True)
+    assert g.index("setpts=PTS/0.5000") < g.index("minterpolate")
+
+
 # ── fonts and animated text ────────────────────────────────────────────────
 
 
