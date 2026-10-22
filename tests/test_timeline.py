@@ -3012,6 +3012,66 @@ def test_smooth_slow_motion_interpolates_only_what_is_slowed(isolated):
     assert g.index("setpts=PTS/0.5000") < g.index("minterpolate")
 
 
+def test_rotation_and_colour_can_be_keyframed(isolated):
+    from owcore.compose import compose_graph
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    def graph(**kw):
+        t = Timeline(layers=[Layer(clips=[
+            TimelineClip(at_s=0, duration_s=2, start_s=1, **kw),
+        ])])
+        return compose_graph(t, source=Path("x.mp4"), width=640, height=360,
+                             fps=30, source_duration_s=60).filter_complex
+
+    plain = graph()
+    assert "rotate=" not in plain and "eq=" not in plain
+
+    turned = graph(keys=[{"prop": "rotation", "t": 0, "value": 0},
+                         {"prop": "rotation", "t": 1, "value": 90}])
+    assert "rotate=a='(" in turned and "*PI/180'" in turned
+    assert "ow=736:oh=736" in turned, "the diagonal of 640x360, made even"
+
+    graded = graph(keys=[{"prop": "saturation", "t": 0, "value": 0},
+                         {"prop": "saturation", "t": 1, "value": 1.5}],
+                   color={"brightness": 0.1})
+    assert "saturation='if(lt(t," in graded and ":eval=frame" in graded
+    assert "brightness=0.1000" in graded, "what is not keyed stays static"
+    assert "contrast=1.0000" in graded
+
+
+def test_a_keyframed_saturation_really_fades_the_colour(isolated, tmp_path):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    source = _time_coded_source(tmp_path)  # red ramps up: colourful
+    t = Timeline(layers=[Layer(clips=[TimelineClip(
+        at_s=0, duration_s=2, start_s=1,
+        keys=[{"prop": "saturation", "t": 0, "value": 1},
+              {"prop": "saturation", "t": 1, "value": 0}],
+    )])])
+    video = compose_and_render(t, source, tmp_path / "desat.mp4")
+
+    def colour(at: float) -> float:
+        px = raw_frame(video, at).reshape(-1, 3)
+        return float(abs(px[:, 0] - px[:, 1]).mean())
+
+    assert colour(0.1) > 3 * colour(1.8), "the colour drains over the clip"
+
+
+def test_a_keyframed_rotation_renders_and_turns_the_picture(isolated, tmp_path):
+    from owcore.models import Layer, Timeline, TimelineClip
+
+    source = _time_coded_source(tmp_path)
+    t = Timeline(layers=[Layer(clips=[TimelineClip(
+        at_s=0, duration_s=2, start_s=1,
+        keys=[{"prop": "rotation", "t": 0, "value": 0},
+              {"prop": "rotation", "t": 1, "value": 90}],
+    )])])
+    video = compose_and_render(t, source, tmp_path / "turn.mp4")
+    start, end = raw_frame(video, 0.1), raw_frame(video, 1.9)
+    # a quarter turn of a left-to-right gradient-in-time frame changes it
+    assert abs(start - end).mean() > 1, "the picture is not the same at the end"
+
+
 # ── fonts and animated text ────────────────────────────────────────────────
 
 

@@ -537,7 +537,31 @@ _WIPE_EDGE = {
 }
 
 
-def _crop_turn_chain(t: Transform, width: int, height: int) -> list[str]:
+def _color_chain(clip: TimelineClip, clock: KeyClock) -> str | None:
+    """The `eq` of the colour adjustment: fixed numbers, or -- when a property
+    has keyframes -- an expression in the frame's time, evaluated per frame."""
+    c = clip.color
+    props = {
+        "brightness": (KeyProp.BRIGHTNESS, c.brightness),
+        "contrast": (KeyProp.CONTRAST, c.contrast),
+        "saturation": (KeyProp.SATURATION, c.saturation),
+    }
+    animated = {
+        name: _animated(clip, prop, "t", clock) for name, (prop, _) in props.items()
+    }
+    if c.is_neutral and not any(animated.values()):
+        return None
+    parts = [
+        f"{name}='{animated[name]}'" if animated[name] else f"{name}={static:.4f}"
+        for name, (_, static) in props.items()
+    ]
+    eval_frame = ":eval=frame" if any(animated.values()) else ""
+    return "eq=" + ":".join(parts) + eval_frame
+
+
+def _crop_turn_chain(
+    t: Transform, width: int, height: int, rotation_expr: str | None = None
+) -> list[str]:
     """Crop, mirror and rotate the canvas-sized clip, in that order.
 
     The crop cuts the edges **away** -- the picture keeps its size and place
@@ -549,7 +573,7 @@ def _crop_turn_chain(t: Transform, width: int, height: int) -> list[str]:
     (`rotw`/`roth`); the overlay centres it and the canvas cuts what sticks
     out, as the editor's monitor does.
     """
-    if not (t.has_crop or t.has_turn):
+    if not (t.has_crop or t.has_turn or rotation_expr):
         return []
     steps = ["format=rgba"]
     if t.has_crop:
@@ -563,7 +587,14 @@ def _crop_turn_chain(t: Transform, width: int, height: int) -> list[str]:
         steps.append("hflip")
     if t.flip_v:
         steps.append("vflip")
-    if t.rotation % 360:
+    if rotation_expr:
+        # turning over time: the frame cannot grow with the angle, so it is
+        # as big as the diagonal -- big enough at every angle
+        diag = 2 * math.ceil(math.hypot(width, height) / 2)
+        steps.append(
+            f"rotate=a='({rotation_expr})*PI/180':ow={diag}:oh={diag}:c=none"
+        )
+    elif t.rotation % 360:
         a = f"{math.radians(t.rotation):.6f}"
         steps.append(
             f"rotate=a={a}:ow='rotw({a})':oh='roth({a})':c=none"
@@ -685,12 +716,9 @@ def _video_chain(
     else:
         steps += framing
 
-    if not clip.color.is_neutral:
-        steps.append(
-            f"eq=brightness={clip.color.brightness:.4f}"
-            f":contrast={clip.color.contrast:.4f}"
-            f":saturation={clip.color.saturation:.4f}"
-        )
+    color = _color_chain(clip, clock)
+    if color:
+        steps.append(color)
 
     if clip.source is not ClipSource.TEXT:
         steps += _fx_chain(clip, height)
@@ -703,7 +731,12 @@ def _video_chain(
         steps.append(f"colorkey=0x{k.hex}:{k.similarity:.3f}:{k.softness:.3f}")
 
     if clip.source is not ClipSource.TEXT:
-        steps += _crop_turn_chain(clip.transform, width, height)
+        steps += _crop_turn_chain(
+            clip.transform,
+            width,
+            height,
+            _animated(clip, KeyProp.ROTATION, "t", clock),
+        )
 
     # Keyframes run on the clip's own clock: `T` below is the frame's time
     # with the speed applied, starting at the clip's first frame

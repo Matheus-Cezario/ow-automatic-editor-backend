@@ -609,6 +609,12 @@ class KeyProp(StrEnum):
     VOLUME = "volume"
     #: `speed`: how fast the source runs. Keyframed, it is a speed ramp
     SPEED = "speed"
+    #: `transform.rotation`, in degrees
+    ROTATION = "rotation"
+    #: `color.brightness` / `color.contrast` / `color.saturation`
+    BRIGHTNESS = "brightness"
+    CONTRAST = "contrast"
+    SATURATION = "saturation"
 
 
 #: the range each animated property accepts -- the same one its static field
@@ -620,6 +626,10 @@ KEY_RANGES: dict[KeyProp, tuple[float, float]] = {
     KeyProp.OPACITY: (0.0, 1.0),
     KeyProp.VOLUME: (0.0, 4.0),
     KeyProp.SPEED: (0.1, 10.0),
+    KeyProp.ROTATION: (-360.0, 360.0),
+    KeyProp.BRIGHTNESS: (-1.0, 1.0),
+    KeyProp.CONTRAST: (0.0, 3.0),
+    KeyProp.SATURATION: (0.0, 3.0),
 }
 
 #: each easing as a function of the progress `u` (0 to 1) between two keys --
